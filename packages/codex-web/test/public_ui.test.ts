@@ -31,6 +31,9 @@ test('mobile UI exposes iOS PWA install metadata and registers a service worker'
   assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
   assert.match(serviceWorker, /self\.addEventListener\('install'/u);
   assert.match(serviceWorker, /self\.addEventListener\('fetch'/u);
+  assert.doesNotMatch(serviceWorker, /cached \|\| fetch\(request\)/u);
+  assert.match(serviceWorker, /fetch\(request\)/u);
+  assert.match(serviceWorker, /cache\.put\(request, response\.clone\(\)\)/u);
 });
 
 test('new sessions default to gpt-5.4 xhigh full access settings', async () => {
@@ -139,6 +142,19 @@ test('message input starts one line and auto-grows to a compact capped height', 
   assert.match(app, /textarea\.style\.height = 'auto';/u);
   assert.match(app, /Math\.min\(textarea\.scrollHeight, 116\)/u);
   assert.match(app, /autoGrowPromptInput\(promptInput\)/u);
+});
+
+test('chat and session list use separate scroll containers', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /html,\s*body\s*\{[^}]*overflow:\s*hidden;/su);
+  assert.match(styles, /#app\s*\{[^}]*height:\s*100dvh;[^}]*overflow:\s*hidden;/su);
+  assert.match(styles, /\.shell\s*\{[^}]*height:\s*100dvh;[^}]*overflow:\s*hidden;/su);
+  assert.match(styles, /\.screen\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/su);
+  assert.match(styles, /\.timeline\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.match(styles, /\.timeline\s*\{[^}]*overscroll-behavior:\s*contain;/su);
+  assert.match(styles, /\.session-list,\s*\.new-session-page\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.match(styles, /\.session-list,\s*\.new-session-page\s*\{[^}]*overscroll-behavior:\s*contain;/su);
 });
 
 test('mobile timeline reserves the measured composer height', async () => {

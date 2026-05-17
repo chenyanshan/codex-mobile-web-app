@@ -31,6 +31,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
   event.respondWith(
-    caches.match(request).then((cached) => cached || fetch(request)),
+    fetch(request)
+      .then((response) => {
+        if (response.ok) {
+          event.waitUntil(
+            caches.open(STATIC_CACHE).then((cache) => cache.put(request, response.clone())),
+          );
+        }
+        return response;
+      })
+      .catch(() => caches.match(request).then((cached) => cached || Response.error())),
   );
 });
