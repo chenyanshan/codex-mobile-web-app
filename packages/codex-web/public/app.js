@@ -531,6 +531,15 @@ async function onComposerSubmit(event) {
         settings,
       },
     });
+    if (turn.session) {
+      upsertSession(turn.session);
+      state.sessionId = turn.session.id;
+      state.currentSession = turn.session;
+      state.cwd = turn.session.cwd || state.cwd;
+      if (turn.recoveredFromMissingSession) {
+        state.error = 'Previous session was unavailable. Started a new session.';
+      }
+    }
     state.turnId = turn.turnId;
     state.status = 'Turn running';
     state.statusTone = 'warn';

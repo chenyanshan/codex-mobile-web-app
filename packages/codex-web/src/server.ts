@@ -471,7 +471,7 @@ async function startSessionTurn({
   sessionId: string;
   input: StartTurnInput;
   response: ServerResponse;
-}): Promise<{ turnId: string } | null> {
+}): Promise<{ turnId: string; session?: Awaited<ReturnType<CodexWebRuntime['createSession']>>; recoveredFromMissingSession?: boolean } | null> {
   try {
     return await runtime.startTurn(sessionId, input);
   } catch (error) {
@@ -480,15 +480,17 @@ async function startSessionTurn({
         level: 'warn',
         method: 'POST',
         path: `/api/sessions/${encodeURIComponent(sessionId)}/turns`,
-        status: 404,
-        code: 'session_not_found',
+        status: 202,
+        code: 'session_recovered',
         message: error instanceof Error ? error.message : String(error),
       });
-      writeJson(response, 404, {
-        error: 'session_not_found',
-        message: 'Selected session was not found. Start a new session.',
-      });
-      return null;
+      const session = await runtime.createSession({ settings: input.settings });
+      const turn = await runtime.startTurn(session.id, input);
+      return {
+        ...turn,
+        session,
+        recoveredFromMissingSession: true,
+      };
     }
     throw error;
   }

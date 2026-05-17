@@ -497,7 +497,8 @@ test('SSE route rejects missing bearer token', async () => {
   }
 });
 
-test('POST /api/sessions/:id/turns returns session_not_found for stale sessions', async () => {
+test('POST /api/sessions/:id/turns recovers stale sessions by starting a new session', async () => {
+  const calls: string[] = [];
   const server = createCodexWebServer({
     auth: {
       isConfigured: async () => true,
@@ -509,8 +510,16 @@ test('POST /api/sessions/:id/turns returns session_not_found for stale sessions'
     },
     runtime: {
       ...createRuntimeStub(),
-      startTurn: async () => {
-        throw new Error('Unknown session: stale_thread');
+      createSession: async () => {
+        calls.push('createSession');
+        return { id: 'thread_recovered', cwd: '/tmp', settings: {}, thread: {} };
+      },
+      startTurn: async (sessionId: string) => {
+        calls.push(`startTurn:${sessionId}`);
+        if (sessionId === 'stale_thread') {
+          throw new Error('Unknown session: stale_thread');
+        }
+        return { turnId: 'turn_recovered' };
       },
     } as any,
     config: createConfig(),
@@ -525,11 +534,22 @@ test('POST /api/sessions/:id/turns returns session_not_found for stale sessions'
       },
       body: JSON.stringify({ text: 'hi' }),
     });
-    assert.equal(response.status, 404);
+    assert.equal(response.status, 202);
     assert.deepEqual(await response.json(), {
-      error: 'session_not_found',
-      message: 'Selected session was not found. Start a new session.',
+      turnId: 'turn_recovered',
+      session: {
+        id: 'thread_recovered',
+        cwd: '/tmp',
+        settings: {},
+        thread: {},
+      },
+      recoveredFromMissingSession: true,
     });
+    assert.deepEqual(calls, [
+      'startTurn:stale_thread',
+      'createSession',
+      'startTurn:thread_recovered',
+    ]);
   } finally {
     await server.stop();
   }
