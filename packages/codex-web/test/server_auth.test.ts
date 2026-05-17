@@ -497,6 +497,44 @@ test('SSE route rejects missing bearer token', async () => {
   }
 });
 
+test('POST /api/sessions/:id/turns returns session_not_found for stale sessions', async () => {
+  const server = createCodexWebServer({
+    auth: {
+      isConfigured: async () => true,
+      login: async () => ({ token: 'cw_token', session: { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }, configuredNow: false }),
+      verifyToken: async (token) => token === 'cw_token'
+        ? { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }
+        : null,
+      logout: async () => {},
+    },
+    runtime: {
+      ...createRuntimeStub(),
+      startTurn: async () => {
+        throw new Error('Unknown session: stale_thread');
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/stale_thread/turns`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text: 'hi' }),
+    });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), {
+      error: 'session_not_found',
+      message: 'Selected session was not found. Start a new session.',
+    });
+  } finally {
+    await server.stop();
+  }
+});
+
 test('SSE route accepts bearer auth and streams events', async () => {
   let unsubscribeCalled = false;
   let resolveUnsubscribed: (() => void) | null = null;

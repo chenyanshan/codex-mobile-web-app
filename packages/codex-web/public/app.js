@@ -178,7 +178,7 @@ function renderMain() {
             <div class="control-group">
               <label for="reasoning-select">Reasoning</label>
               <select id="reasoning-select" name="reasoningEffort">
-                ${renderOptions(['low', 'medium', 'high'], state.reasoningEffort)}
+                ${renderOptions(['low', 'medium', 'high', 'xhigh'], state.reasoningEffort)}
               </select>
             </div>
             <div class="control-group">
@@ -189,8 +189,8 @@ function renderMain() {
               </div>
             </div>
             <div class="control-group">
-              <label for="cwd-input">CWD</label>
-              <input id="cwd-input" type="text" value="${escapeAttribute(state.cwd)}" placeholder="Server default">
+              <label for="cwd-input">${state.sessionId ? 'Session CWD' : 'New CWD'}</label>
+              <input id="cwd-input" type="text" value="${escapeAttribute(state.cwd)}" placeholder="Server default" ${state.sessionId ? 'disabled' : ''}>
             </div>
           </div>
           <textarea id="prompt-input" name="prompt" placeholder="Send a turn to Codex" ${state.pendingTurn ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
@@ -324,7 +324,8 @@ function renderSessionOptions() {
 function renderOptions(values, current) {
   return values.map((value) => {
     const selected = value === current ? ' selected' : '';
-    return `<option value="${escapeAttribute(value)}"${selected}>${escapeHtml(startCase(value))}</option>`;
+    const label = value === 'xhigh' ? 'xhigh' : startCase(value);
+    return `<option value="${escapeAttribute(value)}"${selected}>${escapeHtml(label)}</option>`;
   }).join('');
 }
 
@@ -352,7 +353,7 @@ function bindGlobalEvents() {
   const sessionSelect = document.querySelector('#session-select');
   if (sessionSelect) {
     sessionSelect.addEventListener('change', (event) => {
-      selectSession(event.target.value);
+      void selectSession(event.target.value);
     });
   }
 
@@ -443,7 +444,7 @@ async function onLogout() {
   setLoggedOut();
 }
 
-function selectSession(sessionId) {
+async function selectSession(sessionId) {
   if (state.pendingTurn) {
     render();
     return;
@@ -453,10 +454,24 @@ function selectSession(sessionId) {
     startNewSession({ preserveCwd: true });
     return;
   }
+  state.status = 'Checking session';
+  state.statusTone = 'warn';
+  render();
+  try {
+    const payload = await apiFetch(`/api/sessions/${encodeURIComponent(nextSession.id)}`);
+    upsertSession(payload.session);
+  } catch (error) {
+    if (handleMissingSession(error, '')) {
+      return;
+    }
+    handleApiError(error);
+    return;
+  }
+  const refreshedSession = state.sessions.find((session) => session.id === sessionId) || nextSession;
   stopStream();
-  state.sessionId = nextSession.id;
-  state.currentSession = nextSession;
-  state.cwd = nextSession.cwd || '';
+  state.sessionId = refreshedSession.id;
+  state.currentSession = refreshedSession;
+  state.cwd = refreshedSession.cwd || '';
   resetTurnState();
   state.error = '';
   state.status = 'Ready';
@@ -523,6 +538,9 @@ async function onComposerSubmit(event) {
     void streamTurnEvents(turn.turnId);
   } catch (error) {
     state.pendingTurn = false;
+    if (handleMissingSession(error, promptToSend)) {
+      return;
+    }
     handleApiError(error);
   }
 }
@@ -813,6 +831,39 @@ function resetTurnState() {
   state.approvals = new Map();
 }
 
+function handleMissingSession(error, promptToRestore) {
+  if (!isMissingSessionError(error)) {
+    return false;
+  }
+  const missingSessionId = state.sessionId;
+  if (missingSessionId) {
+    state.sessions = state.sessions.filter((session) => session.id !== missingSessionId);
+  }
+  stopStream();
+  state.sessionId = null;
+  state.currentSession = null;
+  state.turnId = null;
+  state.pendingTurn = false;
+  state.timeline = [];
+  state.batches = new Map();
+  state.approvals = new Map();
+  if (promptToRestore) {
+    state.prompt = promptToRestore;
+  }
+  state.status = 'Ready';
+  state.statusTone = 'warn';
+  state.error = 'Selected session was not found. Start a new session.';
+  render();
+  return true;
+}
+
+function isMissingSessionError(error) {
+  const code = error?.payload?.error;
+  const message = error?.payload?.message || error?.message || '';
+  return error?.status === 404 && code === 'session_not_found'
+    || /thread not found|session not found|unknown session|unknown thread/i.test(message);
+}
+
 function normalizeSessions(payload) {
   const items = Array.isArray(payload?.items) ? payload.items : [];
   return items
@@ -866,9 +917,9 @@ function currentWorkspaceLabel() {
 
 function sessionComposerNote() {
   if (state.sessionId) {
-    return 'Sending resumes the selected session. CWD edits apply to the next new session.';
+    return 'Selected session CWD is fixed. New uses the New button.';
   }
-  return 'New session starts on Send with the CWD above.';
+  return 'New session starts on Send with the New CWD above.';
 }
 
 function sessionOptionLabel(session) {

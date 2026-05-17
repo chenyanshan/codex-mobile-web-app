@@ -307,7 +307,15 @@ async function handleRequest({
       writeJson(response, 400, { error: 'text is required' });
       return;
     }
-    const turn = await runtime.startTurn(sessionId, body as unknown as StartTurnInput);
+    const turn = await startSessionTurn({
+      runtime,
+      sessionId,
+      input: body as unknown as StartTurnInput,
+      response,
+    });
+    if (!turn) {
+      return;
+    }
     writeJson(response, 202, turn);
     return;
   }
@@ -451,6 +459,39 @@ async function loginWithPassword({
     }
     throw error;
   }
+}
+
+async function startSessionTurn({
+  runtime,
+  sessionId,
+  input,
+  response,
+}: {
+  runtime: CodexWebRuntime;
+  sessionId: string;
+  input: StartTurnInput;
+  response: ServerResponse;
+}): Promise<{ turnId: string } | null> {
+  try {
+    return await runtime.startTurn(sessionId, input);
+  } catch (error) {
+    if (isSessionNotFoundError(error)) {
+      writeJson(response, 404, {
+        error: 'session_not_found',
+        message: 'Selected session was not found. Start a new session.',
+      });
+      return null;
+    }
+    throw error;
+  }
+}
+
+function isSessionNotFoundError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unknown session/i.test(message)
+    || /thread not found/i.test(message)
+    || /session not found/i.test(message)
+    || /unknown thread/i.test(message);
 }
 
 function extractBearerToken(request: IncomingMessage): string | null {

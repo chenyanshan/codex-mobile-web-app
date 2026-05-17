@@ -367,6 +367,9 @@ export class CodexWebRuntime {
     try {
       return await this.client.readThread(threadId, true);
     } catch (error) {
+      if (isMissingThreadError(error)) {
+        return null;
+      }
       if (!isIncludeTurnsRetryableError(error)) {
         throw error;
       }
@@ -465,4 +468,11 @@ function isIncludeTurnsRetryableError(error: unknown): boolean {
     || /ephemeral threads do not support includeTurns/i.test(message)
     || /not materialized yet/i.test(message)
     || /empty session file/i.test(message);
+}
+
+export function isMissingThreadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /thread not found/i.test(message)
+    || /session not found/i.test(message)
+    || /unknown thread/i.test(message);
 }

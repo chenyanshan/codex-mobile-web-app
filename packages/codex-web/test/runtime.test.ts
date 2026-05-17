@@ -153,6 +153,37 @@ test('runtime passes requested cwd and settings when creating a session', async 
   }]);
 });
 
+test('runtime treats missing native threads as absent web sessions', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [createThread('thread_missing')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_1', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => {
+      throw new Error('Thread not found');
+    },
+    writeConfigValue: async () => {},
+    startTurn: async () => {
+      throw new Error('unused');
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  assert.equal(await runtime.readSession('thread_missing'), null);
+  await assert.rejects(
+    runtime.startTurn('thread_missing', { text: 'hi' }),
+    /Unknown session: thread_missing/u,
+  );
+});
+
 test('runtime emits normalized turn and approval events and maps approval decisions', async () => {
   const responded: Array<{ requestId: string; option: 1 | 2 | 3 }> = [];
   const approvalRequest: ProviderApprovalRequest = {
