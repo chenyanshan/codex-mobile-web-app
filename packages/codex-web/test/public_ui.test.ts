@@ -152,6 +152,71 @@ test('timeline cache bounds persisted batches and approvals', async () => {
   assert.ok(entry.approvals.every(([, item]) => item.summary.command.length <= api.MAX_TIMELINE_SUMMARY_TEXT));
 });
 
+test('history hydration includes recent assistant app-server messages', async () => {
+  const { api } = await loadAppHarness();
+
+  const timeline = api.hydrateTimelineFromSession({
+    id: 'session_history',
+    firstUserInput: 'Preview only',
+    thread: {
+      turns: [
+        {
+          id: 'turn_1',
+          items: [
+            { type: 'message', role: 'user', text: 'First user question' },
+            { type: 'agentMessage', role: null, text: 'First assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_2',
+          items: [
+            { type: 'message', role: 'user', text: 'Second user question' },
+            { type: 'assistantMessage', role: null, text: 'Second assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_3',
+          items: [
+            { type: 'message', role: 'user', text: 'Third user question' },
+            { type: 'message', role: 'assistant', text: 'Third assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_4',
+          items: [
+            { type: 'message', role: 'user', text: 'Newest user question' },
+            { type: 'agentMessage', role: null, text: 'Newest assistant answer' },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.equal(
+    JSON.stringify(timeline.map((item) => [item.role, item.text])),
+    JSON.stringify([
+      ['user', 'Second user question'],
+      ['assistant', 'Second assistant answer'],
+      ['user', 'Third user question'],
+      ['assistant', 'Third assistant answer'],
+      ['user', 'Newest user question'],
+      ['assistant', 'Newest assistant answer'],
+    ]),
+  );
+});
+
+test('session list supports project filtering and archive actions', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /projectFilter:\s*'all'/u);
+  assert.match(app, /renderProjectFilter\(\)/u);
+  assert.match(app, /data-project-filter/u);
+  assert.match(app, /function filteredSessions\(\)/u);
+  assert.match(app, /data-session-archive-id/u);
+  assert.match(app, /async function archiveSession\(sessionId\)/u);
+  assert.match(app, /apiFetch\(`\/api\/sessions\/\$\{encodeURIComponent\(sessionId\)\}`,\s*\{\s*method:\s*'DELETE'/su);
+});
+
 async function loadAppHarness(overrides = {}) {
   const app = await readFile(appUrl, 'utf8');
   const storage = new Map();
@@ -210,6 +275,7 @@ globalThis.__codexWebTest = {
   MAX_TIMELINE_SUMMARY_TEXT: typeof MAX_TIMELINE_SUMMARY_TEXT === 'number' ? MAX_TIMELINE_SUMMARY_TEXT : null,
   firstInputForSession,
   previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
+  hydrateTimelineFromSession,
   refreshCurrentSessionMetadata,
   saveCurrentTimeline,
 };`, context);

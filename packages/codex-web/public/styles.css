@@ -121,6 +121,32 @@ button:disabled {
   gap: 8px;
 }
 
+.project-filter {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  scrollbar-width: none;
+}
+
+.project-filter::-webkit-scrollbar {
+  display: none;
+}
+
+.project-filter button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.project-filter button[aria-pressed="true"] {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: white;
+}
+
 .session-strip {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -322,6 +348,25 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
+}
+
+.session-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.session-card-open {
+  min-width: 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+}
+
+.session-archive {
+  color: var(--muted);
 }
 
 .session-card-main,

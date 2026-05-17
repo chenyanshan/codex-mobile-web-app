@@ -57,6 +57,7 @@ export interface CodexWebRuntimeClient {
     ephemeral?: boolean | null;
   }): Promise<ProviderThreadStartResult>;
   readThread(threadId: string, includeTurns?: boolean): Promise<ProviderThreadSummary | null>;
+  archiveThread?(threadId: string): Promise<void>;
   writeConfigValue(args: {
     keyPath: string;
     value: unknown;
@@ -222,6 +223,19 @@ export class CodexWebRuntime {
       },
     });
     return this.toSession(thread);
+  }
+
+  async archiveSession(sessionId: string): Promise<boolean> {
+    const thread = await this.readThreadSummary(sessionId);
+    if (!thread) {
+      return false;
+    }
+    if (typeof this.client.archiveThread !== 'function') {
+      throw new Error('Thread archive is not supported by this Codex runtime');
+    }
+    await this.client.archiveThread(sessionId);
+    this.sessionSettings.delete(sessionId);
+    return true;
   }
 
   async startTurn(sessionId: string, input: StartTurnInput): Promise<{ turnId: string }> {

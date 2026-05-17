@@ -279,10 +279,20 @@ async function handleRequest({
   if (sessionMatch && method === 'GET') {
     const session = await runtime.readSession(decodeURIComponent(sessionMatch[1]!));
     if (!session) {
-      writeJson(response, 404, { error: 'Session not found' });
+      writeSessionNotFound(response);
       return;
     }
     writeJson(response, 200, { session });
+    return;
+  }
+
+  if (sessionMatch && method === 'DELETE') {
+    const archived = await runtime.archiveSession(decodeURIComponent(sessionMatch[1]!));
+    if (!archived) {
+      writeSessionNotFound(response);
+      return;
+    }
+    writeJson(response, 200, { ok: true });
     return;
   }
 
@@ -292,7 +302,7 @@ async function handleRequest({
     const body = await readJsonBody(request);
     const session = await runtime.updateSessionSettings(sessionId, body as UpdateSessionSettingsInput);
     if (!session) {
-      writeJson(response, 404, { error: 'Session not found' });
+      writeSessionNotFound(response);
       return;
     }
     writeJson(response, 200, { session });
@@ -471,7 +481,7 @@ async function startSessionTurn({
   sessionId: string;
   input: StartTurnInput;
   response: ServerResponse;
-}): Promise<{ turnId: string; session?: Awaited<ReturnType<CodexWebRuntime['createSession']>>; recoveredFromMissingSession?: boolean } | null> {
+}): Promise<{ turnId: string } | null> {
   try {
     return await runtime.startTurn(sessionId, input);
   } catch (error) {
@@ -480,20 +490,22 @@ async function startSessionTurn({
         level: 'warn',
         method: 'POST',
         path: `/api/sessions/${encodeURIComponent(sessionId)}/turns`,
-        status: 202,
-        code: 'session_recovered',
+        status: 404,
+        code: 'session_not_found',
         message: error instanceof Error ? error.message : String(error),
       });
-      const session = await runtime.createSession({ settings: input.settings });
-      const turn = await runtime.startTurn(session.id, input);
-      return {
-        ...turn,
-        session,
-        recoveredFromMissingSession: true,
-      };
+      writeSessionNotFound(response);
+      return null;
     }
     throw error;
   }
+}
+
+function writeSessionNotFound(response: ServerResponse): void {
+  writeJson(response, 404, {
+    error: 'session_not_found',
+    message: 'Selected session was not found.',
+  });
 }
 
 function isSessionNotFoundError(error: unknown): boolean {

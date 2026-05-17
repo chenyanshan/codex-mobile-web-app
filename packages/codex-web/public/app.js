@@ -18,6 +18,7 @@ const state = {
   sessionId: null,
   view: 'sessions',
   sortMode: 'time',
+  projectFilter: 'all',
   cwd: '',
   newCwd: '',
   turnId: null,
@@ -90,6 +91,7 @@ function setLoggedOut(message = '') {
   state.sessionId = null;
   state.currentSession = null;
   state.view = 'sessions';
+  state.projectFilter = 'all';
   state.cwd = '';
   state.newCwd = '';
   state.turnId = null;
@@ -201,6 +203,7 @@ function renderSessionList() {
           </div>
           <button class="primary compact-button" type="button" id="open-new-session-button">New</button>
         </div>
+        ${renderProjectFilter()}
       </header>
       <main class="session-list">${renderSessionCards()}</main>
     </div>
@@ -272,17 +275,35 @@ function renderSessionCards() {
     return '<div class="empty-state">No sessions yet.</div>';
   }
   return sessions.map((session) => `
-    <button class="session-card" type="button" data-session-id="${escapeAttribute(session.id)}">
-      <span class="session-card-main">
-        <span class="session-project">${escapeHtml(projectNameForSession(session))}</span>
-        <span class="session-preview">${escapeHtml(shorten(previewInputForSession(session), 96) || 'No prompt preview')}</span>
-      </span>
-      <span class="session-card-meta">
-        <span>${escapeHtml(shorten(session.cwd || 'No cwd', 54))}</span>
-        <span>${escapeHtml(formatShortDateTime(lastInputAtForSession(session)))}</span>
-      </span>
-    </button>
+    <article class="session-card">
+      <button class="session-card-open" type="button" data-session-id="${escapeAttribute(session.id)}">
+        <span class="session-card-main">
+          <span class="session-project">${escapeHtml(projectNameForSession(session))}</span>
+          <span class="session-preview">${escapeHtml(shorten(previewInputForSession(session), 96) || 'No prompt preview')}</span>
+        </span>
+        <span class="session-card-meta">
+          <span>${escapeHtml(shorten(session.cwd || 'No cwd', 54))}</span>
+          <span>${escapeHtml(formatShortDateTime(lastInputAtForSession(session)))}</span>
+        </span>
+      </button>
+      <button class="ghost compact-button session-archive" type="button" data-session-archive-id="${escapeAttribute(session.id)}">Archive</button>
+    </article>
   `).join('');
+}
+
+function renderProjectFilter() {
+  const projects = uniqueProjectOptions();
+  if (projects.length <= 1) {
+    return '';
+  }
+  return `
+    <div class="project-filter">
+      <button type="button" data-project-filter="all" aria-pressed="${String(state.projectFilter === 'all')}">All</button>
+      ${projects.map((project) => `
+        <button type="button" data-project-filter="${escapeAttribute(project.key)}" aria-pressed="${String(state.projectFilter === project.key)}">${escapeHtml(project.label)}</button>
+      `).join('')}
+    </div>
+  `;
 }
 
 function renderPathChoices() {
@@ -490,6 +511,19 @@ function bindGlobalEvents() {
     button.addEventListener('click', () => {
       state.sortMode = button.getAttribute('data-sort-mode') || 'time';
       render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-project-filter]')) {
+    button.addEventListener('click', () => {
+      state.projectFilter = button.getAttribute('data-project-filter') || 'all';
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-session-archive-id]')) {
+    button.addEventListener('click', () => {
+      void archiveSession(button.getAttribute('data-session-archive-id') || '');
     });
   }
 
@@ -772,9 +806,6 @@ async function onComposerSubmit(event) {
       state.sessionId = turn.session.id;
       state.currentSession = turn.session;
       state.cwd = turn.session.cwd || state.cwd;
-      if (turn.recoveredFromMissingSession) {
-        state.error = 'Previous session was unavailable. Started a new session.';
-      }
       optimisticallyUpdateSessionInput(promptToSend);
     }
     state.turnId = turn.turnId;
@@ -809,6 +840,38 @@ async function ensureSession() {
   state.cwd = payload.session.cwd || state.cwd;
   upsertSession(payload.session);
   return state.sessionId;
+}
+
+async function archiveSession(sessionId) {
+  if (!sessionId || state.pendingTurn) {
+    render();
+    return;
+  }
+  try {
+    await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+    removeSession(sessionId);
+    state.timelineCache.delete(sessionId);
+    persistTimelineCache();
+    if (state.sessionId === sessionId) {
+      stopStream();
+      state.sessionId = null;
+      state.currentSession = null;
+      resetTurnState();
+      state.view = 'sessions';
+    }
+    state.status = 'Session archived';
+    state.statusTone = 'success';
+    state.error = '';
+    render();
+  } catch (error) {
+    if (isMissingSessionError(error)) {
+      removeSession(sessionId);
+      state.error = 'Selected session was unavailable and was removed from the list.';
+      render();
+      return;
+    }
+    handleApiError(error);
+  }
 }
 
 async function streamTurnEvents(turnId) {
@@ -1088,7 +1151,7 @@ function handleMissingSession(error, promptToRestore) {
   }
   state.status = 'Ready';
   state.statusTone = 'warn';
-  state.error = 'Selected session was not found. Start a new session.';
+  state.error = 'Selected session was unavailable. Choose another session or create a new one.';
   render();
   return true;
 }
@@ -1410,7 +1473,7 @@ function hydrateTimelineFromSession(session) {
   const turns = Array.isArray(session.thread?.turns) ? session.thread.turns : [];
   for (const turn of turns) {
     for (const item of turn.items || []) {
-      const role = normalizeMessageRole(item.role);
+      const role = timelineRoleForThreadItem(item);
       const text = typeof item.text === 'string' ? item.text.trim() : '';
       if (!role || !text) {
         continue;
@@ -1426,7 +1489,7 @@ function hydrateTimelineFromSession(session) {
     }
   }
   if (items.length) {
-    return items.slice(-20);
+    return items.slice(-6);
   }
   const preview = firstInputForSession(session);
   return preview ? [{
@@ -1447,8 +1510,23 @@ function normalizeMessageRole(role) {
   return null;
 }
 
+function timelineRoleForThreadItem(item) {
+  const role = normalizeMessageRole(item.role);
+  if (role) {
+    return role;
+  }
+  const type = String(item.type || '').replace(/[^a-z]/giu, '').toLowerCase();
+  if (type.includes('assistant') || type.includes('agent')) {
+    return 'assistant';
+  }
+  if (type.includes('user')) {
+    return 'user';
+  }
+  return null;
+}
+
 function sortedSessions() {
-  const sessions = [...state.sessions];
+  const sessions = filteredSessions();
   if (state.sortMode === 'project') {
     return sessions.sort((left, right) => {
       const projectCompare = projectNameForSession(left).localeCompare(projectNameForSession(right));
@@ -1459,6 +1537,14 @@ function sortedSessions() {
     });
   }
   return sessions.sort((left, right) => lastInputAtForSession(right) - lastInputAtForSession(left));
+}
+
+function filteredSessions() {
+  const filter = state.projectFilter || 'all';
+  if (filter === 'all') {
+    return [...state.sessions];
+  }
+  return state.sessions.filter((session) => projectKeyForSession(session) === filter);
 }
 
 function uniqueSessionPaths() {
@@ -1473,6 +1559,25 @@ function uniqueSessionPaths() {
     paths.push(cwd);
   }
   return paths;
+}
+
+function uniqueProjectOptions() {
+  const projects = new Map();
+  for (const session of state.sessions) {
+    const key = projectKeyForSession(session);
+    if (!key || projects.has(key)) {
+      continue;
+    }
+    projects.set(key, {
+      key,
+      label: projectNameForSession(session),
+    });
+  }
+  return [...projects.values()].sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function projectKeyForSession(session) {
+  return session?.cwd || session?.projectName || '';
 }
 
 function projectNameForSession(session, fallbackCwd = '') {

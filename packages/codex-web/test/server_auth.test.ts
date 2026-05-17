@@ -22,6 +22,7 @@ function createRuntimeStub() {
     listSessions: async () => [],
     createSession: async () => ({ id: 'thread_1' }),
     readSession: async () => ({ id: 'thread_1' }),
+    archiveSession: async () => true,
     updateSessionSettings: async () => ({ id: 'thread_1' }),
     startTurn: async () => ({ turnId: 'turn_1' }),
     interruptTurn: async () => {},
@@ -497,7 +498,7 @@ test('SSE route rejects missing bearer token', async () => {
   }
 });
 
-test('POST /api/sessions/:id/turns recovers stale sessions by starting a new session', async () => {
+test('POST /api/sessions/:id/turns returns 404 without starting a replacement session', async () => {
   const calls: string[] = [];
   const server = createCodexWebServer({
     auth: {
@@ -534,22 +535,48 @@ test('POST /api/sessions/:id/turns recovers stale sessions by starting a new ses
       },
       body: JSON.stringify({ text: 'hi' }),
     });
-    assert.equal(response.status, 202);
+    assert.equal(response.status, 404);
     assert.deepEqual(await response.json(), {
-      turnId: 'turn_recovered',
-      session: {
-        id: 'thread_recovered',
-        cwd: '/tmp',
-        settings: {},
-        thread: {},
-      },
-      recoveredFromMissingSession: true,
+      error: 'session_not_found',
+      message: 'Selected session was not found.',
     });
     assert.deepEqual(calls, [
       'startTurn:stale_thread',
-      'createSession',
-      'startTurn:thread_recovered',
     ]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('DELETE /api/sessions/:id archives a session', async () => {
+  const calls: string[] = [];
+  const server = createCodexWebServer({
+    auth: {
+      isConfigured: async () => true,
+      login: async () => ({ token: 'cw_token', session: { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }, configuredNow: false }),
+      verifyToken: async (token) => token === 'cw_token'
+        ? { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }
+        : null,
+      logout: async () => {},
+    },
+    runtime: {
+      ...createRuntimeStub(),
+      archiveSession: async (sessionId: string) => {
+        calls.push(sessionId);
+        return sessionId === 'thread_1';
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_1`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer cw_token' },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.deepEqual(calls, ['thread_1']);
   } finally {
     await server.stop();
   }
