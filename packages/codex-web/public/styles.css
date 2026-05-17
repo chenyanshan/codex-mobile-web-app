@@ -78,6 +78,15 @@ button:disabled {
   border-bottom: 1px solid var(--border);
 }
 
+.page-topbar {
+  display: grid;
+  gap: 10px;
+}
+
+.chat-topbar {
+  padding: calc(env(safe-area-inset-top, 0px) + 8px) 12px 8px;
+}
+
 .topbar-main,
 .topbar-meta {
   display: flex;
@@ -90,6 +99,26 @@ button:disabled {
   margin-top: 8px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.page-title,
+.project-title {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-title {
+  font-size: 14px;
+}
+
+.list-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
 }
 
 .session-strip {
@@ -268,8 +297,75 @@ button:disabled {
   padding: 12px 12px var(--composer-offset);
   scroll-padding-bottom: var(--composer-offset);
   display: grid;
-  gap: 10px;
+  gap: 8px;
   align-content: start;
+}
+
+.session-list,
+.new-session-page {
+  padding: 12px;
+}
+
+.session-list {
+  display: grid;
+  gap: 8px;
+}
+
+.session-card,
+.path-choice {
+  width: 100%;
+  min-width: 0;
+  padding: 12px;
+  display: grid;
+  gap: 7px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.session-card-main,
+.session-card-meta,
+.path-choice span,
+.path-choice small {
+  min-width: 0;
+}
+
+.session-card-main {
+  display: grid;
+  gap: 4px;
+}
+
+.session-project,
+.path-choice span {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.session-preview,
+.session-card-meta,
+.path-choice small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-preview,
+.session-card-meta span,
+.path-choice small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-card-meta {
+  display: grid;
+  gap: 3px;
+}
+
+.path-choices {
+  display: grid;
+  gap: 8px;
 }
 
 .card {
@@ -301,10 +397,20 @@ button:disabled {
 
 .message-card.user {
   background: #131b28;
+  justify-self: end;
 }
 
 .message-card.assistant {
   background: #111723;
+  justify-self: start;
+}
+
+.message-card {
+  max-width: min(86vw, 620px);
+}
+
+.message-card .card-header {
+  display: none;
 }
 
 .message-text {
@@ -346,11 +452,18 @@ button:disabled {
 .composer {
   margin: 0 auto;
   width: min(100%, 720px);
-  padding: 10px;
+  padding: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: rgba(18, 23, 34, 0.98);
   box-shadow: var(--shadow);
+}
+
+.compact-composer-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
 }
 
 .controls {
@@ -387,6 +500,14 @@ button:disabled {
   border-radius: 8px;
 }
 
+.sort-toggle {
+  width: 100%;
+}
+
+.permission-toggle {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .toggle button {
   min-height: 36px;
   padding: 0 10px;
@@ -404,6 +525,33 @@ button:disabled {
 .composer textarea {
   min-height: 104px;
   resize: none;
+}
+
+.compact-composer-row textarea {
+  min-height: 42px;
+  max-height: 132px;
+  padding: 10px 11px;
+}
+
+.icon-button,
+.compact-send {
+  min-height: 42px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.settings-drawer {
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.composer-error {
+  margin-bottom: 6px;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 .composer-actions {

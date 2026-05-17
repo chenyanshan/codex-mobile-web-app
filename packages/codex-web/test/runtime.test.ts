@@ -22,6 +22,102 @@ function createThread(threadId = 'thread_1'): ProviderThreadSummary {
   };
 }
 
+test('session summary extracts user inputs from turns and project name from cwd', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [createThread('thread_summary')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_summary', cwd: '/Users/alice/project', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_summary'),
+      cwd: '/Users/alice/project',
+      updatedAt: 123,
+      preview: 'Preview fallback',
+      turns: [
+        {
+          id: 'turn_1',
+          status: 'completed',
+          error: null,
+          items: [
+            { type: 'message', role: 'assistant', phase: null, text: 'Assistant preface' },
+            { type: 'message', role: 'user', phase: null, text: 'First user request' },
+          ],
+        },
+        {
+          id: 'turn_2',
+          status: 'completed',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Latest user request' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_summary',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const sessions = await runtime.listSessions();
+
+  assert.equal(sessions[0]?.projectName, 'alice/project');
+  assert.equal(sessions[0]?.firstUserInput, 'First user request');
+  assert.equal(sessions[0]?.lastUserInput, 'Latest user request');
+  assert.equal(sessions[0]?.lastInputAt, 123);
+});
+
+test('session summary falls back to preview when turns have no user input', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [createThread('thread_preview')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_preview', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_preview'),
+      cwd: '/single',
+      updatedAt: 456,
+      preview: 'Preview fallback text',
+      turns: [],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_preview',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const session = await runtime.readSession('thread_preview');
+
+  assert.equal(session?.projectName, 'single');
+  assert.equal(session?.firstUserInput, 'Preview fallback text');
+  assert.equal(session?.lastUserInput, 'Preview fallback text');
+  assert.equal(session?.lastInputAt, 456);
+});
+
 test('runtime falls back from includeTurns reads and escapes hyphenated profile config paths', async () => {
   const writes: Array<{ keyPath: string; value: unknown }> = [];
   const readCalls: boolean[] = [];

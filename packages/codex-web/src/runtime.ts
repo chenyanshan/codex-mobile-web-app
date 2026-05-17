@@ -27,9 +27,13 @@ import {
 export interface CodexWebSession {
   id: string;
   cwd: string | null;
+  projectName: string | null;
   title: string | null;
   updatedAt: number | null;
   preview: string | null;
+  firstUserInput: string | null;
+  lastUserInput: string | null;
+  lastInputAt: number | null;
   settings: ProviderTurnSessionSettings;
   thread: ProviderThreadSummary;
 }
@@ -387,12 +391,18 @@ export class CodexWebRuntime {
   private toSession(thread: ProviderThreadSummary): CodexWebSession {
     const current = this.sessionSettings.get(thread.threadId) ?? createDefaultSettings(thread.threadId);
     this.sessionSettings.set(thread.threadId, current);
+    const updatedAt = thread.updatedAt ?? null;
+    const inputSummary = summarizeSessionInputs(thread);
     return {
       id: thread.threadId,
       cwd: thread.cwd,
+      projectName: summarizeProjectName(thread.cwd),
       title: thread.title,
-      updatedAt: thread.updatedAt ?? null,
+      updatedAt,
       preview: thread.preview ?? null,
+      firstUserInput: inputSummary.firstUserInput,
+      lastUserInput: inputSummary.lastUserInput,
+      lastInputAt: updatedAt,
       settings: current,
       thread,
     };
@@ -426,6 +436,56 @@ export class CodexWebRuntime {
     }
     return approvalIds;
   }
+}
+
+const SESSION_INPUT_PREVIEW_MAX_LENGTH = 240;
+
+function summarizeProjectName(cwd: string | null | undefined): string | null {
+  const segments = cwd?.split(/[\\/]+/u).filter(Boolean) ?? [];
+  if (!segments.length) {
+    return null;
+  }
+  return segments.slice(-2).join('/');
+}
+
+function summarizeSessionInputs(thread: ProviderThreadSummary): {
+  firstUserInput: string | null;
+  lastUserInput: string | null;
+} {
+  const userInputs: string[] = [];
+  for (const turn of thread.turns ?? []) {
+    for (const item of turn.items ?? []) {
+      if (item.role?.toLowerCase() !== 'user') {
+        continue;
+      }
+      const text = summarizeSessionInputText(item.text);
+      if (text) {
+        userInputs.push(text);
+      }
+    }
+  }
+  if (userInputs.length) {
+    return {
+      firstUserInput: userInputs[0] ?? null,
+      lastUserInput: userInputs[userInputs.length - 1] ?? null,
+    };
+  }
+  const fallback = summarizeSessionInputText(thread.preview);
+  return {
+    firstUserInput: fallback,
+    lastUserInput: fallback,
+  };
+}
+
+function summarizeSessionInputText(text: string | null | undefined): string | null {
+  const normalized = text?.replace(/\s+/gu, ' ').trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.length <= SESSION_INPUT_PREVIEW_MAX_LENGTH) {
+    return normalized;
+  }
+  return `${normalized.slice(0, SESSION_INPUT_PREVIEW_MAX_LENGTH - 3).trimEnd()}...`;
 }
 
 function createDefaultSettings(sessionId: string): ProviderTurnSessionSettings {

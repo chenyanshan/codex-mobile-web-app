@@ -6,7 +6,10 @@ const state = {
   sessions: [],
   currentSession: null,
   sessionId: null,
+  view: 'sessions',
+  sortMode: 'time',
   cwd: '',
+  newCwd: '',
   turnId: null,
   pendingTurn: false,
   setupRequired: false,
@@ -19,7 +22,12 @@ const state = {
   model: '',
   reasoningEffort: 'medium',
   collaborationMode: 'default',
+  settingsOpen: false,
+  permissionPreset: 'default',
+  approvalPolicy: 'on-request',
+  sandboxMode: 'workspace-write',
   timeline: [],
+  timelineCache: new Map(),
   batches: new Map(),
   approvals: new Map(),
   streamAbortController: null,
@@ -54,6 +62,9 @@ async function restoreAuth() {
     state.sessions = normalizeSessions(sessionsPayload);
     state.model = pickModel(state.models, state.model);
     syncCurrentSessionFromList();
+    if (!state.sessionId) {
+      state.view = 'sessions';
+    }
     state.status = 'Ready';
     state.statusTone = 'success';
     state.error = '';
@@ -68,10 +79,13 @@ function setLoggedOut(message = '') {
   state.sessions = [];
   state.sessionId = null;
   state.currentSession = null;
+  state.view = 'sessions';
   state.cwd = '';
+  state.newCwd = '';
   state.turnId = null;
   state.pendingTurn = false;
   state.timeline = [];
+  state.timelineCache = new Map();
   state.batches = new Map();
   state.approvals = new Map();
   state.status = 'Login required';
@@ -98,7 +112,11 @@ function render() {
   }
   app.appendChild(renderMain());
   bindGlobalEvents();
-  syncComposerOffset();
+  if (state.view === 'chat') {
+    syncComposerOffset();
+  } else {
+    resetComposerOffset();
+  }
 }
 
 function renderSetup() {
@@ -147,65 +165,89 @@ function renderLogin() {
 }
 
 function renderMain() {
+  if (state.view === 'new') {
+    return renderNewSession();
+  }
+  if (state.view === 'chat') {
+    return renderChat();
+  }
+  return renderSessionList();
+}
+
+function renderSessionList() {
   const shell = document.createElement('div');
   shell.className = 'shell';
-  const workspace = currentWorkspaceLabel();
-  const sessionMeta = state.sessionId
-    ? shorten(state.sessionId, 42)
-    : 'Session starts on first send';
+  shell.innerHTML = `
+    <div class="screen page-screen">
+      <header class="topbar page-topbar">
+        <div class="topbar-main">
+          <div class="page-title">Sessions</div>
+          <button class="ghost compact-button" type="button" id="logout-button">Log out</button>
+        </div>
+        <div class="list-actions">
+          <div class="toggle sort-toggle">
+            <button type="button" data-sort-mode="time" aria-pressed="${String(state.sortMode === 'time')}">Time</button>
+            <button type="button" data-sort-mode="project" aria-pressed="${String(state.sortMode === 'project')}">Project</button>
+          </div>
+          <button class="primary compact-button" type="button" id="open-new-session-button">New</button>
+        </div>
+      </header>
+      <main class="session-list">${renderSessionCards()}</main>
+    </div>
+  `;
+  return shell;
+}
+
+function renderNewSession() {
+  const shell = document.createElement('div');
+  shell.className = 'shell';
+  shell.innerHTML = `
+    <div class="screen page-screen">
+      <header class="topbar page-topbar">
+        <div class="topbar-main">
+          <div class="page-title">New Session</div>
+          <button class="ghost compact-button" type="button" id="back-to-list-button">Sessions</button>
+        </div>
+      </header>
+      <main class="new-session-page">
+        <form class="panel stack" id="new-session-form">
+          <div class="field">
+            <label for="new-cwd-input">Project path</label>
+            <input id="new-cwd-input" type="text" value="${escapeAttribute(state.newCwd || state.cwd)}" placeholder="Use server default">
+          </div>
+          ${renderPathChoices()}
+          <div class="actions">
+            <button class="primary" type="submit">Start</button>
+          </div>
+        </form>
+      </main>
+    </div>
+  `;
+  return shell;
+}
+
+function renderChat() {
+  const shell = document.createElement('div');
+  shell.className = 'shell';
   shell.innerHTML = `
     <div class="screen">
-      <header class="topbar">
+      <header class="topbar chat-topbar">
         <div class="topbar-main">
-          <div class="brand">Codex Web</div>
-          <div class="workspace"><strong>${escapeHtml(shorten(workspace, 48))}</strong>${escapeHtml(sessionMeta)}</div>
-        </div>
-        <div class="topbar-meta">
-          <span class="status-pill" data-tone="${escapeHtml(state.statusTone)}"><span class="status-dot"></span>${escapeHtml(state.status)}</span>
-          <button class="ghost" type="button" id="logout-button">Log out</button>
-        </div>
-        <div class="session-strip">
-          <div class="session-picker">
-            <label for="session-select">Session</label>
-            <select id="session-select" name="sessionId" ${state.pendingTurn ? 'disabled' : ''}>${renderSessionOptions()}</select>
-          </div>
-          <button class="ghost compact-button" type="button" id="new-session-button" ${state.pendingTurn ? 'disabled' : ''}>New</button>
+          <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
+          <button class="ghost compact-button" type="button" id="back-to-list-button" ${state.pendingTurn ? 'disabled' : ''}>Sessions</button>
         </div>
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
       <div class="composer-wrap">
         <form class="composer" id="composer-form">
-          <div class="controls">
-            <div class="control-group">
-              <label for="model-select">Model</label>
-              <select id="model-select" name="model">${renderModelOptions()}</select>
-            </div>
-            <div class="control-group">
-              <label for="reasoning-select">Reasoning</label>
-              <select id="reasoning-select" name="reasoningEffort">
-                ${renderOptions(['low', 'medium', 'high', 'xhigh'], state.reasoningEffort)}
-              </select>
-            </div>
-            <div class="control-group">
-              <label>Mode</label>
-              <div class="toggle">
-                <button type="button" data-mode="default" aria-pressed="${String(state.collaborationMode === 'default')}">Default</button>
-                <button type="button" data-mode="plan" aria-pressed="${String(state.collaborationMode === 'plan')}">Plan</button>
-              </div>
-            </div>
-            <div class="control-group">
-              <label for="cwd-input">${state.sessionId ? 'Session CWD' : 'New CWD'}</label>
-              <input id="cwd-input" type="text" value="${escapeAttribute(state.cwd)}" placeholder="Server default" ${state.sessionId ? 'disabled' : ''}>
-            </div>
-          </div>
-          <textarea id="prompt-input" name="prompt" placeholder="Send a turn to Codex" ${state.pendingTurn ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
-          <div class="composer-actions">
-            <div class="composer-note">${escapeHtml(state.error || sessionComposerNote())}</div>
-            <div class="actions" style="flex: 0 0 auto; min-width: 152px;">
-              <button class="${state.pendingTurn ? 'danger' : 'primary'}" type="${state.pendingTurn ? 'button' : 'submit'}" id="${state.pendingTurn ? 'stop-button' : 'send-button'}">
-                ${state.pendingTurn ? 'Stop' : 'Send'}
-              </button>
-            </div>
+          ${state.settingsOpen ? renderSettingsDrawer() : ''}
+          ${state.error ? `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>` : ''}
+          <div class="compact-composer-row">
+            <button class="ghost icon-button" type="button" id="settings-toggle" aria-expanded="${String(state.settingsOpen)}">Set</button>
+            <textarea id="prompt-input" name="prompt" placeholder="Message" ${state.pendingTurn ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
+            <button class="${state.pendingTurn ? 'danger' : 'primary'} compact-send" type="${state.pendingTurn ? 'button' : 'submit'}" id="${state.pendingTurn ? 'stop-button' : 'send-button'}">
+              ${state.pendingTurn ? 'Stop' : 'Send'}
+            </button>
           </div>
         </form>
       </div>
@@ -214,9 +256,79 @@ function renderMain() {
   return shell;
 }
 
+function renderSessionCards() {
+  const sessions = sortedSessions();
+  if (!sessions.length) {
+    return '<div class="empty-state">No sessions yet.</div>';
+  }
+  return sessions.map((session) => `
+    <button class="session-card" type="button" data-session-id="${escapeAttribute(session.id)}">
+      <span class="session-card-main">
+        <span class="session-project">${escapeHtml(projectNameForSession(session))}</span>
+        <span class="session-preview">${escapeHtml(shorten(firstInputForSession(session), 96) || 'No prompt preview')}</span>
+      </span>
+      <span class="session-card-meta">
+        <span>${escapeHtml(shorten(session.cwd || 'No cwd', 54))}</span>
+        <span>${escapeHtml(formatShortDateTime(lastInputAtForSession(session)))}</span>
+      </span>
+    </button>
+  `).join('');
+}
+
+function renderPathChoices() {
+  const paths = uniqueSessionPaths();
+  if (!paths.length) {
+    return '';
+  }
+  return `
+    <div class="path-choices">
+      ${paths.map((cwd) => `
+        <button type="button" class="path-choice" data-cwd-choice="${escapeAttribute(cwd)}">
+          <span>${escapeHtml(projectNameFromCwd(cwd))}</span>
+          <small>${escapeHtml(shorten(cwd, 62))}</small>
+        </button>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderSettingsDrawer() {
+  return `
+    <div class="settings-drawer">
+      <div class="controls">
+        <div class="control-group">
+          <label for="model-select">Model</label>
+          <select id="model-select" name="model">${renderModelOptions()}</select>
+        </div>
+        <div class="control-group">
+          <label for="reasoning-select">Reasoning</label>
+          <select id="reasoning-select" name="reasoningEffort">
+            ${renderOptions(['low', 'medium', 'high', 'xhigh'], state.reasoningEffort)}
+          </select>
+        </div>
+        <div class="control-group">
+          <label>Mode</label>
+          <div class="toggle">
+            <button type="button" data-mode="default" aria-pressed="${String(state.collaborationMode === 'default')}">Default</button>
+            <button type="button" data-mode="plan" aria-pressed="${String(state.collaborationMode === 'plan')}">Plan</button>
+          </div>
+        </div>
+        <div class="control-group">
+          <label>Permissions</label>
+          <div class="toggle permission-toggle">
+            <button type="button" data-permission-preset="read-only" aria-pressed="${String(state.permissionPreset === 'read-only')}">Read</button>
+            <button type="button" data-permission-preset="default" aria-pressed="${String(state.permissionPreset === 'default')}">Ask</button>
+            <button type="button" data-permission-preset="full-access" aria-pressed="${String(state.permissionPreset === 'full-access')}">Full</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderTimeline() {
   if (!state.timeline.length) {
-    return '<div class="empty-state">No turns yet.</div>';
+    return '<div class="empty-state">No context yet.</div>';
   }
   return state.timeline.map((item) => renderTimelineItem(item)).join('');
 }
@@ -315,17 +427,6 @@ function renderModelOptions() {
   }).join('');
 }
 
-function renderSessionOptions() {
-  const options = [
-    `<option value=""${state.sessionId ? '' : ' selected'}>New session</option>`,
-  ];
-  for (const session of state.sessions) {
-    const selected = session.id === state.sessionId ? ' selected' : '';
-    options.push(`<option value="${escapeAttribute(session.id)}"${selected}>${escapeHtml(sessionOptionLabel(session))}</option>`);
-  }
-  return options.join('');
-}
-
 function renderOptions(values, current) {
   return values.map((value) => {
     const selected = value === current ? ' selected' : '';
@@ -355,17 +456,49 @@ function bindGlobalEvents() {
     stopButton.addEventListener('click', onStopTurn);
   }
 
-  const sessionSelect = document.querySelector('#session-select');
-  if (sessionSelect) {
-    sessionSelect.addEventListener('change', (event) => {
-      void selectSession(event.target.value);
+  const openNewSessionButton = document.querySelector('#open-new-session-button');
+  if (openNewSessionButton) {
+    openNewSessionButton.addEventListener('click', () => {
+      openNewSessionPage();
     });
   }
 
-  const newSessionButton = document.querySelector('#new-session-button');
-  if (newSessionButton) {
-    newSessionButton.addEventListener('click', () => {
-      startNewSession({ preserveCwd: true });
+  const backToListButton = document.querySelector('#back-to-list-button');
+  if (backToListButton) {
+    backToListButton.addEventListener('click', () => {
+      showSessionList();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-session-id]')) {
+    button.addEventListener('click', () => {
+      void selectSession(button.getAttribute('data-session-id') || '');
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-sort-mode]')) {
+    button.addEventListener('click', () => {
+      state.sortMode = button.getAttribute('data-sort-mode') || 'time';
+      render();
+    });
+  }
+
+  const newSessionForm = document.querySelector('#new-session-form');
+  if (newSessionForm) {
+    newSessionForm.addEventListener('submit', onNewSessionSubmit);
+  }
+
+  const newCwdInput = document.querySelector('#new-cwd-input');
+  if (newCwdInput) {
+    newCwdInput.addEventListener('input', (event) => {
+      state.newCwd = event.target.value;
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-cwd-choice]')) {
+    button.addEventListener('click', () => {
+      state.newCwd = button.getAttribute('data-cwd-choice') || '';
+      render();
     });
   }
 
@@ -376,10 +509,11 @@ function bindGlobalEvents() {
     });
   }
 
-  const cwdInput = document.querySelector('#cwd-input');
-  if (cwdInput) {
-    cwdInput.addEventListener('input', (event) => {
-      state.cwd = event.target.value;
+  const settingsToggle = document.querySelector('#settings-toggle');
+  if (settingsToggle) {
+    settingsToggle.addEventListener('click', () => {
+      state.settingsOpen = !state.settingsOpen;
+      render();
     });
   }
 
@@ -400,6 +534,13 @@ function bindGlobalEvents() {
   for (const button of document.querySelectorAll('[data-mode]')) {
     button.addEventListener('click', () => {
       state.collaborationMode = button.getAttribute('data-mode') || 'default';
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-permission-preset]')) {
+    button.addEventListener('click', () => {
+      applyPermissionPreset(button.getAttribute('data-permission-preset') || 'default');
       render();
     });
   }
@@ -487,6 +628,59 @@ async function onLogout() {
   setLoggedOut();
 }
 
+function showSessionList() {
+  if (state.pendingTurn) {
+    render();
+    return;
+  }
+  saveCurrentTimeline();
+  stopStream();
+  state.view = 'sessions';
+  state.sessionId = null;
+  state.currentSession = null;
+  state.turnId = null;
+  state.pendingTurn = false;
+  state.prompt = '';
+  state.error = '';
+  render();
+}
+
+function openNewSessionPage() {
+  if (state.pendingTurn) {
+    render();
+    return;
+  }
+  saveCurrentTimeline();
+  stopStream();
+  state.view = 'new';
+  state.sessionId = null;
+  state.currentSession = null;
+  state.newCwd = state.cwd || '';
+  resetTurnState();
+  state.error = '';
+  render();
+}
+
+function onNewSessionSubmit(event) {
+  event.preventDefault();
+  if (state.pendingTurn) {
+    return;
+  }
+  saveCurrentTimeline();
+  stopStream();
+  state.view = 'chat';
+  state.sessionId = null;
+  state.currentSession = null;
+  state.cwd = state.newCwd.trim();
+  state.prompt = '';
+  state.settingsOpen = false;
+  resetTurnState();
+  state.status = 'Ready';
+  state.statusTone = 'success';
+  state.error = '';
+  render();
+}
+
 async function selectSession(sessionId) {
   if (state.pendingTurn) {
     render();
@@ -494,9 +688,10 @@ async function selectSession(sessionId) {
   }
   const nextSession = state.sessions.find((session) => session.id === sessionId) || null;
   if (!nextSession) {
-    startNewSession({ preserveCwd: true });
+    openNewSessionPage();
     return;
   }
+  saveCurrentTimeline();
   state.status = 'Checking session';
   state.statusTone = 'warn';
   render();
@@ -515,24 +710,9 @@ async function selectSession(sessionId) {
   state.sessionId = refreshedSession.id;
   state.currentSession = refreshedSession;
   state.cwd = refreshedSession.cwd || '';
-  resetTurnState();
-  state.error = '';
-  state.status = 'Ready';
-  state.statusTone = 'success';
-  render();
-}
-
-function startNewSession(options = {}) {
-  if (state.pendingTurn) {
-    render();
-    return;
-  }
-  stopStream();
-  const nextCwd = options.preserveCwd ? state.cwd : '';
-  state.sessionId = null;
-  state.currentSession = null;
-  state.cwd = nextCwd;
-  resetTurnState();
+  restoreTimelineForSession(refreshedSession);
+  state.view = 'chat';
+  state.settingsOpen = false;
   state.error = '';
   state.status = 'Ready';
   state.statusTone = 'success';
@@ -751,7 +931,6 @@ async function resolveApproval(approvalId, action) {
 function applyTurnEvent(event, assistantEntry) {
   switch (event.type) {
     case 'turn.started':
-      upsertStatusCard(`turn_${event.turnId}`, 'Turn started', event.turnId);
       state.status = 'Turn running';
       state.statusTone = 'warn';
       break;
@@ -834,7 +1013,6 @@ function applyTurnEvent(event, assistantEntry) {
       state.statusTone = event.status === 'completed' ? 'success' : 'warn';
       state.turnId = null;
       stopStream();
-      upsertStatusCard(`turn_${event.turnId}`, 'Turn completed', event.status);
       break;
     case 'turn.failed':
       state.pendingTurn = false;
@@ -842,7 +1020,7 @@ function applyTurnEvent(event, assistantEntry) {
       state.statusTone = 'danger';
       state.turnId = null;
       stopStream();
-      upsertStatusCard(`turn_${event.turnId}`, 'Turn failed', event.message);
+      state.error = event.message || 'Turn failed';
       break;
   }
   render();
@@ -863,16 +1041,6 @@ function upsertBatch(batchId, patch) {
   const next = { ...current, ...patch, summary: { ...current.summary, ...(patch.summary || {}) } };
   state.batches.set(batchId, next);
   appendOrReplace(next, (item) => item.id === next.id);
-}
-
-function upsertStatusCard(id, title, text) {
-  appendOrReplace({
-    id,
-    kind: 'status',
-    title,
-    meta: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    text,
-  }, (item) => item.id === id);
 }
 
 function resetTurnState() {
@@ -923,8 +1091,12 @@ function normalizeSessions(payload) {
     .map((session) => ({
       ...session,
       cwd: typeof session.cwd === 'string' ? session.cwd : '',
+      projectName: typeof session.projectName === 'string' ? session.projectName : '',
       title: typeof session.title === 'string' ? session.title : '',
       preview: typeof session.preview === 'string' ? session.preview : '',
+      firstUserInput: typeof session.firstUserInput === 'string' ? session.firstUserInput : '',
+      lastUserInput: typeof session.lastUserInput === 'string' ? session.lastUserInput : '',
+      lastInputAt: typeof session.lastInputAt === 'number' ? session.lastInputAt : null,
       updatedAt: typeof session.updatedAt === 'number' ? session.updatedAt : null,
     }));
 }
@@ -960,24 +1132,134 @@ function upsertSession(session) {
   state.currentSession = normalized;
 }
 
-function currentWorkspaceLabel() {
-  if (state.currentSession) {
-    return state.currentSession.cwd || state.currentSession.title || 'Selected session';
+function saveCurrentTimeline() {
+  if (!state.sessionId) {
+    return;
   }
-  return state.cwd.trim() || 'New session';
+  state.timelineCache.set(state.sessionId, {
+    timeline: state.timeline.map((item) => ({ ...item })),
+    batches: new Map(state.batches),
+    approvals: new Map(state.approvals),
+  });
 }
 
-function sessionComposerNote() {
-  if (state.sessionId) {
-    return 'Selected session CWD is fixed. New uses the New button.';
+function restoreTimelineForSession(session) {
+  const cached = state.timelineCache.get(session.id);
+  if (cached) {
+    state.timeline = cached.timeline.map((item) => ({ ...item }));
+    state.batches = new Map(cached.batches);
+    state.approvals = new Map(cached.approvals);
+    return;
   }
-  return 'New session starts on Send with the New CWD above.';
+  state.timeline = hydrateTimelineFromSession(session);
+  state.batches = new Map();
+  state.approvals = new Map();
 }
 
-function sessionOptionLabel(session) {
-  const primary = session.title || session.cwd || session.preview || 'Untitled session';
-  const secondary = session.updatedAt ? formatShortDate(session.updatedAt) : shorten(session.id, 10);
-  return `${shorten(primary, 34)} - ${secondary}`;
+function hydrateTimelineFromSession(session) {
+  const items = [];
+  const turns = Array.isArray(session.thread?.turns) ? session.thread.turns : [];
+  for (const turn of turns) {
+    for (const item of turn.items || []) {
+      const role = normalizeMessageRole(item.role);
+      const text = typeof item.text === 'string' ? item.text.trim() : '';
+      if (!role || !text) {
+        continue;
+      }
+      items.push({
+        id: `history_${turn.id}_${items.length}`,
+        kind: 'message',
+        role,
+        label: role === 'user' ? 'You' : 'Assistant',
+        meta: 'history',
+        text,
+      });
+    }
+  }
+  if (items.length) {
+    return items.slice(-20);
+  }
+  const preview = firstInputForSession(session);
+  return preview ? [{
+    id: `history_preview_${session.id}`,
+    kind: 'message',
+    role: 'user',
+    label: 'You',
+    meta: 'preview',
+    text: preview,
+  }] : [];
+}
+
+function normalizeMessageRole(role) {
+  const value = typeof role === 'string' ? role.toLowerCase() : '';
+  if (value === 'user' || value === 'assistant') {
+    return value;
+  }
+  return null;
+}
+
+function sortedSessions() {
+  const sessions = [...state.sessions];
+  if (state.sortMode === 'project') {
+    return sessions.sort((left, right) => {
+      const projectCompare = projectNameForSession(left).localeCompare(projectNameForSession(right));
+      if (projectCompare !== 0) {
+        return projectCompare;
+      }
+      return lastInputAtForSession(right) - lastInputAtForSession(left);
+    });
+  }
+  return sessions.sort((left, right) => lastInputAtForSession(right) - lastInputAtForSession(left));
+}
+
+function uniqueSessionPaths() {
+  const paths = [];
+  const seen = new Set();
+  for (const session of sortedSessions()) {
+    const cwd = session.cwd || '';
+    if (!cwd || seen.has(cwd)) {
+      continue;
+    }
+    seen.add(cwd);
+    paths.push(cwd);
+  }
+  return paths;
+}
+
+function projectNameForSession(session, fallbackCwd = '') {
+  return session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || 'New Session';
+}
+
+function projectNameFromCwd(cwd) {
+  const parts = String(cwd || '').split(/[\\/]+/u).filter(Boolean);
+  if (!parts.length) {
+    return '';
+  }
+  return parts.slice(-2).join('/');
+}
+
+function firstInputForSession(session) {
+  return session?.firstUserInput || session?.preview || session?.title || '';
+}
+
+function lastInputAtForSession(session) {
+  return session?.lastInputAt || session?.updatedAt || 0;
+}
+
+function applyPermissionPreset(preset) {
+  state.permissionPreset = preset;
+  if (preset === 'read-only') {
+    state.approvalPolicy = 'never';
+    state.sandboxMode = 'read-only';
+    return;
+  }
+  if (preset === 'full-access') {
+    state.approvalPolicy = 'never';
+    state.sandboxMode = 'danger-full-access';
+    return;
+  }
+  state.approvalPolicy = 'on-request';
+  state.sandboxMode = 'workspace-write';
 }
 
 function appendMessage(entry) {
@@ -998,6 +1280,9 @@ function collectSettings() {
     model: state.model || null,
     reasoningEffort: state.reasoningEffort || null,
     collaborationMode: state.collaborationMode || 'default',
+    accessPreset: state.permissionPreset || 'default',
+    approvalPolicy: state.approvalPolicy || 'on-request',
+    sandboxMode: state.sandboxMode || 'workspace-write',
     personality: 'pragmatic',
   };
 }
@@ -1127,6 +1412,19 @@ function formatShortDate(timestamp) {
     return '';
   }
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function formatShortDateTime(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function shorten(value, maxLength) {
