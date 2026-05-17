@@ -26,6 +26,8 @@ const state = {
 };
 
 const app = document.querySelector('#app');
+let composerResizeObserver = null;
+let composerOffsetRun = 0;
 
 bootstrap();
 
@@ -85,15 +87,18 @@ function render() {
   if (state.setupRequired) {
     app.appendChild(renderSetup());
     bindGlobalEvents();
+    resetComposerOffset();
     return;
   }
   if (!state.authSession) {
     app.appendChild(renderLogin());
     bindGlobalEvents();
+    resetComposerOffset();
     return;
   }
   app.appendChild(renderMain());
   bindGlobalEvents();
+  syncComposerOffset();
 }
 
 function renderSetup() {
@@ -407,6 +412,44 @@ function bindGlobalEvents() {
       );
     });
   }
+}
+
+function resetComposerOffset() {
+  composerOffsetRun += 1;
+  if (composerResizeObserver) {
+    composerResizeObserver.disconnect();
+    composerResizeObserver = null;
+  }
+  document.documentElement.style.removeProperty('--composer-offset');
+}
+
+function syncComposerOffset() {
+  composerOffsetRun += 1;
+  const run = composerOffsetRun;
+  if (composerResizeObserver) {
+    composerResizeObserver.disconnect();
+    composerResizeObserver = null;
+  }
+  requestAnimationFrame(() => {
+    if (run !== composerOffsetRun) {
+      return;
+    }
+    const composerWrap = document.querySelector('.composer-wrap');
+    if (!composerWrap) {
+      resetComposerOffset();
+      return;
+    }
+    const applyComposerOffset = () => {
+      const height = Math.ceil(composerWrap.getBoundingClientRect().height);
+      const offset = Math.max(220, height + 16);
+      document.documentElement.style.setProperty('--composer-offset', `${offset}px`);
+    };
+    applyComposerOffset();
+    if ('ResizeObserver' in window) {
+      composerResizeObserver = new ResizeObserver(applyComposerOffset);
+      composerResizeObserver.observe(composerWrap);
+    }
+  });
 }
 
 async function onLoginSubmit(event) {
