@@ -44,7 +44,7 @@ write_default_env_file_if_missing() {
   cat > "${ENV_FILE}" <<EOF
 # Codex Web launchd service configuration.
 # Do not store CODEX_WEB_PASSWORD in this file.
-CODEX_WEB_HOST=$(env_escape "127.0.0.1")
+CODEX_WEB_HOST=$(env_escape "0.0.0.0")
 CODEX_WEB_PORT=$(env_escape "43210")
 CODEX_WEB_DEFAULT_CWD=$(env_escape "${REPO_ROOT}")
 CODEX_REAL_BIN=$(env_escape "codex")

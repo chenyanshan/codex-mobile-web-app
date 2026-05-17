@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadServiceConfig } from '../src/config.js';
 
-test('service config defaults to local-only binding and external state paths', () => {
+test('service config defaults to LAN-facing binding and external state paths', () => {
   const config = loadServiceConfig({ env: {}, homeDir: '/Users/alice' });
 
-  assert.equal(config.host, '127.0.0.1');
+  assert.equal(config.host, '0.0.0.0');
   assert.equal(config.port, 43210);
   assert.equal(config.defaultCwd, '/Users/alice');
   assert.equal(config.stateDir, '/Users/alice/.codex-web');
@@ -13,10 +13,10 @@ test('service config defaults to local-only binding and external state paths', (
   assert.equal(config.envPath, '/Users/alice/.config/codex-web/service.env');
 });
 
-test('service config accepts explicit tunnel-facing host and port', () => {
+test('service config accepts explicit local-only host and port', () => {
   const config = loadServiceConfig({
     env: {
-      CODEX_WEB_HOST: '0.0.0.0',
+      CODEX_WEB_HOST: '127.0.0.1',
       CODEX_WEB_PORT: '45678',
       CODEX_WEB_DEFAULT_CWD: '/workspace',
       CODEX_REAL_BIN: '/opt/homebrew/bin/codex',
@@ -24,7 +24,7 @@ test('service config accepts explicit tunnel-facing host and port', () => {
     homeDir: '/Users/alice',
   });
 
-  assert.equal(config.host, '0.0.0.0');
+  assert.equal(config.host, '127.0.0.1');
   assert.equal(config.port, 45678);
   assert.equal(config.defaultCwd, '/workspace');
   assert.equal(config.codexBin, '/opt/homebrew/bin/codex');

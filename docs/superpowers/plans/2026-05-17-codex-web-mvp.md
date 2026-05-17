@@ -66,7 +66,7 @@ Ensure `AuthStore` supports:
 - [ ] **Step 3: Complete config implementation**
 
 Ensure `loadServiceConfig()` defaults to:
-- `host: "127.0.0.1"`
+- `host: "0.0.0.0"`
 - `port: 43210`
 - `stateDir: ~/.codex-web`
 - `authPath: ~/.codex-web/auth.json`
@@ -277,6 +277,6 @@ Confirm:
 - No plaintext password in repo or service env.
 - No unauthenticated `/api/*` except `POST /api/auth/login`.
 - Static UI only stores opaque token.
-- Default host is `127.0.0.1`.
+- Default host is `0.0.0.0`.
 - Tunnel setup is not implemented.
 - No dependency on `../CodexBridge-main`.

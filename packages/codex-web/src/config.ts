@@ -31,7 +31,7 @@ export function loadServiceConfig({
     || path.join(homeDir, '.codex-web');
   const port = parsePort(merged.CODEX_WEB_PORT, 43210);
   return {
-    host: normalizeString(merged.CODEX_WEB_HOST) || '127.0.0.1',
+    host: normalizeString(merged.CODEX_WEB_HOST) || '0.0.0.0',
     port,
     defaultCwd: normalizeString(merged.CODEX_WEB_DEFAULT_CWD) || homeDir,
     codexBin: normalizeString(merged.CODEX_REAL_BIN) || 'codex',

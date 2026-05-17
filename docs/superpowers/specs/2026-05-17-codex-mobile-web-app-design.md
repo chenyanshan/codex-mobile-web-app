@@ -135,16 +135,16 @@ must not be written to service env files as plaintext.
 
 ## Network Binding And Tunnel Boundary
 
-Default binding must be local-only:
-
-```bash
-codex-web serve --host 127.0.0.1 --port 43210
-```
-
-Public or tunnel-facing binding must be explicit:
+Default binding is LAN-facing so phones on the same network can reach the Mac:
 
 ```bash
 codex-web serve --host 0.0.0.0 --port 43210
+```
+
+Local-only binding remains supported through configuration:
+
+```bash
+codex-web serve --host 127.0.0.1 --port 43210
 ```
 
 The service must require authentication for every non-static API route. Static
@@ -194,17 +194,17 @@ Suggested state directory:
 Config values:
 
 ```env
-CODEX_WEB_HOST=127.0.0.1
+CODEX_WEB_HOST=0.0.0.0
 CODEX_WEB_PORT=43210
 CODEX_WEB_DEFAULT_CWD=/Users/chenyanshan/Documents/vibecoding/temp
 CODEX_REAL_BIN=/opt/homebrew/bin/codex
 CODEX_WEB_DEBUG=0
 ```
 
-If the user wants a tunnel-facing service, they edit:
+If the user wants to restrict access to the Mac only, they edit:
 
 ```env
-CODEX_WEB_HOST=0.0.0.0
+CODEX_WEB_HOST=127.0.0.1
 ```
 
 and restart the service.
@@ -301,8 +301,8 @@ Backend tests:
 - auth middleware rejects missing/invalid tokens
 - login creates a reusable token and stores only its hash
 - logout removes only the current session
-- service config defaults to localhost
-- public bind requires explicit host config
+- service config defaults to LAN-facing host
+- local-only bind remains configurable
 - event normalization for assistant deltas, approvals, command batches, and file-change batches
 
 Frontend tests:

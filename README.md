@@ -67,7 +67,8 @@ npm test
 ## Codex Web Setup
 
 The first web service lives in `packages/codex-web`. By default it binds to
-`127.0.0.1:43210` and keeps all runtime state outside the repo.
+`0.0.0.0:43210` so phones on the same network can reach the Mac, and keeps all
+runtime state outside the repo.
 
 Default paths:
 
@@ -114,7 +115,7 @@ password command above.
 The generated `~/.config/codex-web/service.env` defaults to:
 
 ```env
-CODEX_WEB_HOST=127.0.0.1
+CODEX_WEB_HOST=0.0.0.0
 CODEX_WEB_PORT=43210
 CODEX_WEB_DEFAULT_CWD=/Users/you/path/to/codex-mobile-web-app
 CODEX_REAL_BIN=codex
@@ -122,11 +123,11 @@ CODEX_WEB_DEBUG=0
 ```
 
 Change host, port, default working directory, or Codex binary by editing
-`~/.config/codex-web/service.env`. If you want a tunnel-facing service, make it
-explicit:
+`~/.config/codex-web/service.env`. To restrict the service to this Mac only,
+set:
 
 ```env
-CODEX_WEB_HOST=0.0.0.0
+CODEX_WEB_HOST=127.0.0.1
 ```
 
 Tunnel and reverse-proxy setup stay outside this repository.

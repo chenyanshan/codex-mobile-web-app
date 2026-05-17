@@ -84,13 +84,15 @@ needs bidirectional WebSocket behavior.
 
 ## Security Requirements
 
-Default service binding must be local-only:
+Default service binding is LAN-facing so phones on the same network can reach
+the Mac without extra flags:
 
 ```text
-127.0.0.1
+0.0.0.0
 ```
 
-Public or tunnel-facing binding must be explicit.
+All API and event-stream routes must still require authentication before
+serving private Codex or local-machine state.
 
 Authentication model:
 
