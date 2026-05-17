@@ -23,6 +23,7 @@ import {
   normalizeTurnStartedEvent,
   type CodexWebEvent,
 } from './event_model.js';
+import type { CodexWebSessionSettingsStore } from './session_settings_store.js';
 
 export interface CodexWebSession {
   id: string;
@@ -57,6 +58,7 @@ export interface CodexWebRuntimeClient {
     ephemeral?: boolean | null;
   }): Promise<ProviderThreadStartResult>;
   readThread(threadId: string, includeTurns?: boolean): Promise<ProviderThreadSummary | null>;
+  resumeThread?(args: { threadId: string }): Promise<unknown>;
   archiveThread?(threadId: string): Promise<void>;
   writeConfigValue(args: {
     keyPath: string;
@@ -91,6 +93,7 @@ export interface CodexWebRuntimeOptions {
   defaultCwd: string;
   client?: CodexWebRuntimeClient;
   eventBus?: CodexWebEventBus;
+  settingsStore?: CodexWebSessionSettingsStore;
 }
 
 export interface CreateSessionInput {
@@ -124,6 +127,8 @@ export class CodexWebRuntime {
 
   private readonly defaultCwd: string;
 
+  private readonly settingsStore: CodexWebSessionSettingsStore | null;
+
   private readonly sessionSettings = new Map<string, ProviderTurnSessionSettings>();
 
   private readonly turnToThread = new Map<string, string>();
@@ -139,10 +144,12 @@ export class CodexWebRuntime {
     defaultCwd,
     client = new CodexAppClient({ codexCliBin: codexBin }),
     eventBus = new CodexWebEventBus(),
+    settingsStore,
   }: CodexWebRuntimeOptions) {
     this.client = client;
     this.eventBus = eventBus;
     this.defaultCwd = defaultCwd;
+    this.settingsStore = settingsStore ?? null;
   }
 
   async listModels(): Promise<ProviderModelInfo[]> {
@@ -175,12 +182,12 @@ export class CodexWebRuntime {
       title: input.title ?? null,
       model: initialSettings.model,
       serviceTier: initialSettings.serviceTier,
-      sandboxMode: initialSettings.sandboxMode ?? 'workspace-write',
-      approvalPolicy: initialSettings.approvalPolicy ?? 'on-request',
+      sandboxMode: initialSettings.sandboxMode ?? 'danger-full-access',
+      approvalPolicy: initialSettings.approvalPolicy ?? 'never',
       ephemeral: false,
     });
     const thread = await this.requireThread(started.threadId);
-    this.sessionSettings.set(started.threadId, {
+    this.persistSessionSettings(started.threadId, {
       ...initialSettings,
       bridgeSessionId: started.threadId,
       updatedAt: Date.now(),
@@ -205,7 +212,7 @@ export class CodexWebRuntime {
       return null;
     }
     const nextSettings = this.mergeSettings(sessionId, patch);
-    this.sessionSettings.set(sessionId, nextSettings);
+    this.persistSessionSettings(sessionId, nextSettings);
     const metadata = nextSettings.metadata ?? {};
     await this.client.writeConfigValue({
       keyPath: formatConfigKeyPath(['profiles', sessionId]),
@@ -235,6 +242,7 @@ export class CodexWebRuntime {
     }
     await this.client.archiveThread(sessionId);
     this.sessionSettings.delete(sessionId);
+    this.settingsStore?.delete(sessionId);
     return true;
   }
 
@@ -244,6 +252,8 @@ export class CodexWebRuntime {
       throw new Error(`Unknown session: ${sessionId}`);
     }
     const settings = this.mergeSettings(sessionId, input.settings);
+    this.persistSessionSettings(sessionId, settings);
+    await this.ensureThreadReadyForTurn(sessionId);
     let startedTurnId = '';
     let resolveStarted: ((value: { turnId: string }) => void) | null = null;
     let rejectStarted: ((reason?: unknown) => void) | null = null;
@@ -259,8 +269,8 @@ export class CodexWebRuntime {
       effort: settings.reasoningEffort,
       serviceTier: settings.serviceTier,
       personality: settings.personality ?? null,
-      sandboxMode: settings.sandboxMode ?? 'workspace-write',
-      approvalPolicy: settings.approvalPolicy ?? 'on-request',
+      sandboxMode: settings.sandboxMode ?? 'danger-full-access',
+      approvalPolicy: settings.approvalPolicy ?? 'never',
       collaborationMode: settings.collaborationMode ?? 'default',
       onTurnStarted: async (meta) => {
         const turnId = String(meta.turnId ?? '');
@@ -390,7 +400,43 @@ export class CodexWebRuntime {
 
   private async readThreadSummary(threadId: string): Promise<ProviderThreadSummary | null> {
     try {
-      return await this.client.readThread(threadId, true);
+      const thread = await this.client.readThread(threadId, true);
+      if (thread) {
+        return thread;
+      }
+      return this.resumeAndReadThread(threadId);
+    } catch (error) {
+      if (isMissingThreadError(error)) {
+        return this.resumeAndReadThread(threadId);
+      }
+      if (!isIncludeTurnsRetryableError(error)) {
+        throw error;
+      }
+      const thread = await this.client.readThread(threadId, false);
+      if (thread) {
+        return thread;
+      }
+      return this.resumeAndReadThread(threadId);
+    }
+  }
+
+  private async resumeAndReadThread(threadId: string): Promise<ProviderThreadSummary | null> {
+    if (typeof this.client.resumeThread !== 'function') {
+      return null;
+    }
+    try {
+      await this.client.resumeThread({ threadId });
+    } catch (error) {
+      if (isMissingThreadError(error)) {
+        return null;
+      }
+      throw error;
+    }
+    try {
+      const thread = await this.client.readThread(threadId, true);
+      if (thread) {
+        return thread;
+      }
     } catch (error) {
       if (isMissingThreadError(error)) {
         return null;
@@ -398,13 +444,19 @@ export class CodexWebRuntime {
       if (!isIncludeTurnsRetryableError(error)) {
         throw error;
       }
-      return this.client.readThread(threadId, false);
     }
+    return this.client.readThread(threadId, false);
+  }
+
+  private async ensureThreadReadyForTurn(threadId: string): Promise<void> {
+    if (typeof this.client.resumeThread !== 'function') {
+      return;
+    }
+    await this.client.resumeThread({ threadId });
   }
 
   private toSession(thread: ProviderThreadSummary): CodexWebSession {
-    const current = this.sessionSettings.get(thread.threadId) ?? createDefaultSettings(thread.threadId);
-    this.sessionSettings.set(thread.threadId, current);
+    const current = this.getSessionSettings(thread.threadId);
     const updatedAt = thread.updatedAt ?? null;
     const inputSummary = summarizeSessionInputs(thread);
     return {
@@ -427,7 +479,7 @@ export class CodexWebRuntime {
     patch: Partial<ProviderTurnSessionSettings> | UpdateSessionSettingsInput | undefined,
   ): ProviderTurnSessionSettings {
     const current = sessionId
-      ? this.sessionSettings.get(sessionId) ?? createDefaultSettings(sessionId)
+      ? this.getSessionSettings(sessionId)
       : createDefaultSettings('pending');
     const metadata = patch?.metadata && typeof patch.metadata === 'object'
       ? patch.metadata
@@ -439,6 +491,34 @@ export class CodexWebRuntime {
       metadata,
       updatedAt: Date.now(),
     };
+  }
+
+  private getSessionSettings(sessionId: string): ProviderTurnSessionSettings {
+    const cached = this.sessionSettings.get(sessionId);
+    if (cached) {
+      return cached;
+    }
+    const stored = this.settingsStore?.get(sessionId);
+    const settings = stored
+      ? {
+        ...createDefaultSettings(sessionId),
+        ...stored,
+        bridgeSessionId: sessionId,
+        metadata: stored.metadata ?? {},
+      }
+      : createDefaultSettings(sessionId);
+    this.sessionSettings.set(sessionId, settings);
+    return settings;
+  }
+
+  private persistSessionSettings(sessionId: string, settings: ProviderTurnSessionSettings): void {
+    const normalized = {
+      ...settings,
+      bridgeSessionId: sessionId,
+      metadata: settings.metadata ?? {},
+    };
+    this.sessionSettings.set(sessionId, normalized);
+    this.settingsStore?.set(sessionId, normalized);
   }
 
   private findOpenApprovals(turnId: string): string[] {
@@ -505,14 +585,14 @@ function summarizeSessionInputText(text: string | null | undefined): string | nu
 function createDefaultSettings(sessionId: string): ProviderTurnSessionSettings {
   return {
     bridgeSessionId: sessionId,
-    model: null,
-    reasoningEffort: null,
+    model: 'gpt-5.4',
+    reasoningEffort: 'xhigh',
     serviceTier: null,
     collaborationMode: 'default',
     personality: 'pragmatic',
-    accessPreset: 'default',
-    approvalPolicy: 'on-request',
-    sandboxMode: 'workspace-write',
+    accessPreset: 'full-access',
+    approvalPolicy: 'never',
+    sandboxMode: 'danger-full-access',
     locale: null,
     metadata: {},
     updatedAt: Date.now(),

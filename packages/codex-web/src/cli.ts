@@ -9,6 +9,7 @@ import { AuthStore, type PublicAuthSession } from './auth_store.js';
 import { loadServiceConfig, type CodexWebConfig } from './config.js';
 import { CodexWebRuntime } from './runtime.js';
 import { createCodexWebServer, type CodexWebAuthLike, type CodexWebServerHandle } from './server.js';
+import { FileSessionSettingsStore } from './session_settings_store.js';
 
 export type ParsedCliArgs =
   | {
@@ -144,6 +145,9 @@ export async function startServeCommand(
   const createRuntimeFn = dependencies.createRuntime ?? (({ config: runtimeConfig }) => new CodexWebRuntime({
     codexBin: runtimeConfig.codexBin,
     defaultCwd: runtimeConfig.defaultCwd,
+    settingsStore: new FileSessionSettingsStore({
+      settingsPath: path.join(runtimeConfig.stateDir, 'session-settings.json'),
+    }),
   }));
   const runtime = createRuntimeFn({ config });
   const createServerFn = dependencies.createServer ?? ((args) => createCodexWebServer(args));

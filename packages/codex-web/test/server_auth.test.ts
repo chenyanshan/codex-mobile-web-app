@@ -413,6 +413,10 @@ test('static root is public', async () => {
     assert.match(html, /app\.js/);
     assert.match(html, /styles\.css/);
 
+    const indexResponse = await fetch(`${server.baseUrl}/index.html`);
+    assert.equal(indexResponse.status, 200);
+    assert.equal(await indexResponse.text(), html);
+
     const scriptResponse = await fetch(`${server.baseUrl}/app.js`);
     assert.equal(scriptResponse.status, 200);
     assert.match(scriptResponse.headers.get('content-type') ?? '', /^application\/javascript\b/i);
@@ -422,6 +426,20 @@ test('static root is public', async () => {
     assert.equal(styleResponse.status, 200);
     assert.match(styleResponse.headers.get('content-type') ?? '', /^text\/css\b/i);
     assert.match(await styleResponse.text(), /body|--bg|font-family/u);
+
+    const manifestResponse = await fetch(`${server.baseUrl}/manifest.webmanifest`);
+    assert.equal(manifestResponse.status, 200);
+    assert.match(manifestResponse.headers.get('content-type') ?? '', /^application\/manifest\+json\b/i);
+    assert.equal((await manifestResponse.json()).display, 'standalone');
+
+    const serviceWorkerResponse = await fetch(`${server.baseUrl}/service-worker.js`);
+    assert.equal(serviceWorkerResponse.status, 200);
+    assert.match(serviceWorkerResponse.headers.get('content-type') ?? '', /^application\/javascript\b/i);
+    assert.match(await serviceWorkerResponse.text(), /self\.addEventListener/u);
+
+    const iconResponse = await fetch(`${server.baseUrl}/icon.svg`);
+    assert.equal(iconResponse.status, 200);
+    assert.match(iconResponse.headers.get('content-type') ?? '', /^image\/svg\+xml\b/i);
   } finally {
     await server.stop();
   }

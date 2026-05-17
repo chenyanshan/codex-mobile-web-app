@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" role="img" aria-label="Codex Web">
+  <rect width="180" height="180" rx="36" fill="#0b0d12"/>
+  <path fill="#66b3ff" d="M40 49h100v18H40zM40 82h76v18H40zM40 115h100v18H40z"/>
+  <path fill="#edf2ff" d="M128 80l22 20-22 20-11-12 9-8-9-8z"/>
+</svg>

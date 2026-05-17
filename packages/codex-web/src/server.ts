@@ -130,9 +130,14 @@ export function createCodexWebServer({
 
 function loadDefaultStaticFiles(): Record<string, { body: string; contentType: string }> {
   const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
+  const indexHtml = readFileSync(path.join(publicDir, 'index.html'), 'utf8');
   return {
     '/': {
-      body: readFileSync(path.join(publicDir, 'index.html'), 'utf8'),
+      body: indexHtml,
+      contentType: 'text/html; charset=utf-8',
+    },
+    '/index.html': {
+      body: indexHtml,
       contentType: 'text/html; charset=utf-8',
     },
     '/app.js': {
@@ -142,6 +147,18 @@ function loadDefaultStaticFiles(): Record<string, { body: string; contentType: s
     '/styles.css': {
       body: readFileSync(path.join(publicDir, 'styles.css'), 'utf8'),
       contentType: 'text/css; charset=utf-8',
+    },
+    '/manifest.webmanifest': {
+      body: readFileSync(path.join(publicDir, 'manifest.webmanifest'), 'utf8'),
+      contentType: 'application/manifest+json; charset=utf-8',
+    },
+    '/service-worker.js': {
+      body: readFileSync(path.join(publicDir, 'service-worker.js'), 'utf8'),
+      contentType: 'application/javascript; charset=utf-8',
+    },
+    '/icon.svg': {
+      body: readFileSync(path.join(publicDir, 'icon.svg'), 'utf8'),
+      contentType: 'image/svg+xml; charset=utf-8',
     },
   };
 }

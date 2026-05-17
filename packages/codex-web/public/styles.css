@@ -574,8 +574,9 @@ button:disabled {
 
 .compact-composer-row textarea {
   min-height: 42px;
-  max-height: 132px;
+  max-height: 116px;
   padding: 10px 11px;
+  overflow-y: auto;
 }
 
 .icon-button,

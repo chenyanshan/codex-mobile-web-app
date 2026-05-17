@@ -5,6 +5,141 @@ import vm from 'node:vm';
 
 const stylesUrl = new URL('../public/styles.css', import.meta.url);
 const appUrl = new URL('../public/app.js', import.meta.url);
+const indexUrl = new URL('../public/index.html', import.meta.url);
+const manifestUrl = new URL('../public/manifest.webmanifest', import.meta.url);
+const serviceWorkerUrl = new URL('../public/service-worker.js', import.meta.url);
+
+test('mobile UI exposes iOS PWA install metadata and registers a service worker', async () => {
+  const [index, app, manifest, serviceWorker] = await Promise.all([
+    readFile(indexUrl, 'utf8'),
+    readFile(appUrl, 'utf8'),
+    readFile(manifestUrl, 'utf8'),
+    readFile(serviceWorkerUrl, 'utf8'),
+  ]);
+  const parsedManifest = JSON.parse(manifest);
+
+  assert.equal(parsedManifest.name, 'Codex Web');
+  assert.equal(parsedManifest.short_name, 'Codex');
+  assert.equal(parsedManifest.display, 'standalone');
+  assert.equal(parsedManifest.start_url, '/');
+  assert.equal(parsedManifest.theme_color, '#0b0d12');
+  assert.equal(parsedManifest.background_color, '#0b0d12');
+  assert.match(index, /<link rel="manifest" href="\/manifest\.webmanifest">/u);
+  assert.match(index, /<meta name="theme-color" content="#0b0d12">/u);
+  assert.match(index, /<meta name="apple-mobile-web-app-capable" content="yes">/u);
+  assert.match(index, /<meta name="apple-mobile-web-app-title" content="Codex">/u);
+  assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
+  assert.match(serviceWorker, /self\.addEventListener\('install'/u);
+  assert.match(serviceWorker, /self\.addEventListener\('fetch'/u);
+});
+
+test('new sessions default to gpt-5.4 xhigh full access settings', async () => {
+  const { api } = await loadAppHarness();
+
+  assert.equal(api.state.model, 'gpt-5.4');
+  assert.equal(api.state.reasoningEffort, 'xhigh');
+  assert.equal(api.state.permissionPreset, 'full-access');
+  assert.equal(api.state.approvalPolicy, 'never');
+  assert.equal(api.state.sandboxMode, 'danger-full-access');
+  assert.equal(
+    JSON.stringify(api.collectSettings()),
+    JSON.stringify({
+      model: 'gpt-5.4',
+      reasoningEffort: 'xhigh',
+      collaborationMode: 'default',
+      accessPreset: 'full-access',
+      approvalPolicy: 'never',
+      sandboxMode: 'danger-full-access',
+      personality: 'pragmatic',
+    }),
+  );
+});
+
+test('opening a session applies its persisted settings to controls', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applySessionSettings({
+    settings: {
+      model: 'gpt-5',
+      reasoningEffort: 'high',
+      collaborationMode: 'plan',
+      accessPreset: 'read-only',
+      approvalPolicy: 'never',
+      sandboxMode: 'read-only',
+    },
+  });
+
+  assert.equal(api.state.model, 'gpt-5');
+  assert.equal(api.state.reasoningEffort, 'high');
+  assert.equal(api.state.collaborationMode, 'plan');
+  assert.equal(api.state.permissionPreset, 'read-only');
+  assert.equal(api.state.approvalPolicy, 'never');
+  assert.equal(api.state.sandboxMode, 'read-only');
+});
+
+test('changing existing session settings patches the session settings endpoint', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: 'session_settings',
+            cwd: '/repo',
+            settings: JSON.parse(options.body),
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.sessionId = 'session_settings';
+  api.state.currentSession = { id: 'session_settings', cwd: '/repo', settings: {} };
+  api.state.sessions = [api.state.currentSession];
+
+  await api.updateSessionSettings({ model: 'gpt-5-mini', reasoningEffort: 'low' });
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0]?.path, '/api/sessions/session_settings/settings');
+  assert.equal(fetchCalls[0]?.options.method, 'PATCH');
+  assert.deepEqual(JSON.parse(fetchCalls[0]?.options.body), {
+    model: 'gpt-5-mini',
+    reasoningEffort: 'low',
+    collaborationMode: 'default',
+    accessPreset: 'full-access',
+    approvalPolicy: 'never',
+    sandboxMode: 'danger-full-access',
+    personality: 'pragmatic',
+  });
+});
+
+test('sessions navigation remains available during a pending turn', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.doesNotMatch(app, /id="back-to-list-button"[^>]*state\.pendingTurn \? 'disabled'/u);
+  assert.doesNotMatch(app, /function showSessionList\(\)\s*\{\s*if \(state\.pendingTurn\)/u);
+  assert.doesNotMatch(app, /function openNewSessionPage\(\)\s*\{\s*if \(state\.pendingTurn\)/u);
+  assert.doesNotMatch(app, /async function selectSession\(sessionId\)\s*\{\s*if \(state\.pendingTurn\)/u);
+});
+
+test('message input starts one line and auto-grows to a compact capped height', async () => {
+  const [styles, app] = await Promise.all([
+    readFile(stylesUrl, 'utf8'),
+    readFile(appUrl, 'utf8'),
+  ]);
+
+  assert.match(styles, /\.compact-composer-row textarea\s*\{[^}]*min-height:\s*42px;/su);
+  assert.match(styles, /\.compact-composer-row textarea\s*\{[^}]*max-height:\s*116px;/su);
+  assert.match(styles, /\.compact-composer-row textarea\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.match(app, /function autoGrowPromptInput\(textarea\)/u);
+  assert.match(app, /textarea\.style\.height = 'auto';/u);
+  assert.match(app, /Math\.min\(textarea\.scrollHeight, 116\)/u);
+  assert.match(app, /autoGrowPromptInput\(promptInput\)/u);
+});
 
 test('mobile timeline reserves the measured composer height', async () => {
   const [styles, app] = await Promise.all([
@@ -276,6 +411,9 @@ globalThis.__codexWebTest = {
   firstInputForSession,
   previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
   hydrateTimelineFromSession,
+  applySessionSettings: typeof applySessionSettings === 'function' ? applySessionSettings : null,
+  updateSessionSettings: typeof updateSessionSettings === 'function' ? updateSessionSettings : null,
+  collectSettings,
   refreshCurrentSessionMetadata,
   saveCurrentTimeline,
 };`, context);

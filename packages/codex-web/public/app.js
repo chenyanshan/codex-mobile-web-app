@@ -8,6 +8,13 @@ const MAX_TIMELINE_SUMMARY_TEXT = 4000;
 const MAX_TIMELINE_SUMMARY_ARRAY_ITEMS = 24;
 const MAX_TIMELINE_SUMMARY_OBJECT_KEYS = 32;
 const MAX_TIMELINE_SUMMARY_DEPTH = 4;
+const DEFAULT_MODEL = 'gpt-5.4';
+const DEFAULT_REASONING_EFFORT = 'xhigh';
+const DEFAULT_COLLABORATION_MODE = 'default';
+const DEFAULT_PERMISSION_PRESET = 'full-access';
+const DEFAULT_APPROVAL_POLICY = 'never';
+const DEFAULT_SANDBOX_MODE = 'danger-full-access';
+const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
@@ -30,13 +37,13 @@ const state = {
   status: 'Checking auth',
   statusTone: 'warn',
   prompt: '',
-  model: '',
-  reasoningEffort: 'medium',
-  collaborationMode: 'default',
+  model: DEFAULT_MODEL,
+  reasoningEffort: DEFAULT_REASONING_EFFORT,
+  collaborationMode: DEFAULT_COLLABORATION_MODE,
   settingsOpen: false,
-  permissionPreset: 'default',
-  approvalPolicy: 'on-request',
-  sandboxMode: 'workspace-write',
+  permissionPreset: DEFAULT_PERMISSION_PRESET,
+  approvalPolicy: DEFAULT_APPROVAL_POLICY,
+  sandboxMode: DEFAULT_SANDBOX_MODE,
   timeline: [],
   timelineCache: loadTimelineCache(),
   batches: new Map(),
@@ -49,6 +56,7 @@ let composerResizeObserver = null;
 let composerOffsetRun = 0;
 
 bootstrap();
+registerServiceWorker();
 
 async function bootstrap() {
   render();
@@ -71,7 +79,7 @@ async function restoreAuth() {
     state.authSession = session;
     state.models = Array.isArray(modelsPayload.items) ? modelsPayload.items : [];
     state.sessions = normalizeSessions(sessionsPayload);
-    state.model = pickModel(state.models, state.model);
+    state.model = pickModel(state.models, state.model || DEFAULT_MODEL);
     syncCurrentSessionFromList();
     if (!state.sessionId) {
       state.view = 'sessions';
@@ -104,6 +112,7 @@ function setLoggedOut(message = '') {
   state.statusTone = 'warn';
   state.error = '';
   state.loginError = message;
+  applyDefaultSettings();
   stopStream();
   render();
 }
@@ -247,7 +256,7 @@ function renderChat() {
       <header class="topbar chat-topbar">
         <div class="topbar-main">
           <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
-          <button class="ghost compact-button" type="button" id="back-to-list-button" ${state.pendingTurn ? 'disabled' : ''}>Sessions</button>
+          <button class="ghost compact-button" type="button" id="back-to-list-button">Sessions</button>
         </div>
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
@@ -450,6 +459,9 @@ function renderModelOptions() {
         label: model.label || model.id || model.name || 'Unnamed model',
       });
     }
+    if (current && !options.some((option) => option.id === current)) {
+      options.unshift({ id: current, label: current });
+    }
   }
   return options.map((option) => {
     const value = option.id || '';
@@ -550,7 +562,10 @@ function bindGlobalEvents() {
   if (promptInput) {
     promptInput.addEventListener('input', (event) => {
       state.prompt = event.target.value;
+      autoGrowPromptInput(event.target);
+      syncComposerOffset();
     });
+    autoGrowPromptInput(promptInput);
   }
 
   const settingsToggle = document.querySelector('#settings-toggle');
@@ -565,6 +580,7 @@ function bindGlobalEvents() {
   if (modelSelect) {
     modelSelect.addEventListener('change', (event) => {
       state.model = event.target.value;
+      void updateSessionSettings();
     });
   }
 
@@ -572,12 +588,14 @@ function bindGlobalEvents() {
   if (reasoningSelect) {
     reasoningSelect.addEventListener('change', (event) => {
       state.reasoningEffort = event.target.value;
+      void updateSessionSettings();
     });
   }
 
   for (const button of document.querySelectorAll('[data-mode]')) {
     button.addEventListener('click', () => {
       state.collaborationMode = button.getAttribute('data-mode') || 'default';
+      void updateSessionSettings();
       render();
     });
   }
@@ -585,6 +603,7 @@ function bindGlobalEvents() {
   for (const button of document.querySelectorAll('[data-permission-preset]')) {
     button.addEventListener('click', () => {
       applyPermissionPreset(button.getAttribute('data-permission-preset') || 'default');
+      void updateSessionSettings();
       render();
     });
   }
@@ -637,6 +656,15 @@ function syncComposerOffset() {
   });
 }
 
+function autoGrowPromptInput(textarea) {
+  if (!textarea?.style) {
+    return;
+  }
+  textarea.style.height = 'auto';
+  const nextHeight = Math.min(textarea.scrollHeight, 116);
+  textarea.style.height = `${Math.max(42, nextHeight)}px`;
+}
+
 async function onLoginSubmit(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -674,10 +702,6 @@ async function onLogout() {
 }
 
 function showSessionList() {
-  if (state.pendingTurn) {
-    render();
-    return;
-  }
   saveCurrentTimeline();
   stopStream();
   state.view = 'sessions';
@@ -691,12 +715,9 @@ function showSessionList() {
 }
 
 function openNewSessionPage() {
-  if (state.pendingTurn) {
-    render();
-    return;
-  }
   saveCurrentTimeline();
   stopStream();
+  applyDefaultSettings();
   state.view = 'new';
   state.sessionId = null;
   state.currentSession = null;
@@ -708,11 +729,9 @@ function openNewSessionPage() {
 
 function onNewSessionSubmit(event) {
   event.preventDefault();
-  if (state.pendingTurn) {
-    return;
-  }
   saveCurrentTimeline();
   stopStream();
+  applyDefaultSettings();
   state.view = 'chat';
   state.sessionId = null;
   state.currentSession = null;
@@ -727,10 +746,6 @@ function onNewSessionSubmit(event) {
 }
 
 async function selectSession(sessionId) {
-  if (state.pendingTurn) {
-    render();
-    return;
-  }
   const nextSession = state.sessions.find((session) => session.id === sessionId) || null;
   if (!nextSession) {
     openNewSessionPage();
@@ -755,6 +770,7 @@ async function selectSession(sessionId) {
   state.sessionId = refreshedSession.id;
   state.currentSession = refreshedSession;
   state.cwd = refreshedSession.cwd || '';
+  applySessionSettings(refreshedSession);
   restoreTimelineForSession(refreshedSession);
   state.view = 'chat';
   state.settingsOpen = false;
@@ -1244,6 +1260,7 @@ function normalizeSessions(payload) {
       lastUserInput: typeof session.lastUserInput === 'string' ? session.lastUserInput : '',
       lastInputAt: typeof session.lastInputAt === 'number' ? session.lastInputAt : null,
       updatedAt: typeof session.updatedAt === 'number' ? session.updatedAt : null,
+      settings: session.settings && typeof session.settings === 'object' ? session.settings : null,
     }));
 }
 
@@ -1620,6 +1637,94 @@ function applyPermissionPreset(preset) {
   state.sandboxMode = 'workspace-write';
 }
 
+function applyDefaultSettings() {
+  state.model = DEFAULT_MODEL;
+  state.reasoningEffort = DEFAULT_REASONING_EFFORT;
+  state.collaborationMode = DEFAULT_COLLABORATION_MODE;
+  applyPermissionPreset(DEFAULT_PERMISSION_PRESET);
+}
+
+function applySessionSettings(session) {
+  const settings = session?.settings;
+  if (!settings || typeof settings !== 'object') {
+    applyDefaultSettings();
+    return;
+  }
+  state.model = typeof settings.model === 'string' && settings.model
+    ? settings.model
+    : DEFAULT_MODEL;
+  state.reasoningEffort = typeof settings.reasoningEffort === 'string' && settings.reasoningEffort
+    ? settings.reasoningEffort
+    : DEFAULT_REASONING_EFFORT;
+  state.collaborationMode = typeof settings.collaborationMode === 'string' && settings.collaborationMode
+    ? settings.collaborationMode
+    : DEFAULT_COLLABORATION_MODE;
+  const preset = typeof settings.accessPreset === 'string' && settings.accessPreset
+    ? settings.accessPreset
+    : permissionPresetFromSettings(settings);
+  state.permissionPreset = preset;
+  state.approvalPolicy = typeof settings.approvalPolicy === 'string' && settings.approvalPolicy
+    ? settings.approvalPolicy
+    : approvalPolicyForPreset(preset);
+  state.sandboxMode = typeof settings.sandboxMode === 'string' && settings.sandboxMode
+    ? settings.sandboxMode
+    : sandboxModeForPreset(preset);
+}
+
+function permissionPresetFromSettings(settings) {
+  if (settings?.sandboxMode === 'read-only') {
+    return 'read-only';
+  }
+  if (settings?.sandboxMode === 'danger-full-access' || settings?.approvalPolicy === 'never') {
+    return 'full-access';
+  }
+  return 'default';
+}
+
+function approvalPolicyForPreset(preset) {
+  return preset === 'default' ? 'on-request' : 'never';
+}
+
+function sandboxModeForPreset(preset) {
+  if (preset === 'read-only') {
+    return 'read-only';
+  }
+  if (preset === 'full-access') {
+    return 'danger-full-access';
+  }
+  return 'workspace-write';
+}
+
+async function updateSessionSettings(patch = {}) {
+  const settings = {
+    ...collectSettings(),
+    ...patch,
+  };
+  if (!state.sessionId) {
+    return null;
+  }
+  try {
+    const payload = await apiFetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/settings`, {
+      method: 'PATCH',
+      body: settings,
+    });
+    if (payload?.session) {
+      upsertSession(payload.session);
+      if (state.currentSession?.id === payload.session.id) {
+        state.currentSession = state.sessions.find((session) => session.id === payload.session.id) || payload.session;
+      }
+    }
+    state.error = '';
+    return payload?.session || null;
+  } catch (error) {
+    if (handleMissingSession(error, '')) {
+      return null;
+    }
+    handleApiError(error);
+    return null;
+  }
+}
+
 function appendMessage(entry) {
   state.timeline.push(entry);
 }
@@ -1635,14 +1740,25 @@ function appendOrReplace(entry, matcher) {
 
 function collectSettings() {
   return {
-    model: state.model || null,
-    reasoningEffort: state.reasoningEffort || null,
-    collaborationMode: state.collaborationMode || 'default',
-    accessPreset: state.permissionPreset || 'default',
-    approvalPolicy: state.approvalPolicy || 'on-request',
-    sandboxMode: state.sandboxMode || 'workspace-write',
+    model: state.model || DEFAULT_MODEL,
+    reasoningEffort: state.reasoningEffort || DEFAULT_REASONING_EFFORT,
+    collaborationMode: state.collaborationMode || DEFAULT_COLLABORATION_MODE,
+    accessPreset: state.permissionPreset || DEFAULT_PERMISSION_PRESET,
+    approvalPolicy: state.approvalPolicy || DEFAULT_APPROVAL_POLICY,
+    sandboxMode: state.sandboxMode || DEFAULT_SANDBOX_MODE,
     personality: 'pragmatic',
   };
+}
+
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) {
+    return;
+  }
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').catch((error) => {
+      console.warn('[codex-web] service worker registration failed', error);
+    });
+  });
 }
 
 function stopStream() {
