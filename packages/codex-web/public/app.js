@@ -1,4 +1,14 @@
 const TOKEN_KEY = 'codexWebToken';
+const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
+const MAX_TIMELINE_CACHE_SESSIONS = 16;
+const MAX_TIMELINE_CACHE_ITEMS = 80;
+const MAX_TIMELINE_CACHE_MAP_ITEMS = 24;
+const MAX_TIMELINE_ITEM_TEXT = 12000;
+const MAX_TIMELINE_SUMMARY_TEXT = 4000;
+const MAX_TIMELINE_SUMMARY_ARRAY_ITEMS = 24;
+const MAX_TIMELINE_SUMMARY_OBJECT_KEYS = 32;
+const MAX_TIMELINE_SUMMARY_DEPTH = 4;
+
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
   authSession: null,
@@ -27,7 +37,7 @@ const state = {
   approvalPolicy: 'on-request',
   sandboxMode: 'workspace-write',
   timeline: [],
-  timelineCache: new Map(),
+  timelineCache: loadTimelineCache(),
   batches: new Map(),
   approvals: new Map(),
   streamAbortController: null,
@@ -85,7 +95,7 @@ function setLoggedOut(message = '') {
   state.turnId = null;
   state.pendingTurn = false;
   state.timeline = [];
-  state.timelineCache = new Map();
+  state.timelineCache = loadTimelineCache();
   state.batches = new Map();
   state.approvals = new Map();
   state.status = 'Login required';
@@ -265,7 +275,7 @@ function renderSessionCards() {
     <button class="session-card" type="button" data-session-id="${escapeAttribute(session.id)}">
       <span class="session-card-main">
         <span class="session-project">${escapeHtml(projectNameForSession(session))}</span>
-        <span class="session-preview">${escapeHtml(shorten(firstInputForSession(session), 96) || 'No prompt preview')}</span>
+        <span class="session-preview">${escapeHtml(shorten(previewInputForSession(session), 96) || 'No prompt preview')}</span>
       </span>
       <span class="session-card-meta">
         <span>${escapeHtml(shorten(session.cwd || 'No cwd', 54))}</span>
@@ -624,6 +634,7 @@ async function onLogout() {
   } catch (_error) {
   }
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(TIMELINE_CACHE_KEY);
   state.token = '';
   setLoggedOut();
 }
@@ -746,6 +757,8 @@ async function onComposerSubmit(event) {
 
   try {
     const sessionId = await ensureSession();
+    optimisticallyUpdateSessionInput(promptToSend);
+    saveCurrentTimeline();
     const settings = collectSettings();
     const turn = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/turns`, {
       method: 'POST',
@@ -762,6 +775,7 @@ async function onComposerSubmit(event) {
       if (turn.recoveredFromMissingSession) {
         state.error = 'Previous session was unavailable. Started a new session.';
       }
+      optimisticallyUpdateSessionInput(promptToSend);
     }
     state.turnId = turn.turnId;
     state.status = 'Turn running';
@@ -1013,6 +1027,7 @@ function applyTurnEvent(event, assistantEntry) {
       state.statusTone = event.status === 'completed' ? 'success' : 'warn';
       state.turnId = null;
       stopStream();
+      void refreshCurrentSessionMetadata();
       break;
     case 'turn.failed':
       state.pendingTurn = false;
@@ -1023,6 +1038,7 @@ function applyTurnEvent(event, assistantEntry) {
       state.error = event.message || 'Turn failed';
       break;
   }
+  saveCurrentTimeline();
   render();
   scrollTimelineToBottom();
   return assistantEntry;
@@ -1084,6 +1100,73 @@ function isMissingSessionError(error) {
     || /thread not found|session not found|unknown session|unknown thread/i.test(message);
 }
 
+async function refreshCurrentSessionMetadata() {
+  if (!state.sessionId) {
+    return null;
+  }
+  const sessionId = state.sessionId;
+  try {
+    const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    if (payload?.session) {
+      upsertSession(payload.session);
+      const session = state.sessions.find((item) => item.id === sessionId) || null;
+      if (state.sessionId === sessionId) {
+        state.currentSession = session;
+        state.cwd = session?.cwd || state.cwd;
+      }
+      if (state.view === 'sessions') {
+        render();
+      }
+      return session;
+    }
+  } catch (error) {
+    if (isMissingSessionError(error)) {
+      if (state.sessionId === sessionId) {
+        handleMissingSession(error, '');
+      } else {
+        removeSession(sessionId);
+        if (state.view === 'sessions') {
+          render();
+        }
+      }
+      return null;
+    }
+    console.warn('[codex-web] session refresh failed', error);
+  }
+  return null;
+}
+
+function removeSession(sessionId) {
+  if (!sessionId) {
+    return;
+  }
+  state.sessions = state.sessions.filter((session) => session.id !== sessionId);
+  if (state.currentSession?.id === sessionId) {
+    state.currentSession = null;
+  }
+}
+
+function optimisticallyUpdateSessionInput(text) {
+  const input = String(text || '').trim();
+  if (!state.sessionId || !input) {
+    return;
+  }
+  const previous = state.sessions.find((session) => session.id === state.sessionId)
+    || state.currentSession
+    || { id: state.sessionId, cwd: state.cwd };
+  const now = Date.now();
+  upsertSession({
+    ...previous,
+    cwd: previous.cwd || state.cwd,
+    projectName: previous.projectName || projectNameFromCwd(previous.cwd || state.cwd),
+    preview: previous.preview || input,
+    firstUserInput: previous.firstUserInput || input,
+    lastUserInput: input,
+    lastInputAt: now,
+    updatedAt: Math.max(previous.updatedAt || 0, now),
+  });
+}
+
 function normalizeSessions(payload) {
   const items = Array.isArray(payload?.items) ? payload.items : [];
   return items
@@ -1124,23 +1207,54 @@ function upsertSession(session) {
     return;
   }
   const index = state.sessions.findIndex((item) => item.id === normalized.id);
+  const next = mergeSessionSummary(index >= 0 ? state.sessions[index] : null, normalized);
   if (index >= 0) {
-    state.sessions[index] = normalized;
+    state.sessions[index] = next;
   } else {
-    state.sessions.unshift(normalized);
+    state.sessions.unshift(next);
   }
-  state.currentSession = normalized;
+  if (state.sessionId === next.id) {
+    state.currentSession = next;
+  }
+}
+
+function mergeSessionSummary(previous, next) {
+  if (!previous) {
+    return next;
+  }
+  const previousUpdatedAt = previous.updatedAt || 0;
+  const nextUpdatedAt = next.updatedAt || 0;
+  return {
+    ...previous,
+    ...next,
+    cwd: next.cwd || previous.cwd,
+    projectName: next.projectName || previous.projectName,
+    title: next.title || previous.title,
+    preview: next.preview || previous.preview,
+    firstUserInput: next.firstUserInput || previous.firstUserInput,
+    lastUserInput: next.lastUserInput || previous.lastUserInput,
+    lastInputAt: next.lastInputAt || previous.lastInputAt,
+    updatedAt: Math.max(previousUpdatedAt, nextUpdatedAt) || null,
+  };
 }
 
 function saveCurrentTimeline() {
   if (!state.sessionId) {
     return;
   }
+  const timeline = cloneTimelineEntries(state.timeline);
+  if (!timeline.length && !state.batches.size && !state.approvals.size) {
+    state.timelineCache.delete(state.sessionId);
+    persistTimelineCache();
+    return;
+  }
   state.timelineCache.set(state.sessionId, {
-    timeline: state.timeline.map((item) => ({ ...item })),
-    batches: new Map(state.batches),
-    approvals: new Map(state.approvals),
+    savedAt: Date.now(),
+    timeline,
+    batches: cloneCacheMap(state.batches),
+    approvals: cloneCacheMap(state.approvals),
   });
+  persistTimelineCache();
 }
 
 function restoreTimelineForSession(session) {
@@ -1154,6 +1268,141 @@ function restoreTimelineForSession(session) {
   state.timeline = hydrateTimelineFromSession(session);
   state.batches = new Map();
   state.approvals = new Map();
+}
+
+function loadTimelineCache() {
+  const cache = new Map();
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TIMELINE_CACHE_KEY) || '{"entries":[]}');
+    const entries = Array.isArray(parsed?.entries)
+      ? parsed.entries
+      : Array.isArray(parsed)
+        ? parsed
+        : [];
+    for (const entry of entries) {
+      const cacheEntry = deserializeTimelineCacheEntry(entry);
+      if (cacheEntry) {
+        cache.set(cacheEntry.sessionId, cacheEntry.value);
+      }
+    }
+  } catch (_error) {
+    localStorage.removeItem(TIMELINE_CACHE_KEY);
+  }
+  return cache;
+}
+
+function persistTimelineCache() {
+  const entries = [...state.timelineCache.entries()]
+    .map(([sessionId, value]) => serializeTimelineCacheEntry(sessionId, value))
+    .filter(Boolean)
+    .sort((left, right) => right.savedAt - left.savedAt)
+    .slice(0, MAX_TIMELINE_CACHE_SESSIONS);
+  state.timelineCache = new Map(entries.map((entry) => {
+    const cacheEntry = deserializeTimelineCacheEntry(entry);
+    return [entry.sessionId, cacheEntry.value];
+  }));
+  try {
+    localStorage.setItem(TIMELINE_CACHE_KEY, JSON.stringify({ entries }));
+  } catch (error) {
+    console.warn('[codex-web] timeline cache persist failed', error);
+  }
+}
+
+function serializeTimelineCacheEntry(sessionId, value) {
+  if (!sessionId || !value) {
+    return null;
+  }
+  return {
+    sessionId,
+    savedAt: typeof value.savedAt === 'number' ? value.savedAt : 0,
+    timeline: cloneTimelineEntries(value.timeline || []),
+    batches: [...cloneCacheMap(value.batches).entries()],
+    approvals: [...cloneCacheMap(value.approvals).entries()],
+  };
+}
+
+function deserializeTimelineCacheEntry(entry) {
+  if (!entry || typeof entry.sessionId !== 'string' || !entry.sessionId) {
+    return null;
+  }
+  const batches = Array.isArray(entry.batches)
+    ? entry.batches.filter(isCacheMapPair)
+    : [];
+  const approvals = Array.isArray(entry.approvals)
+    ? entry.approvals.filter(isCacheMapPair)
+    : [];
+  return {
+    sessionId: entry.sessionId,
+    value: {
+      savedAt: typeof entry.savedAt === 'number' ? entry.savedAt : 0,
+      timeline: cloneTimelineEntries(Array.isArray(entry.timeline) ? entry.timeline : []),
+      batches: new Map(batches),
+      approvals: new Map(approvals),
+    },
+  };
+}
+
+function isCacheMapPair(pair) {
+  return Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string';
+}
+
+function cloneCacheMap(map) {
+  const entries = map instanceof Map
+    ? [...map.entries()]
+    : Array.isArray(map)
+      ? map.filter(isCacheMapPair)
+      : [];
+  return new Map(entries.slice(-MAX_TIMELINE_CACHE_MAP_ITEMS).map(([key, value]) => [
+    key,
+    sanitizeCacheValue(value),
+  ]));
+}
+
+function sanitizeCacheValue(value, depth = 0) {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return value.length > MAX_TIMELINE_SUMMARY_TEXT
+      ? value.slice(0, MAX_TIMELINE_SUMMARY_TEXT)
+      : value;
+  }
+  if (Array.isArray(value)) {
+    if (depth >= MAX_TIMELINE_SUMMARY_DEPTH) {
+      return [];
+    }
+    return value.slice(0, MAX_TIMELINE_SUMMARY_ARRAY_ITEMS)
+      .map((item) => sanitizeCacheValue(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    if (depth >= MAX_TIMELINE_SUMMARY_DEPTH) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, MAX_TIMELINE_SUMMARY_OBJECT_KEYS)
+        .map(([key, item]) => [key, sanitizeCacheValue(item, depth + 1)]),
+    );
+  }
+  return String(value);
+}
+
+function cloneTimelineEntries(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .slice(-MAX_TIMELINE_CACHE_ITEMS)
+    .map(cloneTimelineItem)
+    .filter(Boolean);
+}
+
+function cloneTimelineItem(item) {
+  if (!item || typeof item !== 'object') {
+    return null;
+  }
+  const clone = { ...item };
+  if (typeof clone.text === 'string' && clone.text.length > MAX_TIMELINE_ITEM_TEXT) {
+    clone.text = `${clone.text.slice(0, MAX_TIMELINE_ITEM_TEXT)}...`;
+  }
+  return clone;
 }
 
 function hydrateTimelineFromSession(session) {
@@ -1240,6 +1489,10 @@ function projectNameFromCwd(cwd) {
 
 function firstInputForSession(session) {
   return session?.firstUserInput || session?.preview || session?.title || '';
+}
+
+function previewInputForSession(session) {
+  return session?.lastUserInput || firstInputForSession(session);
 }
 
 function lastInputAtForSession(session) {

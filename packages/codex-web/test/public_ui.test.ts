@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
 
 const stylesUrl = new URL('../public/styles.css', import.meta.url);
 const appUrl = new URL('../public/app.js', import.meta.url);
@@ -27,7 +28,7 @@ test('mobile UI uses session list, compact composer, settings drawer, and histor
   assert.match(app, /renderSessionList\(\)/u);
   assert.match(app, /renderNewSession\(\)/u);
   assert.match(app, /renderChat\(\)/u);
-  assert.match(app, /timelineCache:\s*new Map\(\)/u);
+  assert.match(app, /timelineCache:\s*loadTimelineCache\(\)/u);
   assert.match(app, /saveCurrentTimeline\(\)/u);
   assert.match(app, /hydrateTimelineFromSession/u);
   assert.match(app, /data-permission-preset/u);
@@ -41,3 +42,179 @@ test('mobile UI uses session list, compact composer, settings drawer, and histor
   assert.doesNotMatch(app, /id="cwd-input"/u);
   assert.doesNotMatch(app, /renderSessionOptions/u);
 });
+
+test('mobile UI persists per-browser chat timelines across reloads', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /TIMELINE_CACHE_KEY/u);
+  assert.match(app, /timelineCache:\s*loadTimelineCache\(\)/u);
+  assert.match(app, /function loadTimelineCache\(\)/u);
+  assert.match(app, /function persistTimelineCache\(\)/u);
+  assert.match(app, /localStorage\.getItem\(TIMELINE_CACHE_KEY\)/u);
+  assert.match(app, /localStorage\.setItem\(TIMELINE_CACHE_KEY/u);
+  assert.match(app, /MAX_TIMELINE_CACHE_SESSIONS/u);
+  assert.match(app, /savedAt:\s*Date\.now\(\)/u);
+});
+
+test('mobile UI refreshes session metadata after turn completion', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /async function refreshCurrentSessionMetadata\(\)/u);
+  assert.match(app, /function optimisticallyUpdateSessionInput\(text\)/u);
+  assert.match(app, /optimisticallyUpdateSessionInput\(promptToSend\)/u);
+  assert.match(app, /case 'turn\.completed':[\s\S]*void refreshCurrentSessionMetadata\(\);/u);
+  assert.match(app, /const sessionId = state\.sessionId;[\s\S]*apiFetch\(`\/api\/sessions\/\$\{encodeURIComponent\(sessionId\)\}`\)/u);
+});
+
+test('session cards prefer the latest user input for orientation', async () => {
+  const { api } = await loadAppHarness();
+
+  const session = {
+    id: 'session_1',
+    cwd: '/Users/alice/project',
+    firstUserInput: 'Original setup question',
+    lastUserInput: 'Latest debugging question',
+    updatedAt: 1,
+    lastInputAt: 2,
+  };
+
+  assert.equal(api.previewInputForSession(session), 'Latest debugging question');
+  assert.equal(api.firstInputForSession(session), 'Original setup question');
+});
+
+test('stale session refresh failures do not clear the active session after switching', async () => {
+  let releaseFetch;
+  const fetchReady = new Promise((resolve) => {
+    releaseFetch = resolve;
+  });
+  const { api } = await loadAppHarness({
+    fetch: async () => {
+      await fetchReady;
+      return {
+        ok: false,
+        status: 404,
+        json: async () => ({ error: 'session_not_found', message: 'session not found' }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.sessions = [
+    { id: 'old_session', cwd: '/repo/old' },
+    { id: 'new_session', cwd: '/repo/new' },
+  ];
+  api.state.sessionId = 'old_session';
+  api.state.currentSession = api.state.sessions[0];
+
+  const refresh = api.refreshCurrentSessionMetadata();
+  api.state.sessionId = 'new_session';
+  api.state.currentSession = api.state.sessions[1];
+  releaseFetch();
+  await refresh;
+
+  assert.equal(api.state.sessionId, 'new_session');
+  assert.equal(api.state.currentSession?.id, 'new_session');
+  assert.deepEqual(api.state.sessions.map((session) => session.id), ['new_session']);
+});
+
+test('timeline cache bounds persisted batches and approvals', async () => {
+  const { api, storage } = await loadAppHarness();
+
+  api.state.sessionId = 'session_1';
+  api.state.timeline = [];
+  api.state.batches = new Map(Array.from({ length: 40 }, (_, index) => [
+    `batch_${index}`,
+    {
+      id: `batch_${index}`,
+      kind: 'batch',
+      batchId: `batch_${index}`,
+      summary: { output: 'x'.repeat(20000) },
+    },
+  ]));
+  api.state.approvals = new Map(Array.from({ length: 40 }, (_, index) => [
+    `approval_${index}`,
+    {
+      id: `approval_${index}`,
+      kind: 'approval',
+      approvalId: `approval_${index}`,
+      summary: { command: 'y'.repeat(20000) },
+    },
+  ]));
+
+  api.saveCurrentTimeline();
+
+  const persisted = JSON.parse(storage.get('codexWebTimelineCache'));
+  const entry = persisted.entries[0];
+  assert.ok(entry.batches.length <= api.MAX_TIMELINE_CACHE_MAP_ITEMS);
+  assert.ok(entry.approvals.length <= api.MAX_TIMELINE_CACHE_MAP_ITEMS);
+  assert.ok(entry.batches.every(([, item]) => item.summary.output.length <= api.MAX_TIMELINE_SUMMARY_TEXT));
+  assert.ok(entry.approvals.every(([, item]) => item.summary.command.length <= api.MAX_TIMELINE_SUMMARY_TEXT));
+});
+
+async function loadAppHarness(overrides = {}) {
+  const app = await readFile(appUrl, 'utf8');
+  const storage = new Map();
+  const appElement = {
+    innerHTML: '',
+    appendChild() {},
+  };
+  const context = {
+    console,
+    localStorage: {
+      getItem: (key) => storage.get(key) || null,
+      setItem: (key, value) => {
+        storage.set(key, String(value));
+      },
+      removeItem: (key) => {
+        storage.delete(key);
+      },
+    },
+    document: {
+      body: { scrollHeight: 0 },
+      documentElement: {
+        style: {
+          removeProperty() {},
+          setProperty() {},
+        },
+      },
+      querySelector: (selector) => selector === '#app' ? appElement : null,
+      querySelectorAll: () => [],
+      createElement: () => ({
+        className: '',
+        innerHTML: '',
+      }),
+    },
+    window: {
+      scrollTo() {},
+    },
+    navigator: {
+      userAgent: 'Node test',
+    },
+    requestAnimationFrame: (callback) => {
+      callback();
+    },
+    fetch: overrides.fetch || (async () => ({ ok: true, status: 204 })),
+    TextDecoder,
+    AbortController,
+    FormData,
+    ResizeObserver: class ResizeObserver {
+      observe() {}
+      disconnect() {}
+    },
+  };
+  vm.runInNewContext(`${app}
+globalThis.__codexWebTest = {
+  state,
+  MAX_TIMELINE_CACHE_MAP_ITEMS: typeof MAX_TIMELINE_CACHE_MAP_ITEMS === 'number' ? MAX_TIMELINE_CACHE_MAP_ITEMS : null,
+  MAX_TIMELINE_SUMMARY_TEXT: typeof MAX_TIMELINE_SUMMARY_TEXT === 'number' ? MAX_TIMELINE_SUMMARY_TEXT : null,
+  firstInputForSession,
+  previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
+  refreshCurrentSessionMetadata,
+  saveCurrentTimeline,
+};`, context);
+  return {
+    api: context.__codexWebTest,
+    storage,
+  };
+}
