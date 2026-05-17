@@ -1,0 +1,31 @@
+{
+  "name": "@codex-mobile-web-app/codex-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted mobile web console for controlling local Codex from a phone.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "codex-web": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "serve": "node --import tsx src/cli.ts serve",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@codex-mobile-web-app/codex-native-api": "0.1.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

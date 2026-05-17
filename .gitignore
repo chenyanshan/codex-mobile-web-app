@@ -1,0 +1,9 @@
+node_modules/
+dist/
+packages/*/dist/
+
+.env
+*.log
+.DS_Store
+
+.codex-web/

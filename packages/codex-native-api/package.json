@@ -1,0 +1,49 @@
+{
+  "name": "@codex-mobile-web-app/codex-native-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first API facade and cross-platform daemon wrapper over the logged-in Codex app-server runtime.",
+  "keywords": [
+    "codex",
+    "localhost",
+    "api",
+    "responses",
+    "chat-completions",
+    "openai-compatible",
+    "daemon",
+    "systemd",
+    "launchd"
+  ],
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "codex-native-api": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}

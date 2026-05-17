@@ -1,0 +1,25 @@
+{
+  "name": "codex-mobile-web-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted mobile web console for controlling a local logged-in Codex runtime.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "codex-web": "node --import tsx packages/codex-web/src/cli.ts",
+    "serve": "npm run serve --workspace packages/codex-web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
