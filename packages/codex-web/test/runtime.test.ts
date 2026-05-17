@@ -81,7 +81,7 @@ test('runtime falls back from includeTurns reads and escapes hyphenated profile 
   });
   assert.equal(updated?.settings.model, 'gpt-5');
   assert.equal(updated?.settings.reasoningEffort, 'high');
-  assert.deepEqual(readCalls, [true, false, true, false, true, false]);
+  assert.deepEqual(readCalls, [true, false, true, false, true, false, true, false]);
   assert.equal(writes.length, 1);
   assert.equal(writes[0]?.keyPath, 'profiles."thread-native-tools-1"');
 });
@@ -177,6 +177,7 @@ test('runtime treats missing native threads as absent web sessions', async () =>
     eventBus: new CodexWebEventBus(),
   });
 
+  assert.deepEqual(await runtime.listSessions(), []);
   assert.equal(await runtime.readSession('thread_missing'), null);
   await assert.rejects(
     runtime.startTurn('thread_missing', { text: 'hi' }),

@@ -79,7 +79,7 @@ export function createCodexWebServer({
         };
       },
     }).catch((error) => {
-      writeErrorResponse(response, error);
+      writeErrorResponse({ request, response, error });
     });
   });
   server.on('connection', (socket) => {
@@ -476,6 +476,14 @@ async function startSessionTurn({
     return await runtime.startTurn(sessionId, input);
   } catch (error) {
     if (isSessionNotFoundError(error)) {
+      writeRequestLog({
+        level: 'warn',
+        method: 'POST',
+        path: `/api/sessions/${encodeURIComponent(sessionId)}/turns`,
+        status: 404,
+        code: 'session_not_found',
+        message: error instanceof Error ? error.message : String(error),
+      });
       writeJson(response, 404, {
         error: 'session_not_found',
         message: 'Selected session was not found. Start a new session.',
@@ -653,21 +661,73 @@ function isHttpError(error: unknown): error is HttpError {
     && typeof (error as Partial<HttpError>).code === 'string';
 }
 
-function writeErrorResponse(response: ServerResponse, error: unknown): void {
+function writeErrorResponse({
+  request,
+  response,
+  error,
+}: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  error: unknown;
+}): void {
   if (response.headersSent) {
     response.destroy(error instanceof Error ? error : undefined);
     return;
   }
   if (isHttpError(error)) {
+    writeRequestLog({
+      level: error.statusCode >= 500 ? 'error' : 'warn',
+      method: request.method ?? 'GET',
+      path: request.url ?? '/',
+      status: error.statusCode,
+      code: error.code,
+      message: error.message,
+    });
     writeJson(response, error.statusCode, {
       error: error.code,
       message: error.message,
     });
     return;
   }
+  writeRequestLog({
+    level: 'error',
+    method: request.method ?? 'GET',
+    path: request.url ?? '/',
+    status: 500,
+    code: 'internal_error',
+    message: error instanceof Error ? error.message : String(error),
+  });
   writeJson(response, 500, {
     error: error instanceof Error ? error.message : String(error),
   });
+}
+
+function writeRequestLog({
+  level,
+  method,
+  path,
+  status,
+  code,
+  message,
+}: {
+  level: 'warn' | 'error';
+  method: string;
+  path: string;
+  status: number;
+  code: string;
+  message: string;
+}): void {
+  const safePath = path.split('?')[0] || '/';
+  const payload = {
+    ts: new Date().toISOString(),
+    level,
+    method,
+    path: safePath,
+    status,
+    code,
+    message,
+  };
+  process.stderr.write(`[codex-web] ${JSON.stringify(payload)}\n`);
 }
 
 function writeSetupRequiredJson(response: ServerResponse): void {
