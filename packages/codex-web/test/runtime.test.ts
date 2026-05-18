@@ -238,6 +238,53 @@ test('runtime falls back from includeTurns reads and escapes hyphenated profile 
   assert.equal(writes[0]?.keyPath, 'profiles."thread-native-tools-1"');
 });
 
+test('runtime omits null session settings when writing Codex profile config', async () => {
+  const writes: Array<{ keyPath: string; value: Record<string, unknown> }> = [];
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [createThread('thread_profile_config')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_profile_config', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_profile_config'),
+    writeConfigValue: async ({ keyPath, value }) => {
+      writes.push({ keyPath, value: value as Record<string, unknown> });
+    },
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_profile_config',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  await runtime.updateSessionSettings('thread_profile_config', {
+    model: 'gpt-5',
+    reasoningEffort: 'high',
+  });
+
+  assert.equal(writes[0]?.keyPath, 'profiles.thread_profile_config');
+  assert.deepEqual(writes[0]?.value, {
+    model: 'gpt-5',
+    reasoningEffort: 'high',
+    collaborationMode: 'default',
+    personality: 'pragmatic',
+    accessPreset: 'full-access',
+    approvalPolicy: 'never',
+    sandboxMode: 'danger-full-access',
+    metadata: {},
+  });
+  assert.equal(Object.values(writes[0]?.value ?? {}).includes(null), false);
+});
+
 test('runtime passes requested cwd and settings when creating a session', async () => {
   const startThreadCalls: Array<{
     cwd?: string | null;

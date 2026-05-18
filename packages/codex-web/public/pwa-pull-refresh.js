@@ -17,19 +17,22 @@
     document.body.appendChild(indicator);
 
     let startY = 0;
+    let startTarget = null;
     let distance = 0;
     let pulling = false;
     let refreshing = false;
 
-    function currentScrollContainer() {
+    function currentScrollContainer(target = null) {
       if (typeof getScrollContainer === 'function') {
-        return getScrollContainer();
+        return getScrollContainer({
+          target,
+        });
       }
       return document.scrollingElement || document.documentElement;
     }
 
-    function isAtTop() {
-      const container = currentScrollContainer();
+    function isAtTop(target = null) {
+      const container = currentScrollContainer(target);
       return !container || container.scrollTop <= 0;
     }
 
@@ -42,6 +45,7 @@
     }
 
     function resetIndicator() {
+      startTarget = null;
       distance = 0;
       pulling = false;
       indicator.classList.remove('is-visible', 'is-ready', 'is-refreshing');
@@ -50,10 +54,12 @@
     }
 
     function handleTouchStart(event) {
-      if (refreshing || event.touches.length !== 1 || !isAtTop()) {
+      const target = event.target;
+      if (refreshing || event.touches.length !== 1 || !isAtTop(target)) {
         return;
       }
       startY = event.touches[0].clientY;
+      startTarget = target;
       distance = 0;
       pulling = true;
     }
@@ -63,7 +69,7 @@
         return;
       }
       const nextDistance = event.touches[0].clientY - startY;
-      if (nextDistance <= 0 || !isAtTop()) {
+      if (nextDistance <= 0 || !isAtTop(startTarget)) {
         resetIndicator();
         return;
       }
@@ -79,13 +85,16 @@
         return;
       }
       const shouldRefresh = distance >= threshold;
+      const target = startTarget;
       resetIndicator();
       if (!shouldRefresh) {
         return;
       }
       refreshing = true;
       setIndicator(threshold, true);
-      Promise.resolve(onRefresh()).finally(() => {
+      Promise.resolve(onRefresh({
+        target,
+      })).finally(() => {
         refreshing = false;
         resetIndicator();
       });

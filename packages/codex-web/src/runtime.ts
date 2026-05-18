@@ -212,10 +212,9 @@ export class CodexWebRuntime {
     }
     const nextSettings = this.mergeSettings(sessionId, patch);
     this.persistSessionSettings(sessionId, nextSettings);
-    const metadata = nextSettings.metadata ?? {};
     await this.client.writeConfigValue({
       keyPath: formatConfigKeyPath(['profiles', sessionId]),
-      value: {
+      value: omitNullTomlValues({
         model: nextSettings.model,
         reasoningEffort: nextSettings.reasoningEffort,
         serviceTier: nextSettings.serviceTier,
@@ -225,8 +224,8 @@ export class CodexWebRuntime {
         approvalPolicy: nextSettings.approvalPolicy,
         sandboxMode: nextSettings.sandboxMode,
         locale: nextSettings.locale,
-        metadata,
-      },
+        metadata: nextSettings.metadata ?? {},
+      }),
     });
     return this.toSession(thread);
   }
@@ -612,6 +611,25 @@ function createDefaultSettings(sessionId: string): CodexWebStoredSessionSettings
     updatedAt: Date.now(),
     favorite: false,
   };
+}
+
+function omitNullTomlValues(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => omitNullTomlValues(entry))
+      .filter((entry) => entry !== undefined);
+  }
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .map(([key, entry]) => [key, omitNullTomlValues(entry)] as const)
+        .filter(([, entry]) => entry !== undefined),
+    );
+  }
+  return value;
 }
 
 function mapApprovalDecision(decision: 'accept' | 'accept_for_session' | 'deny'): 1 | 2 | 3 {

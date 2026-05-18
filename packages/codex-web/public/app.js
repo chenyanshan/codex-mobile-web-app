@@ -8,7 +8,6 @@ const MAX_TIMELINE_SUMMARY_TEXT = 4000;
 const MAX_TIMELINE_SUMMARY_ARRAY_ITEMS = 24;
 const MAX_TIMELINE_SUMMARY_OBJECT_KEYS = 32;
 const MAX_TIMELINE_SUMMARY_DEPTH = 4;
-const MAX_HYDRATED_TIMELINE_ITEMS = 6;
 const MIN_HYDRATED_COMPLETE_EXCHANGES = 2;
 const DEFAULT_MODEL = 'gpt-5.4';
 const DEFAULT_REASONING_EFFORT = 'xhigh';
@@ -52,6 +51,8 @@ const state = {
   approvalPolicy: DEFAULT_APPROVAL_POLICY,
   sandboxMode: DEFAULT_SANDBOX_MODE,
   timeline: [],
+  sessionHistoryItems: [],
+  sessionHistoryStartIndex: 0,
   timelineCache: loadTimelineCache(),
   batches: new Map(),
   approvals: new Map(),
@@ -72,6 +73,8 @@ registerServiceWorker();
 setupPwaPullToRefresh();
 setupEdgeSwipeBackNavigation();
 document.addEventListener('visibilitychange', onVisibilityChange);
+window.addEventListener('pageshow', onPageResume);
+window.addEventListener('focus', onPageResume);
 
 function bootstrap() {
   if (!state.token) {
@@ -140,6 +143,7 @@ function setLoggedOut(message = '') {
   state.lastTurnEventAt = 0;
   state.streamWasBackgrounded = false;
   state.timeline = [];
+  resetSessionHistoryWindow();
   state.timelineCache = loadTimelineCache();
   state.batches = new Map();
   state.approvals = new Map();
@@ -173,6 +177,11 @@ function render() {
   } else {
     resetComposerOffset();
   }
+}
+
+function resetSessionHistoryWindow() {
+  state.sessionHistoryItems = [];
+  state.sessionHistoryStartIndex = 0;
 }
 
 function renderSetup() {
@@ -293,6 +302,7 @@ function renderChat() {
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
       <div class="composer-wrap">
+        ${renderComposerStatus()}
         <form class="composer" id="composer-form">
           ${state.settingsOpen ? renderSettingsDrawer() : ''}
           ${state.error ? `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>` : ''}
@@ -419,17 +429,40 @@ function renderTimeline() {
   return state.timeline.map((item) => renderTimelineItem(item)).join('');
 }
 
+function renderComposerStatus() {
+  return `<div class="composer-status" data-tone="${escapeAttribute(state.statusTone)}"><span>${escapeHtml(composerStatusLabel())}</span></div>`;
+}
+
+function composerStatusLabel() {
+  if (state.pendingTurn) {
+    return state.status === 'Stream paused' ? 'Paused' : 'Running';
+  }
+  if (state.statusTone === 'danger') {
+    return 'Failed';
+  }
+  if (state.status === 'Ready') {
+    return 'Done';
+  }
+  return state.status || 'Idle';
+}
+
 function renderTimelineItem(item) {
   if (item.kind === 'message') {
+    const body = item.role === 'assistant'
+      ? `<div class="message-text markdown-body">${renderMarkdown(item.text)}</div>`
+      : `<p class="message-text">${escapeHtml(item.text)}</p>`;
     return `
       <article class="card message-card ${escapeHtml(item.role)}">
         <div class="card-header">
           <span class="card-title">${escapeHtml(item.label)}</span>
           <span class="card-kind">${escapeHtml(item.meta || '')}</span>
         </div>
-        <p class="message-text">${escapeHtml(item.text)}</p>
+        ${body}
       </article>
     `;
+  }
+  if (item.kind === 'work') {
+    return renderWorkItem(item);
   }
   if (item.kind === 'batch') {
     return `
@@ -469,19 +502,170 @@ function renderTimelineItem(item) {
   `;
 }
 
+function renderWorkItem(item) {
+  const summary = summarizeWorkItem(item);
+  const details = workDetailsForItem(item);
+  return `
+    <details class="card work-card">
+      <summary>
+        <span class="work-title">Work</span>
+        <span class="work-counts">${escapeHtml(formatWorkCounts(summary))}</span>
+        <span class="card-kind">${escapeHtml(item.status || 'running')}</span>
+      </summary>
+      ${details.length ? `
+        <div class="work-events">
+          ${details.map(renderWorkDetail).join('')}
+        </div>
+      ` : '<p class="meta">No tool activity yet.</p>'}
+    </details>
+  `;
+}
+
+function summarizeWorkItem(item) {
+  const summary = {
+    reads: 0,
+    commands: 0,
+    edits: 0,
+    approvals: Array.isArray(item.approvals) ? item.approvals.length : 0,
+  };
+  for (const batch of item.batches || []) {
+    const kind = classifyWorkBatch(batch);
+    if (kind === 'read') {
+      summary.reads += 1;
+    } else if (kind === 'edit') {
+      summary.edits += Math.max(1, workChangedFiles(batch).length);
+    } else if (kind === 'command') {
+      summary.commands += 1;
+    }
+  }
+  return summary;
+}
+
+function formatWorkCounts(summary) {
+  const parts = [];
+  if (summary.reads) {
+    parts.push(`Read ${summary.reads}`);
+  }
+  if (summary.commands) {
+    parts.push(`Ran ${summary.commands}`);
+  }
+  if (summary.edits) {
+    parts.push(`Edited ${summary.edits}`);
+  }
+  if (summary.approvals) {
+    parts.push(`Approval ${summary.approvals}`);
+  }
+  return parts.join(' · ') || 'No activity';
+}
+
+function workDetailsForItem(item) {
+  return [
+    ...(item.batches || []).map((batch) => ({
+      kind: classifyWorkBatch(batch),
+      title: batch.title || workTitleFromSummary(batch.summary) || 'Tool activity',
+      status: batch.status || '',
+      summary: batch.summary || {},
+      files: workChangedFiles(batch),
+    })),
+    ...(item.approvals || []).map((approval) => ({
+      kind: 'approval',
+      title: approval.summary?.command || approval.summary?.reason || approval.approvalKind || 'Approval requested',
+      status: approval.resolved ? approval.summary?.decision || 'resolved' : 'requested',
+      summary: approval.summary || {},
+      files: [],
+    })),
+  ];
+}
+
+function renderWorkDetail(detail) {
+  const files = detail.files.length
+    ? `<div class="work-files">${detail.files.map((file) => `<span>${escapeHtml(file)}</span>`).join('')}</div>`
+    : '';
+  return `
+    <div class="work-event" data-work-kind="${escapeAttribute(detail.kind)}">
+      <div class="work-event-main">
+        <span class="work-event-kind">${escapeHtml(workKindLabel(detail.kind))}</span>
+        <span class="work-event-title">${escapeHtml(detail.title)}</span>
+      </div>
+      <span class="work-event-status">${escapeHtml(detail.status || '')}</span>
+      ${files}
+      ${renderCompactSummary(detail.summary)}
+    </div>
+  `;
+}
+
+function renderCompactSummary(summary) {
+  const entries = Object.entries(summary || {})
+    .filter(([key, value]) => key !== 'fileChanges' && hasSummaryValue(value))
+    .slice(0, 3);
+  if (!entries.length) {
+    return '';
+  }
+  return `<div class="work-summary">${entries.map(([key, value]) => `
+    <span><strong>${escapeHtml(startCase(key))}</strong> ${escapeHtml(shorten(formatSummaryValue(value), 140))}</span>
+  `).join('')}</div>`;
+}
+
+function hasSummaryValue(value) {
+  if (value == null) {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === 'string') {
+    return value.trim().length > 0;
+  }
+  return true;
+}
+
+function classifyWorkBatch(batch) {
+  if (batch.batchKind === 'file_change') {
+    return 'edit';
+  }
+  if (batch.batchKind === 'command' && isReadCommand(batch.title || batch.summary?.command || '')) {
+    return 'read';
+  }
+  if (batch.batchKind === 'command') {
+    return 'command';
+  }
+  if (batch.batchKind === 'permission') {
+    return 'approval';
+  }
+  return 'tool';
+}
+
+function isReadCommand(command) {
+  return /^(rg|sed|cat|less|head|tail|ls|find|git\s+(show|diff|status|log|grep)|wc)\b/u.test(String(command || '').trim());
+}
+
+function workChangedFiles(batch) {
+  const changes = batch.summary?.fileChanges;
+  if (!Array.isArray(changes)) {
+    return [];
+  }
+  return changes
+    .map((change) => change?.path || change?.file || change?.target || change?.source)
+    .filter(Boolean)
+    .map(String);
+}
+
+function workTitleFromSummary(summary) {
+  return summary?.command || summary?.reason || '';
+}
+
+function workKindLabel(kind) {
+  return {
+    read: 'Read',
+    command: 'Ran',
+    edit: 'Edited',
+    approval: 'Approval',
+    tool: 'Tool',
+  }[kind] || 'Tool';
+}
+
 function renderSummary(summary) {
-  const entries = Object.entries(summary || {}).filter(([, value]) => {
-    if (value == null) {
-      return false;
-    }
-    if (Array.isArray(value)) {
-      return value.length > 0;
-    }
-    if (typeof value === 'string') {
-      return value.trim().length > 0;
-    }
-    return true;
-  });
+  const entries = Object.entries(summary || {}).filter(([, value]) => hasSummaryValue(value));
   if (!entries.length) {
     return '<p class="meta">No additional details.</p>';
   }
@@ -774,6 +958,7 @@ function showSessionList() {
   state.pendingTurn = false;
   state.prompt = '';
   state.error = '';
+  resetSessionHistoryWindow();
   render();
 }
 
@@ -832,19 +1017,26 @@ async function selectSession(sessionId) {
   }
   const refreshedSession = state.sessions.find((session) => session.id === sessionId) || nextSession;
   stopStream();
+  resetSessionHistoryWindow();
   state.sessionId = refreshedSession.id;
   state.currentSession = refreshedSession;
   state.archiveConfirmSessionId = null;
   state.cwd = refreshedSession.cwd || '';
   applySessionSettings(refreshedSession);
   restoreTimelineForSession(refreshedSession);
+  const restoredActiveTurn = restoreActiveTurnFromSession(refreshedSession);
   state.view = 'chat';
   state.settingsOpen = false;
   state.error = '';
-  state.status = 'Ready';
-  state.statusTone = 'success';
+  if (!restoredActiveTurn) {
+    state.status = 'Ready';
+    state.statusTone = 'success';
+  }
   render();
   scrollTimelineToBottom();
+  if (restoredActiveTurn && state.turnId) {
+    streamTurnEvents(state.turnId, { forceReconnect: true });
+  }
 }
 
 async function onComposerSubmit(event) {
@@ -892,6 +1084,7 @@ async function onComposerSubmit(event) {
       state.sessionId = turn.session.id;
       state.currentSession = turn.session;
       state.cwd = turn.session.cwd || state.cwd;
+      resetSessionHistoryWindow();
       optimisticallyUpdateSessionInput(promptToSend);
     }
     state.turnId = turn.turnId;
@@ -1060,7 +1253,7 @@ async function streamTurnEvents(turnId, options = {}) {
     if (controller.signal.aborted) {
       return;
     }
-    if (isRecoverableBackgroundStreamError(turnId)) {
+    if (isRecoverableBackgroundStreamError(turnId, error)) {
       state.streamWasBackgrounded = true;
       state.status = 'Stream paused';
       state.statusTone = 'warn';
@@ -1122,10 +1315,10 @@ async function streamTurnEvents(turnId, options = {}) {
   }
 }
 
-function isRecoverableBackgroundStreamError(turnId) {
+function isRecoverableBackgroundStreamError(turnId, error) {
   return state.pendingTurn
     && state.turnId === turnId
-    && (state.streamWasBackgrounded || document.visibilityState === 'hidden');
+    && (state.streamWasBackgrounded || document.visibilityState === 'hidden' || isNetworkStreamError(error));
 }
 
 async function onStopTurn() {
@@ -1165,6 +1358,7 @@ function applyTurnEvent(event, assistantEntry) {
     case 'turn.started':
       state.status = 'Turn running';
       state.statusTone = 'warn';
+      ensureWorkItem(event.turnId);
       break;
     case 'assistant.delta':
       if (!assistantEntry || assistantEntry.id !== `assistant_${event.turnId}`) {
@@ -1193,9 +1387,8 @@ function applyTurnEvent(event, assistantEntry) {
       appendOrReplace(assistantEntry, (item) => item.id === `assistant_${event.turnId}` || item.id === assistantEntry.id);
       break;
     case 'batch.started':
-      upsertBatch(event.batchId, {
+      upsertWorkBatch(event.turnId, event.batchId, {
         id: `batch_${event.batchId}`,
-        kind: 'batch',
         batchId: event.batchId,
         batchKind: event.kind,
         title: event.title || 'Batch',
@@ -1204,12 +1397,12 @@ function applyTurnEvent(event, assistantEntry) {
       });
       break;
     case 'batch.updated':
-      upsertBatch(event.batchId, {
+      upsertWorkBatch(event.turnId, event.batchId, {
         summary: event.summary || {},
       });
       break;
     case 'batch.completed':
-      upsertBatch(event.batchId, {
+      upsertWorkBatch(event.turnId, event.batchId, {
         status: event.status || 'completed',
       });
       break;
@@ -1223,7 +1416,7 @@ function applyTurnEvent(event, assistantEntry) {
         resolved: false,
       };
       state.approvals.set(event.approvalId, approval);
-      appendOrReplace(approval, (item) => item.id === approval.id);
+      upsertWorkApproval(event.turnId, approval);
       break;
     }
     case 'approval.resolved': {
@@ -1234,6 +1427,7 @@ function applyTurnEvent(event, assistantEntry) {
           ...approval.summary,
           decision: event.decision,
         };
+        upsertWorkApproval(event.turnId, approval);
       }
       state.status = 'Approval resolved';
       state.statusTone = 'warn';
@@ -1244,6 +1438,7 @@ function applyTurnEvent(event, assistantEntry) {
       state.streamWasBackgrounded = false;
       state.status = event.status === 'completed' ? 'Ready' : `Turn ${event.status}`;
       state.statusTone = event.status === 'completed' ? 'success' : 'warn';
+      setWorkStatus(event.turnId, event.status || 'completed');
       state.turnId = null;
       stopStream();
       void refreshCurrentSessionMetadata();
@@ -1256,6 +1451,7 @@ function applyTurnEvent(event, assistantEntry) {
       state.turnId = null;
       stopStream();
       state.error = event.message || 'Turn failed';
+      setWorkStatus(event.turnId, 'failed');
       break;
   }
   saveCurrentTimeline();
@@ -1279,6 +1475,67 @@ function upsertBatch(batchId, patch) {
   appendOrReplace(next, (item) => item.id === next.id);
 }
 
+function ensureWorkItem(turnId) {
+  const id = `work_${turnId || 'unknown'}`;
+  let item = state.timeline.find((entry) => entry.id === id);
+  if (!item) {
+    item = {
+      id,
+      kind: 'work',
+      turnId,
+      status: 'running',
+      batches: [],
+      approvals: [],
+    };
+    state.timeline.push(item);
+  }
+  return item;
+}
+
+function upsertWorkBatch(turnId, batchId, patch) {
+  const work = ensureWorkItem(turnId);
+  const batches = Array.isArray(work.batches) ? work.batches : [];
+  const index = batches.findIndex((item) => item.batchId === batchId);
+  const current = index >= 0
+    ? batches[index]
+    : {
+      id: `batch_${batchId}`,
+      batchId,
+      batchKind: 'unknown',
+      title: 'Batch',
+      status: '',
+      summary: {},
+    };
+  const next = { ...current, ...patch, summary: { ...current.summary, ...(patch.summary || {}) } };
+  if (index >= 0) {
+    batches[index] = next;
+  } else {
+    batches.push(next);
+  }
+  work.batches = batches;
+  state.batches.set(batchId, next);
+  appendOrReplace(work, (item) => item.id === work.id);
+}
+
+function upsertWorkApproval(turnId, approval) {
+  const work = ensureWorkItem(turnId);
+  const approvals = Array.isArray(work.approvals) ? work.approvals : [];
+  const index = approvals.findIndex((item) => item.approvalId === approval.approvalId);
+  if (index >= 0) {
+    approvals[index] = approval;
+  } else {
+    approvals.push(approval);
+  }
+  work.approvals = approvals;
+  appendOrReplace(work, (item) => item.id === work.id);
+}
+
+function setWorkStatus(turnId, status) {
+  const work = ensureWorkItem(turnId);
+  work.status = status;
+  appendOrReplace(work, (item) => item.id === work.id);
+}
+
 function resetTurnState() {
   state.turnId = null;
   state.pendingTurn = false;
@@ -1286,6 +1543,7 @@ function resetTurnState() {
   state.lastTurnEventAt = 0;
   state.streamWasBackgrounded = false;
   state.timeline = [];
+  resetSessionHistoryWindow();
   state.batches = new Map();
   state.approvals = new Map();
 }
@@ -1304,6 +1562,7 @@ function handleMissingSession(error, promptToRestore) {
   state.turnId = null;
   state.pendingTurn = false;
   state.timeline = [];
+  resetSessionHistoryWindow();
   state.batches = new Map();
   state.approvals = new Map();
   if (promptToRestore) {
@@ -1338,6 +1597,8 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
         state.cwd = session?.cwd || state.cwd;
         if (hydrateTimeline && session) {
           hydrateCurrentTimelineFromSession(session);
+          restoreActiveTurnFromSession(session);
+          reconcileActiveTurnFromSession(session);
         }
       }
       if (state.view === 'sessions' || hydrateTimeline) {
@@ -1412,16 +1673,25 @@ async function refreshCurrentView() {
 }
 
 function hydrateCurrentTimelineFromSession(session) {
-  const hydrated = hydrateTimelineFromSession(session);
+  const fullHistory = fullHydratedTimelineFromSession(session);
+  const hydrated = selectVisibleHydratedTimelineItems(fullHistory);
+  if (!fullHistory.length) {
+    return false;
+  }
+  const previousStart = state.sessionHistoryItems.length
+    ? Math.min(state.sessionHistoryStartIndex, fullHistory.length)
+    : visibleHydratedStartIndex(fullHistory);
+  setSessionHistoryWindow(fullHistory, previousStart);
   if (!hydrated.length) {
     return false;
   }
   const currentText = timelineMessageSignature(state.timeline);
-  const hydratedText = timelineMessageSignature(hydrated);
+  const visibleHydrated = currentVisibleHydratedTimelineItems(fullHistory);
+  const hydratedText = timelineMessageSignature(visibleHydrated);
   if (!hydratedText || hydratedText === currentText || currentText.includes(hydratedText)) {
     return false;
   }
-  state.timeline = hydrated;
+  state.timeline = visibleHydrated.map((item) => ({ ...item }));
   state.batches = new Map();
   state.approvals = new Map();
   saveCurrentTimeline();
@@ -1433,6 +1703,70 @@ function timelineMessageSignature(items) {
     .filter((item) => item?.kind === 'message')
     .map((item) => `${item.role}:${item.text || ''}`)
     .join('\n');
+}
+
+function reconcileActiveTurnFromSession(session) {
+  if (!state.pendingTurn || !state.turnId) {
+    return;
+  }
+  const turns = Array.isArray(session?.thread?.turns) ? session.thread.turns : [];
+  const turn = turns.find((item) => item?.id === state.turnId);
+  if (!turn || !isTerminalTurnStatus(turn.status)) {
+    return;
+  }
+  state.pendingTurn = false;
+  state.streamWasBackgrounded = false;
+  state.status = turn.status === 'completed' ? 'Ready' : `Turn ${turn.status}`;
+  state.statusTone = turn.status === 'completed' ? 'success' : 'warn';
+  state.turnId = null;
+  stopStream();
+}
+
+function restoreActiveTurnFromSession(session) {
+  if (state.pendingTurn && state.turnId) {
+    return false;
+  }
+  const activeTurn = findActiveTurn(session);
+  if (!activeTurn?.id) {
+    return false;
+  }
+  state.pendingTurn = true;
+  state.turnId = activeTurn.id;
+  state.streamWasBackgrounded = true;
+  state.lastTurnEventAt = 0;
+  state.status = 'Turn running';
+  state.statusTone = 'warn';
+  return true;
+}
+
+function findActiveTurn(session) {
+  const turns = Array.isArray(session?.thread?.turns) ? session.thread.turns : [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (turn?.id && isActiveTurnStatus(turn.status)) {
+      return turn;
+    }
+  }
+  return null;
+}
+
+function isActiveTurnStatus(status) {
+  const value = normalizeTurnStatus(status);
+  if (!value) {
+    return false;
+  }
+  return !isTerminalTurnStatus(value);
+}
+
+function isTerminalTurnStatus(status) {
+  return ['completed', 'complete', 'failed', 'error', 'cancelled', 'canceled', 'interrupted', 'aborted'].includes(normalizeTurnStatus(status));
+}
+
+function normalizeTurnStatus(status) {
+  return String(status || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '');
 }
 
 function removeSession(sessionId) {
@@ -1558,14 +1892,21 @@ function saveCurrentTimeline() {
 }
 
 function restoreTimelineForSession(session) {
+  resetSessionHistoryWindow();
+  const fullHistory = fullHydratedTimelineFromSession(session);
   const cached = state.timelineCache.get(session.id);
   if (cached) {
     state.timeline = cached.timeline.map((item) => ({ ...item }));
     state.batches = new Map(cached.batches);
     state.approvals = new Map(cached.approvals);
+    if (fullHistory.length) {
+      const currentStart = visibleStartIndexForTimeline(fullHistory, state.timeline);
+      setSessionHistoryWindow(fullHistory, currentStart);
+    }
     return;
   }
-  state.timeline = hydrateTimelineFromSession(session);
+  state.timeline = selectVisibleHydratedTimelineItems(fullHistory);
+  setSessionHistoryWindow(fullHistory, visibleHydratedStartIndex(fullHistory));
   state.batches = new Map();
   state.approvals = new Map();
 }
@@ -1706,6 +2047,10 @@ function cloneTimelineItem(item) {
 }
 
 function hydrateTimelineFromSession(session) {
+  return selectVisibleHydratedTimelineItems(fullHydratedTimelineFromSession(session));
+}
+
+function fullHydratedTimelineFromSession(session) {
   const items = [];
   const turns = Array.isArray(session.thread?.turns) ? session.thread.turns : [];
   for (const turn of turns) {
@@ -1725,30 +2070,103 @@ function hydrateTimelineFromSession(session) {
       });
     }
   }
-  if (items.length) {
-    return selectHydratedTimelineItems(items);
+  if (!items.length) {
+    const preview = firstInputForSession(session);
+    return preview ? [{
+      id: `history_preview_${session.id}`,
+      kind: 'message',
+      role: 'user',
+      label: 'You',
+      meta: 'preview',
+      text: preview,
+    }] : [];
   }
-  const preview = firstInputForSession(session);
-  return preview ? [{
-    id: `history_preview_${session.id}`,
-    kind: 'message',
-    role: 'user',
-    label: 'You',
-    meta: 'preview',
-    text: preview,
-  }] : [];
+  return items;
 }
 
-function selectHydratedTimelineItems(items) {
-  if (items.length <= MAX_HYDRATED_TIMELINE_ITEMS) {
-    return items;
+function selectVisibleHydratedTimelineItems(items) {
+  return items.slice(visibleHydratedStartIndex(items));
+}
+
+function currentVisibleHydratedTimelineItems(items) {
+  if (!state.sessionHistoryItems.length) {
+    return selectVisibleHydratedTimelineItems(items);
   }
+  return state.sessionHistoryItems.slice(state.sessionHistoryStartIndex);
+}
+
+function visibleHydratedStartIndex(items) {
   const completeExchangeStarts = findCompleteExchangeStarts(items);
   if (completeExchangeStarts.length < MIN_HYDRATED_COMPLETE_EXCHANGES) {
-    return items;
+    return 0;
   }
-  const requiredStart = completeExchangeStarts[completeExchangeStarts.length - MIN_HYDRATED_COMPLETE_EXCHANGES];
-  return items.slice(requiredStart);
+  return completeExchangeStarts[completeExchangeStarts.length - MIN_HYDRATED_COMPLETE_EXCHANGES];
+}
+
+function setSessionHistoryWindow(items, startIndex) {
+  state.sessionHistoryItems = (Array.isArray(items) ? items : []).map((item) => ({ ...item }));
+  state.sessionHistoryStartIndex = Math.max(0, Math.min(
+    Number.isFinite(startIndex) ? Math.floor(startIndex) : 0,
+    state.sessionHistoryItems.length,
+  ));
+}
+
+function visibleStartIndexForTimeline(historyItems, timelineItems) {
+  const historySignature = timelineMessageSignature(historyItems);
+  const timelineSignature = timelineMessageSignature(timelineItems);
+  if (!historySignature || !timelineSignature) {
+    return visibleHydratedStartIndex(historyItems);
+  }
+  if (historySignature === timelineSignature) {
+    return 0;
+  }
+  for (let index = 0; index < historyItems.length; index += 1) {
+    if (timelineMessageSignature(historyItems.slice(index)) === timelineSignature) {
+      return index;
+    }
+  }
+  return visibleHydratedStartIndex(historyItems);
+}
+
+function showMoreSessionHistory() {
+  if (state.view !== 'chat' || !state.sessionId) {
+    return false;
+  }
+  let historyItems = state.sessionHistoryItems;
+  if (!historyItems.length && state.currentSession) {
+    historyItems = fullHydratedTimelineFromSession(state.currentSession);
+    setSessionHistoryWindow(historyItems, visibleStartIndexForTimeline(historyItems, state.timeline));
+  }
+  if (!state.sessionHistoryItems.length || state.sessionHistoryStartIndex <= 0) {
+    return false;
+  }
+  const previousStarts = findCompleteExchangeStarts(state.sessionHistoryItems)
+    .filter((index) => index < state.sessionHistoryStartIndex);
+  const nextStart = previousStarts.length
+    ? previousStarts[previousStarts.length - 1]
+    : 0;
+  if (nextStart === state.sessionHistoryStartIndex) {
+    return false;
+  }
+  const oldScrollHeight = document.querySelector('#timeline')?.scrollHeight || 0;
+  state.sessionHistoryStartIndex = nextStart;
+  state.timeline = state.sessionHistoryItems.slice(nextStart).map((item) => ({ ...item }));
+  state.batches = new Map();
+  state.approvals = new Map();
+  saveCurrentTimeline();
+  render();
+  restoreExpandedTimelineScroll(oldScrollHeight);
+  return true;
+}
+
+function restoreExpandedTimelineScroll(previousScrollHeight) {
+  requestAnimationFrame(() => {
+    const timeline = document.querySelector('#timeline');
+    if (!timeline || !previousScrollHeight) {
+      return;
+    }
+    timeline.scrollTop = Math.max(0, timeline.scrollHeight - previousScrollHeight);
+  });
 }
 
 function findCompleteExchangeStarts(items) {
@@ -2010,13 +2428,40 @@ function setupPwaPullToRefresh() {
     root: document.querySelector('#app'),
     getScrollContainer: getActiveScrollContainer,
     threshold: 120,
-    onRefresh: () => {
-      return refreshCurrentView();
+    onRefresh: (pull) => {
+      return handlePwaPullRefresh(pull);
     },
   });
 }
 
-function getActiveScrollContainer() {
+function handlePwaPullRefresh(pull = {}) {
+  if (state.view === 'chat') {
+    if (isTimelinePullTarget(pull.target)) {
+      if (showMoreSessionHistory()) {
+        return Promise.resolve();
+      }
+      return Promise.resolve();
+    }
+    if (isChatTitlePullTarget(pull.target)) {
+      return refreshCurrentView();
+    }
+    return Promise.resolve();
+  }
+  return refreshCurrentView();
+}
+
+function isTimelinePullTarget(target) {
+  return Boolean(target?.closest?.('.timeline'));
+}
+
+function isChatTitlePullTarget(target) {
+  return Boolean(target?.closest?.('.chat-topbar, .project-title'));
+}
+
+function getActiveScrollContainer(pull = {}) {
+  if (state.view === 'chat' && isChatTitlePullTarget(pull.target)) {
+    return null;
+  }
   return document.querySelector('.timeline')
     || document.querySelector('.session-list')
     || document.querySelector('.new-session-page')
@@ -2086,6 +2531,13 @@ function onVisibilityChange() {
   }
 }
 
+function onPageResume() {
+  if (document.visibilityState === 'hidden') {
+    return;
+  }
+  void recoverActiveTurnAfterForeground();
+}
+
 function isTurnStreamHealthy() {
   if (!state.pendingTurn || !state.turnId) {
     return true;
@@ -2112,6 +2564,11 @@ function stopStream() {
     state.streamAbortController.abort();
     state.streamAbortController = null;
   }
+}
+
+function isNetworkStreamError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /load failed|network|fetch|terminated|abort|connection|offline/i.test(message);
 }
 
 async function apiFetch(path, options = {}) {
@@ -2252,6 +2709,107 @@ function shorten(value, maxLength) {
     return text;
   }
   return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function renderMarkdown(value) {
+  const text = String(value || '').replace(/\r\n?/gu, '\n');
+  const blocks = [];
+  let paragraph = [];
+  let listItems = [];
+  let quoteLines = [];
+  let codeLines = [];
+  let inCode = false;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) {
+      return;
+    }
+    blocks.push(`<p>${renderInlineMarkdown(paragraph.join(' '))}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!listItems.length) {
+      return;
+    }
+    blocks.push(`<ul>${listItems.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</ul>`);
+    listItems = [];
+  };
+  const flushQuote = () => {
+    if (!quoteLines.length) {
+      return;
+    }
+    blocks.push(`<blockquote>${quoteLines.map((line) => `<p>${renderInlineMarkdown(line)}</p>`).join('')}</blockquote>`);
+    quoteLines = [];
+  };
+  const flushCode = () => {
+    blocks.push(`<pre><code>${escapeHtml(`${codeLines.join('\n')}\n`)}</code></pre>`);
+    codeLines = [];
+  };
+  const flushTextBlocks = () => {
+    flushParagraph();
+    flushList();
+    flushQuote();
+  };
+
+  for (const line of text.split('\n')) {
+    if (/^```/u.test(line.trim())) {
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        flushTextBlocks();
+        inCode = true;
+        codeLines = [];
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!line.trim()) {
+      flushTextBlocks();
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/u);
+    if (heading) {
+      flushTextBlocks();
+      const level = heading[1].length;
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+    const listItem = line.match(/^\s*[-*]\s+(.+)$/u);
+    if (listItem) {
+      flushParagraph();
+      flushQuote();
+      listItems.push(listItem[1]);
+      continue;
+    }
+    const quote = line.match(/^>\s?(.+)$/u);
+    if (quote) {
+      flushParagraph();
+      flushList();
+      quoteLines.push(quote[1]);
+      continue;
+    }
+    flushList();
+    flushQuote();
+    paragraph.push(line.trim());
+  }
+  if (inCode) {
+    flushCode();
+  } else {
+    flushTextBlocks();
+  }
+  return blocks.join('');
+}
+
+function renderInlineMarkdown(value) {
+  return escapeHtml(value)
+    .replace(/`([^`]+)`/gu, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/gu, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/gu, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/gu, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 }
 
 function escapeHtml(value) {

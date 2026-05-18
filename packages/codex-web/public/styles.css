@@ -514,6 +514,120 @@ button:disabled {
   font-size: 12px;
 }
 
+.work-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.work-card summary {
+  min-height: 42px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.work-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.work-card summary::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.16s ease;
+}
+
+.work-card[open] summary::before {
+  transform: rotate(45deg);
+}
+
+.work-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.work-counts {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-events {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+
+.work-event {
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.work-event:first-child {
+  border-top: 0;
+}
+
+.work-event-main {
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.work-event-kind {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.work-event-title {
+  min-width: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.work-event-status {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.work-files,
+.work-summary {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.work-files span,
+.work-summary span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.work-summary strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .composer-wrap {
   position: fixed;
   left: 0;
@@ -538,6 +652,38 @@ button:disabled {
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 6px;
   align-items: end;
+}
+
+.composer-status {
+  width: min(40%, 288px);
+  margin: 0 auto 6px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-status::before,
+.composer-status::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid currentColor;
+  opacity: 0.48;
+}
+
+.composer-status span {
+  flex: 0 0 auto;
+}
+
+.composer-status[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.composer-status[data-tone="danger"] {
+  color: var(--danger);
 }
 
 .controls {
@@ -642,6 +788,61 @@ button:disabled {
 .composer-note {
   font-size: 12px;
   color: var(--muted);
+}
+
+.markdown-body {
+  display: grid;
+  gap: 8px;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  margin: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.markdown-body ul {
+  padding-left: 18px;
+}
+
+.markdown-body blockquote {
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+}
+
+.markdown-body pre {
+  overflow-x: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.markdown-body :not(pre) > code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.markdown-body a {
+  color: var(--accent);
 }
 
 .approval-actions {

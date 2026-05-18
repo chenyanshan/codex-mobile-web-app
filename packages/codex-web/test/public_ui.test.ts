@@ -232,12 +232,182 @@ test('mobile UI uses session list, compact composer, settings drawer, and histor
   assert.match(app, /danger-full-access/u);
   assert.match(app, /approvalPolicy = 'never'/u);
   assert.match(app, /settingsOpen/u);
-  assert.doesNotMatch(app, /status-pill/u);
+  assert.match(app, /function renderComposerStatus\(\)/u);
+  assert.match(app, /composer-status/u);
+  assert.match(app, /<div class="composer-wrap">\s*\$\{renderComposerStatus\(\)\}\s*<form class="composer"/u);
+  assert.doesNotMatch(app, /----- \$\{escapeHtml\(composerStatusLabel\(\)\)\} -----/u);
   assert.doesNotMatch(app, /Turn started/u);
   assert.doesNotMatch(app, /Turn completed/u);
   assert.doesNotMatch(app, /id="session-select"/u);
   assert.doesNotMatch(app, /id="cwd-input"/u);
   assert.doesNotMatch(app, /renderSessionOptions/u);
+});
+
+test('composer status renders a small bottom status separator', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.pendingTurn = true;
+  api.state.status = 'Turn running';
+  api.state.statusTone = 'warn';
+
+  assert.match(api.renderComposerStatus(), /composer-status/u);
+  assert.match(api.renderComposerStatus(), /<span>Running<\/span>/u);
+  assert.doesNotMatch(api.renderComposerStatus(), /----- Running -----/u);
+
+  api.state.pendingTurn = false;
+  api.state.status = 'Ready';
+  api.state.statusTone = 'success';
+
+  assert.match(api.renderComposerStatus(), /<span>Done<\/span>/u);
+});
+
+test('composer status separator uses continuous css rules outside the message box', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.composer-status::before,\s*\.composer-status::after\s*\{[^}]*flex:\s*1;/su);
+  assert.match(styles, /\.composer-status::before,\s*\.composer-status::after\s*\{[^}]*border-top:\s*1px solid currentColor;/su);
+  assert.match(styles, /\.composer-status\s*\{[^}]*width:\s*min\(40%,\s*288px\);/su);
+  assert.match(styles, /\.composer-status span\s*\{/u);
+});
+
+test('assistant messages render markdown while user messages stay plain text', async () => {
+  const { api } = await loadAppHarness();
+
+  const assistantHtml = api.renderTimelineItem({
+    id: 'assistant_1',
+    kind: 'message',
+    role: 'assistant',
+    label: 'Assistant',
+    meta: 'final',
+    text: '## Done\n\n- item with **bold** and `code`\n\n```sh\nnpm test\n```',
+  });
+  assert.match(assistantHtml, /<div class="message-text markdown-body">/u);
+  assert.match(assistantHtml, /<h2>Done<\/h2>/u);
+  assert.match(assistantHtml, /<li>item with <strong>bold<\/strong> and <code>code<\/code><\/li>/u);
+  assert.match(assistantHtml, /<pre><code>npm test\n<\/code><\/pre>/u);
+
+  const userHtml = api.renderTimelineItem({
+    id: 'user_1',
+    kind: 'message',
+    role: 'user',
+    label: 'You',
+    meta: 'pending',
+    text: '**do not render**',
+  });
+  assert.match(userHtml, /<p class="message-text">\*\*do not render\*\*<\/p>/u);
+});
+
+test('work items summarize commands edits reads and approvals in a collapsible block', async () => {
+  const { api } = await loadAppHarness();
+
+  const work = {
+    id: 'work_turn_1',
+    kind: 'work',
+    turnId: 'turn_1',
+    status: 'running',
+    batches: [
+      {
+        batchId: 'batch_read',
+        batchKind: 'command',
+        title: 'rg -n "hydrateTimeline" packages/codex-web/public/app.js',
+        status: 'completed',
+        summary: { cwd: '/repo' },
+      },
+      {
+        batchId: 'batch_test',
+        batchKind: 'command',
+        title: 'npm run test --workspace packages/codex-web -- public_ui.test.ts',
+        status: 'completed',
+        summary: { exitCode: 0 },
+      },
+      {
+        batchId: 'batch_edit',
+        batchKind: 'file_change',
+        title: '2 file changes',
+        status: 'completed',
+        summary: {
+          fileChanges: [
+            { path: 'packages/codex-web/public/app.js' },
+            { path: 'packages/codex-web/public/styles.css' },
+          ],
+        },
+      },
+    ],
+    approvals: [
+      {
+        approvalId: 'approval_1',
+        approvalKind: 'permission',
+        resolved: true,
+        summary: { command: 'npm install', decision: 'accepted' },
+      },
+    ],
+  };
+
+  const html = api.renderTimelineItem(work);
+
+  assert.match(html, /<details class="card work-card"/u);
+  assert.match(html, /Work/u);
+  assert.match(html, /Read 1/u);
+  assert.match(html, /Ran 1/u);
+  assert.match(html, /Edited 2/u);
+  assert.match(html, /Approval 1/u);
+  assert.match(html, /data-work-kind="read"/u);
+  assert.match(html, /data-work-kind="command"/u);
+  assert.match(html, /data-work-kind="edit"/u);
+  assert.match(html, /packages\/codex-web\/public\/app\.js/u);
+  assert.match(html, /npm run test --workspace packages\/codex-web -- public_ui\.test\.ts/u);
+  assert.doesNotMatch(html, /<article class="card">\s*<div class="card-header">\s*<span class="card-title">npm run test/su);
+});
+
+test('turn events aggregate batches and approvals into one work item', async () => {
+  const { api } = await loadAppHarness();
+
+  let assistantEntry = null;
+  assistantEntry = api.applyTurnEvent({
+    type: 'turn.started',
+    turnId: 'turn_1',
+    threadId: 'session_1',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.started',
+    turnId: 'turn_1',
+    batchId: 'batch_read',
+    kind: 'command',
+    title: 'sed -n "1,80p" packages/codex-web/public/app.js',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.updated',
+    turnId: 'turn_1',
+    batchId: 'batch_read',
+    summary: { output: 'const state = {}' },
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.completed',
+    turnId: 'turn_1',
+    batchId: 'batch_read',
+    status: 'completed',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'approval.requested',
+    turnId: 'turn_1',
+    approvalId: 'approval_1',
+    approvalKind: 'permission',
+    summary: { command: 'npm install' },
+  }, assistantEntry);
+
+  assert.equal(api.state.timeline.filter((item) => item.kind === 'work').length, 1);
+  assert.equal(api.state.timeline.some((item) => item.kind === 'batch'), false);
+  assert.equal(api.state.timeline.some((item) => item.kind === 'approval'), false);
+
+  const work = api.state.timeline.find((item) => item.kind === 'work');
+  assert.equal(work.turnId, 'turn_1');
+  assert.equal(work.batches.length, 1);
+  assert.equal(work.approvals.length, 1);
+  assert.match(api.renderTimelineItem(work), /Read 1/u);
+  assert.match(api.renderTimelineItem(work), /Approval 1/u);
 });
 
 test('mobile UI persists per-browser chat timelines across reloads', async () => {
@@ -437,6 +607,83 @@ test('history hydration falls back to the full available conversation when fewer
   );
 });
 
+test('session history defaults to two recent exchanges and expands older history on demand', async () => {
+  const { api } = await loadAppHarness();
+  const session = {
+    id: 'session_history_expand',
+    firstUserInput: 'Preview only',
+    thread: {
+      turns: [
+        {
+          id: 'turn_1',
+          items: [
+            { type: 'message', role: 'user', text: 'First user question' },
+            { type: 'message', role: 'assistant', text: 'First assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_2',
+          items: [
+            { type: 'message', role: 'user', text: 'Second user question' },
+            { type: 'message', role: 'assistant', text: 'Second assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_3',
+          items: [
+            { type: 'message', role: 'user', text: 'Third user question' },
+            { type: 'message', role: 'assistant', text: 'Third assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_4',
+          items: [
+            { type: 'message', role: 'user', text: 'Newest user question' },
+            { type: 'message', role: 'assistant', text: 'Newest assistant answer' },
+          ],
+        },
+      ],
+    },
+  };
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = session.id;
+  api.state.currentSession = session;
+  api.restoreTimelineForSession(session);
+
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'Third user question',
+    'Third assistant answer',
+    'Newest user question',
+    'Newest assistant answer',
+  ]));
+  assert.equal(api.state.sessionHistoryItems.length, 8);
+
+  assert.equal(api.showMoreSessionHistory(), true);
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'Second user question',
+    'Second assistant answer',
+    'Third user question',
+    'Third assistant answer',
+    'Newest user question',
+    'Newest assistant answer',
+  ]));
+
+  assert.equal(api.showMoreSessionHistory(), true);
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'First user question',
+    'First assistant answer',
+    'Second user question',
+    'Second assistant answer',
+    'Third user question',
+    'Third assistant answer',
+    'Newest user question',
+    'Newest assistant answer',
+  ]));
+  assert.equal(api.showMoreSessionHistory(), false);
+});
+
 test('session list defaults to favorites and supports time plus favorite actions', async () => {
   const app = await readFile(appUrl, 'utf8');
 
@@ -563,6 +810,25 @@ test('PWA standalone mode enables local pull-to-refresh without normal browser r
   assert.match(pullRefresh, /const DEFAULT_THRESHOLD = 112;/u);
 });
 
+test('PWA chat pull gestures expand timeline history while title pulls refresh the session', async () => {
+  const [app, pullRefresh] = await Promise.all([
+    readFile(appUrl, 'utf8'),
+    readFile(pwaPullRefreshUrl, 'utf8'),
+  ]);
+
+  assert.match(pullRefresh, /startTarget/u);
+  assert.match(pullRefresh, /getScrollContainer\(\{[\s\S]*target/su);
+  assert.match(pullRefresh, /const target = startTarget/u);
+  assert.match(pullRefresh, /onRefresh\(\{[\s\S]*target,/su);
+  assert.match(app, /function handlePwaPullRefresh\(/u);
+  assert.match(app, /function getActiveScrollContainer\(pull = \{\}\)/u);
+  assert.match(app, /isTimelinePullTarget/u);
+  assert.match(app, /showMoreSessionHistory\(\)/u);
+  assert.match(app, /isChatTitlePullTarget/u);
+  assert.match(app, /refreshCurrentView\(\)/u);
+  assert.match(app, /onRefresh:\s*\(pull\)\s*=>\s*\{/u);
+});
+
 test('PWA refresh updates the current view instead of reloading the app', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
@@ -625,7 +891,10 @@ test('PWA foreground recovery refreshes session history and reconnects unhealthy
   const app = await readFile(appUrl, 'utf8');
 
   assert.match(app, /document\.addEventListener\('visibilitychange', onVisibilityChange\)/u);
+  assert.match(app, /window\.addEventListener\('pageshow', onPageResume\)/u);
+  assert.match(app, /window\.addEventListener\('focus', onPageResume\)/u);
   assert.match(app, /function onVisibilityChange\(\)/u);
+  assert.match(app, /function onPageResume\(\)/u);
   assert.match(app, /state\.streamWasBackgrounded = true/u);
   assert.match(app, /function isTurnStreamHealthy\(\)/u);
   assert.match(app, /async function recoverActiveTurnAfterForeground\(\)/u);
@@ -633,6 +902,204 @@ test('PWA foreground recovery refreshes session history and reconnects unhealthy
   assert.match(app, /streamTurnEvents\(state\.turnId, \{ forceReconnect: true \}\)/u);
   assert.match(app, /lastTurnEventSequence/u);
   assert.match(app, /after=\$\{encodeURIComponent\(String\(state\.lastTurnEventSequence\)\)\}/u);
+});
+
+test('PWA stream network failures keep the active turn recoverable when visibility stays visible', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async () => {
+      throw new Error('Load failed');
+    },
+  });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.turnId = 'turn_1';
+  api.state.pendingTurn = true;
+  api.state.streamWasBackgrounded = false;
+  api.state.status = 'Turn running';
+  api.state.statusTone = 'warn';
+
+  await api.streamTurnEvents('turn_1');
+
+  assert.equal(api.state.pendingTurn, true);
+  assert.equal(api.state.turnId, 'turn_1');
+  assert.equal(api.state.streamWasBackgrounded, true);
+  assert.equal(api.state.status, 'Stream paused');
+});
+
+test('PWA history refresh completes a paused active turn from session history', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Question from PWA' },
+                      { type: 'message', role: 'assistant', text: 'Final answer from history' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.turnId = 'turn_1';
+  api.state.pendingTurn = true;
+  api.state.streamWasBackgrounded = true;
+  api.state.timeline = [
+    { id: 'local_user_1', kind: 'message', role: 'user', label: 'You', meta: 'pending', text: 'Question from PWA' },
+  ];
+
+  await api.refreshCurrentSessionMetadata({ hydrateTimeline: true });
+
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.turnId, null);
+  assert.equal(api.state.streamWasBackgrounded, false);
+  assert.match(api.state.timeline.map((item) => item.text).join('\n'), /Final answer from history/u);
+});
+
+test('session refresh restores running status when history reports an active turn', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_active',
+                    status: 'in_progress',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Still working question' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      if (path === '/api/turns/turn_active/events') {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => ({ done: true }),
+            }),
+          },
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.pendingTurn = false;
+  api.state.status = 'Ready';
+  api.state.statusTone = 'success';
+
+  await api.refreshCurrentView();
+
+  assert.equal(api.state.pendingTurn, true);
+  assert.equal(api.state.turnId, 'turn_active');
+  assert.equal(api.state.status, 'Turn running');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="warn"><span>Running</span></div>');
+  assert.ok(fetchCalls.includes('/api/turns/turn_active/events'));
+});
+
+test('opening a session restores running status when the session has an active turn', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions/session_active') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_active',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_active',
+                    status: 'in_progress',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Active question' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      if (path === '/api/turns/turn_active/events') {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => ({ done: true }),
+            }),
+          },
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessions = [{ id: 'session_active', cwd: '/repo', settings: { metadata: {} } }];
+
+  await api.selectSession('session_active');
+
+  assert.equal(api.state.view, 'chat');
+  assert.equal(api.state.pendingTurn, true);
+  assert.equal(api.state.turnId, 'turn_active');
+  assert.equal(api.state.status, 'Turn running');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="warn"><span>Running</span></div>');
+  assert.ok(fetchCalls.includes('/api/turns/turn_active/events'));
 });
 
 test('backgrounded PWA stream failures keep the active turn recoverable', async () => {
@@ -696,6 +1163,7 @@ async function loadAppHarness(overrides = {}) {
       }),
     },
     window: {
+      addEventListener() {},
       scrollTo() {},
     },
     navigator: {
@@ -721,16 +1189,22 @@ globalThis.__codexWebTest = {
   firstInputForSession,
   previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
   renderSessionCards: typeof renderSessionCards === 'function' ? renderSessionCards : null,
+  renderTimelineItem: typeof renderTimelineItem === 'function' ? renderTimelineItem : null,
+  renderComposerStatus: typeof renderComposerStatus === 'function' ? renderComposerStatus : null,
   hydrateTimelineFromSession,
+  restoreTimelineForSession: typeof restoreTimelineForSession === 'function' ? restoreTimelineForSession : null,
+  showMoreSessionHistory: typeof showMoreSessionHistory === 'function' ? showMoreSessionHistory : null,
   applySessionSettings: typeof applySessionSettings === 'function' ? applySessionSettings : null,
   updateSessionSettings: typeof updateSessionSettings === 'function' ? updateSessionSettings : null,
   collectSettings,
   refreshCurrentSessionMetadata,
   refreshCurrentView: typeof refreshCurrentView === 'function' ? refreshCurrentView : null,
+  selectSession: typeof selectSession === 'function' ? selectSession : null,
   filteredSessions: typeof filteredSessions === 'function' ? filteredSessions : null,
   sortedSessions: typeof sortedSessions === 'function' ? sortedSessions : null,
   toggleSessionFavorite: typeof toggleSessionFavorite === 'function' ? toggleSessionFavorite : null,
   streamTurnEvents,
+  applyTurnEvent: typeof applyTurnEvent === 'function' ? applyTurnEvent : null,
   saveCurrentTimeline,
 };`, context);
   return {
