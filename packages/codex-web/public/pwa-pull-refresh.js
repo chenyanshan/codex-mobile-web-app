@@ -1,6 +1,6 @@
 (function () {
-  const DEFAULT_THRESHOLD = 72;
-  const MAX_PULL = 112;
+  const DEFAULT_THRESHOLD = 112;
+  const MAX_PULL = 156;
 
   function init(options) {
     const root = options?.root || document.body;

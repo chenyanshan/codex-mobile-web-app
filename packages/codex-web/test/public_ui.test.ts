@@ -121,6 +121,20 @@ test('changing existing session settings patches the session settings endpoint',
   });
 });
 
+test('repeat opens with a stored token render the app shell before auth verification finishes', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /function createCachedAuthSession\(\)/u);
+  assert.match(app, /state\.authSession = createCachedAuthSession\(\);/u);
+  assert.match(app, /function bootstrap\(\)[\s\S]*void restoreAuth\(\);/u);
+  assert.doesNotMatch(app, /function bootstrap\(\)\s*\{(?:(?!\n\}\n\nasync function restoreAuth).)*await restoreAuth\(\);/su);
+  assert.match(app, /function onLoginSubmit\(event\)[\s\S]*state\.authSession = payload\.session \|\| createCachedAuthSession\(\);/u);
+  assert.match(app, /function onLoginSubmit\(event\)[\s\S]*void restoreAuth\(\);/u);
+  assert.doesNotMatch(app, /function onLoginSubmit\(event\)\s*\{(?:(?!\n\}\n\nasync function onLogout).)*await restoreAuth\(\);/su);
+  assert.doesNotMatch(app, /name="deviceName"/u);
+  assert.doesNotMatch(app, /form\.get\('deviceName'\)/u);
+});
+
 test('sessions navigation remains available during a pending turn', async () => {
   const app = await readFile(appUrl, 'utf8');
 
@@ -423,16 +437,74 @@ test('history hydration falls back to the full available conversation when fewer
   );
 });
 
-test('session list supports project filtering and archive actions', async () => {
+test('session list defaults to favorites and supports time plus favorite actions', async () => {
   const app = await readFile(appUrl, 'utf8');
 
-  assert.match(app, /projectFilter:\s*'all'/u);
-  assert.match(app, /renderProjectFilter\(\)/u);
-  assert.match(app, /data-project-filter/u);
+  assert.match(app, /sortMode:\s*'favorites'/u);
+  assert.match(app, /data-sort-mode="favorites"/u);
+  assert.match(app, /data-sort-mode="time"/u);
+  assert.doesNotMatch(app, /data-sort-mode="project"/u);
+  assert.doesNotMatch(app, /renderProjectFilter\(\)/u);
+  assert.doesNotMatch(app, /data-project-filter/u);
   assert.match(app, /function filteredSessions\(\)/u);
+  assert.match(app, /function isFavoriteSession\(session\)/u);
+  assert.match(app, /data-session-favorite-id/u);
   assert.match(app, /data-session-archive-request-id/u);
+  assert.match(app, /function toggleSessionFavorite\(sessionId\)/u);
   assert.match(app, /async function archiveSession\(sessionId\)/u);
   assert.match(app, /apiFetch\(`\/api\/sessions\/\$\{encodeURIComponent\(sessionId\)\}`,\s*\{\s*method:\s*'DELETE'/su);
+});
+
+test('favorite filter shows only favorite sessions and time shows all sessions', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sessions = [
+    { id: 'old', updatedAt: 10, settings: { metadata: {} } },
+    { id: 'favorite', favorite: true, updatedAt: 20, settings: { metadata: {} } },
+  ];
+
+  assert.equal(api.state.sortMode, 'favorites');
+  assert.equal(JSON.stringify(api.filteredSessions().map((session) => session.id)), JSON.stringify(['favorite']));
+
+  api.state.sortMode = 'time';
+  assert.equal(JSON.stringify(api.filteredSessions().map((session) => session.id).sort()), JSON.stringify(['favorite', 'old']));
+  assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['favorite', 'old']));
+});
+
+test('favorite action patches session favorite state without opening the session', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: 'session_1',
+            cwd: '/repo',
+            favorite: JSON.parse(options.body).favorite,
+            updatedAt: 1,
+            settings: { metadata: {} },
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.sessions = [{ id: 'session_1', settings: { metadata: {} } }];
+
+  await api.toggleSessionFavorite('session_1');
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0]?.path, '/api/sessions/session_1/favorite');
+  assert.equal(fetchCalls[0]?.options.method, 'PATCH');
+  assert.deepEqual(JSON.parse(fetchCalls[0]?.options.body), {
+    favorite: true,
+  });
+  assert.equal(api.state.sessions[0]?.favorite, true);
 });
 
 test('archive action requires a confirmation dialog before deleting a session', async () => {
@@ -469,11 +541,71 @@ test('PWA standalone mode enables local pull-to-refresh without normal browser r
   assert.match(app, /matchMedia\('\(display-mode: standalone\)'\)/u);
   assert.match(app, /function setupPwaPullToRefresh\(\)/u);
   assert.match(app, /window\.CodexPullToRefresh\.init/u);
-  assert.match(app, /window\.location\.reload\(\)/u);
+  assert.match(app, /refreshCurrentView\(\)/u);
+  assert.match(app, /threshold:\s*120/u);
+  assert.doesNotMatch(app, /window\.location\.reload\(\)/u);
   assert.match(pullRefresh, /window\.CodexPullToRefresh/u);
   assert.match(pullRefresh, /touchstart/u);
   assert.match(pullRefresh, /touchmove/u);
-  assert.match(pullRefresh, /threshold/u);
+  assert.match(pullRefresh, /const DEFAULT_THRESHOLD = 112;/u);
+});
+
+test('PWA refresh updates the current view instead of reloading the app', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [{ id: 'session_fresh', favorite: true, settings: { metadata: {} } }],
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_fresh') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_fresh',
+              favorite: true,
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Latest question' },
+                      { type: 'message', role: 'assistant', text: 'Latest answer' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+
+  await api.refreshCurrentView();
+  assert.deepEqual(api.state.sessions.map((session) => session.id), ['session_fresh']);
+
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_fresh';
+  api.state.currentSession = api.state.sessions[0];
+  await api.refreshCurrentView();
+
+  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_fresh']);
+  assert.match(api.state.timeline.map((item) => item.text).join('\n'), /Latest answer/u);
 });
 
 test('PWA foreground recovery refreshes session history and reconnects unhealthy turn streams', async () => {
@@ -580,6 +712,10 @@ globalThis.__codexWebTest = {
   updateSessionSettings: typeof updateSessionSettings === 'function' ? updateSessionSettings : null,
   collectSettings,
   refreshCurrentSessionMetadata,
+  refreshCurrentView: typeof refreshCurrentView === 'function' ? refreshCurrentView : null,
+  filteredSessions: typeof filteredSessions === 'function' ? filteredSessions : null,
+  sortedSessions: typeof sortedSessions === 'function' ? sortedSessions : null,
+  toggleSessionFavorite: typeof toggleSessionFavorite === 'function' ? toggleSessionFavorite : null,
   streamTurnEvents,
   saveCurrentTimeline,
 };`, context);

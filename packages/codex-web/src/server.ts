@@ -317,6 +317,23 @@ async function handleRequest({
     return;
   }
 
+  const sessionFavoriteMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/favorite$/u);
+  if (sessionFavoriteMatch && method === 'PATCH') {
+    const sessionId = decodeURIComponent(sessionFavoriteMatch[1]!);
+    const body = await readJsonBody(request);
+    if (typeof body.favorite !== 'boolean') {
+      writeJson(response, 400, { error: 'favorite must be a boolean' });
+      return;
+    }
+    const session = await runtime.updateSessionFavorite(sessionId, body.favorite);
+    if (!session) {
+      writeSessionNotFound(response);
+      return;
+    }
+    writeJson(response, 200, { session });
+    return;
+  }
+
   const sessionSettingsMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/settings$/u);
   if (sessionSettingsMatch && method === 'PATCH') {
     const sessionId = decodeURIComponent(sessionSettingsMatch[1]!);

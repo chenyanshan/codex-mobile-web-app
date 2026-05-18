@@ -30,8 +30,7 @@ const state = {
   currentSession: null,
   sessionId: null,
   view: 'sessions',
-  sortMode: 'time',
-  projectFilter: 'all',
+  sortMode: 'favorites',
   archiveConfirmSessionId: null,
   cwd: '',
   newCwd: '',
@@ -73,29 +72,35 @@ setupPwaPullToRefresh();
 setupEdgeSwipeBackNavigation();
 document.addEventListener('visibilitychange', onVisibilityChange);
 
-async function bootstrap() {
-  render();
+function bootstrap() {
   if (!state.token) {
+    render();
     setLoggedOut();
     return;
   }
-  await restoreAuth();
+  state.authSession = createCachedAuthSession();
+  state.status = 'Loading';
+  state.statusTone = 'warn';
+  render();
+  void restoreAuth();
 }
 
 async function restoreAuth() {
   try {
     state.status = 'Restoring session';
     render();
-    const [{ session }, modelsPayload, sessionsPayload] = await Promise.all([
-      apiFetch('/api/auth/me'),
+    const { session } = await apiFetch('/api/auth/me');
+    state.authSession = session;
+    state.status = 'Syncing sessions';
+    state.statusTone = 'warn';
+    render();
+    const [modelsPayload] = await Promise.all([
       apiFetch('/api/models').catch(() => ({ items: [] })),
-      apiFetch('/api/sessions').catch(() => ({ items: [] })),
+      refreshSessionsList({ renderAfter: false }).catch(() => null),
     ]);
     state.authSession = session;
     state.models = Array.isArray(modelsPayload.items) ? modelsPayload.items : [];
-    state.sessions = normalizeSessions(sessionsPayload);
     state.model = pickModel(state.models, state.model || DEFAULT_MODEL);
-    syncCurrentSessionFromList();
     if (!state.sessionId) {
       state.view = 'sessions';
     }
@@ -108,13 +113,21 @@ async function restoreAuth() {
   }
 }
 
+function createCachedAuthSession() {
+  return {
+    id: 'cached',
+    createdAt: '',
+    lastSeenAt: '',
+  };
+}
+
 function setLoggedOut(message = '') {
   state.authSession = null;
   state.sessions = [];
   state.sessionId = null;
   state.currentSession = null;
   state.view = 'sessions';
-  state.projectFilter = 'all';
+  state.sortMode = 'favorites';
   state.archiveConfirmSessionId = null;
   state.cwd = '';
   state.newCwd = '';
@@ -190,10 +203,6 @@ function renderLogin() {
           <label for="password">Password</label>
           <input id="password" name="password" type="password" autocomplete="current-password" required>
         </div>
-        <div class="field">
-          <label for="deviceName">Device name</label>
-          <input id="deviceName" name="deviceName" type="text" autocomplete="organization" placeholder="Phone browser">
-        </div>
         ${state.loginError ? `<p class="meta" style="color: var(--danger);">${escapeHtml(state.loginError)}</p>` : ''}
         <div class="actions">
           <button class="primary" type="submit">Log in</button>
@@ -226,12 +235,11 @@ function renderSessionList() {
         </div>
         <div class="list-actions">
           <div class="toggle sort-toggle">
+            <button type="button" data-sort-mode="favorites" aria-pressed="${String(state.sortMode === 'favorites')}">Favorites</button>
             <button type="button" data-sort-mode="time" aria-pressed="${String(state.sortMode === 'time')}">Time</button>
-            <button type="button" data-sort-mode="project" aria-pressed="${String(state.sortMode === 'project')}">Project</button>
           </div>
           <button class="primary compact-button" type="button" id="open-new-session-button">New</button>
         </div>
-        ${renderProjectFilter()}
       </header>
       <main class="session-list">${renderSessionCards()}</main>
     </div>
@@ -302,7 +310,8 @@ function renderChat() {
 function renderSessionCards() {
   const sessions = sortedSessions();
   if (!sessions.length) {
-    return '<div class="empty-state">No sessions yet.</div>';
+    const message = state.sortMode === 'favorites' ? 'No favorites yet.' : 'No sessions yet.';
+    return `<div class="empty-state">${message}</div>`;
   }
   return sessions.map((session) => `
     <article class="session-card">
@@ -316,7 +325,10 @@ function renderSessionCards() {
           <span>${escapeHtml(formatShortDateTime(lastInputAtForSession(session)))}</span>
         </span>
       </button>
-      <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">Archive</button>
+      <div class="session-card-actions">
+        <button class="ghost compact-button session-favorite" type="button" data-session-favorite-id="${escapeAttribute(session.id)}" aria-pressed="${String(isFavoriteSession(session))}">${isFavoriteSession(session) ? 'Unfavorite' : 'Favorite'}</button>
+        <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">Archive</button>
+      </div>
     </article>
   `).join('');
 }
@@ -339,21 +351,6 @@ function renderArchiveConfirmModal() {
           <button class="danger" type="button" data-session-archive-confirm-id="${escapeAttribute(session.id)}">Archive</button>
         </div>
       </section>
-    </div>
-  `;
-}
-
-function renderProjectFilter() {
-  const projects = uniqueProjectOptions();
-  if (projects.length <= 1) {
-    return '';
-  }
-  return `
-    <div class="project-filter">
-      <button type="button" data-project-filter="all" aria-pressed="${String(state.projectFilter === 'all')}">All</button>
-      ${projects.map((project) => `
-        <button type="button" data-project-filter="${escapeAttribute(project.key)}" aria-pressed="${String(state.projectFilter === project.key)}">${escapeHtml(project.label)}</button>
-      `).join('')}
     </div>
   `;
 }
@@ -564,15 +561,14 @@ function bindGlobalEvents() {
 
   for (const button of document.querySelectorAll('[data-sort-mode]')) {
     button.addEventListener('click', () => {
-      state.sortMode = button.getAttribute('data-sort-mode') || 'time';
+      state.sortMode = button.getAttribute('data-sort-mode') || 'favorites';
       render();
     });
   }
 
-  for (const button of document.querySelectorAll('[data-project-filter]')) {
+  for (const button of document.querySelectorAll('[data-session-favorite-id]')) {
     button.addEventListener('click', () => {
-      state.projectFilter = button.getAttribute('data-project-filter') || 'all';
-      render();
+      void toggleSessionFavorite(button.getAttribute('data-session-favorite-id') || '');
     });
   }
 
@@ -725,7 +721,6 @@ async function onLoginSubmit(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const password = String(form.get('password') || '');
-  const deviceName = String(form.get('deviceName') || '').trim() || inferDeviceName();
   state.loginError = '';
   state.status = 'Logging in';
   state.statusTone = 'warn';
@@ -734,13 +729,17 @@ async function onLoginSubmit(event) {
     const payload = await apiFetch('/api/auth/login', {
       method: 'POST',
       skipAuth: true,
-      body: { password, deviceName },
+      body: { password },
     });
     state.token = payload.token;
     localStorage.setItem(TOKEN_KEY, payload.token);
+    state.authSession = payload.session || createCachedAuthSession();
     state.setupRequired = false;
     state.setupMessage = '';
-    await restoreAuth();
+    state.status = 'Syncing sessions';
+    state.statusTone = 'warn';
+    render();
+    void restoreAuth();
   } catch (error) {
     handleApiError(error, { login: true });
   }
@@ -964,6 +963,35 @@ async function archiveSession(sessionId) {
       removeSession(sessionId);
       state.error = 'Selected session was unavailable and was removed from the list.';
       render();
+      return;
+    }
+    handleApiError(error);
+  }
+}
+
+async function toggleSessionFavorite(sessionId) {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  if (!session) {
+    return;
+  }
+  const favorite = !isFavoriteSession(session);
+  try {
+    const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/favorite`, {
+      method: 'PATCH',
+      body: { favorite },
+    });
+    if (payload?.session) {
+      upsertSession(payload.session);
+      if (state.currentSession?.id === payload.session.id) {
+        state.currentSession = state.sessions.find((item) => item.id === payload.session.id) || payload.session;
+      }
+    }
+    state.status = favorite ? 'Session favorited' : 'Favorite removed';
+    state.statusTone = 'success';
+    state.error = '';
+    render();
+  } catch (error) {
+    if (handleMissingSession(error, '')) {
       return;
     }
     handleApiError(error);
@@ -1326,6 +1354,46 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
     console.warn('[codex-web] session refresh failed', error);
   }
   return null;
+}
+
+async function refreshSessionsList({ renderAfter = true } = {}) {
+  const payload = await apiFetch('/api/sessions');
+  state.sessions = normalizeSessions(payload);
+  syncCurrentSessionFromList();
+  if (renderAfter) {
+    render();
+  }
+  return state.sessions;
+}
+
+async function refreshCurrentView() {
+  if (!state.token) {
+    return;
+  }
+  const wasPending = state.pendingTurn;
+  if (!wasPending) {
+    state.status = 'Refreshing';
+    state.statusTone = 'warn';
+    render();
+  }
+  try {
+    if (state.view === 'chat' && state.sessionId) {
+      await refreshCurrentSessionMetadata({ hydrateTimeline: true });
+      if (state.pendingTurn && state.turnId && !isTurnStreamHealthy()) {
+        streamTurnEvents(state.turnId, { forceReconnect: true });
+      }
+    } else {
+      await refreshSessionsList({ renderAfter: false });
+      render();
+    }
+    if (!state.pendingTurn) {
+      state.status = 'Ready';
+      state.statusTone = 'success';
+      render();
+    }
+  } catch (error) {
+    handleApiError(error);
+  }
 }
 
 function hydrateCurrentTimelineFromSession(session) {
@@ -1717,30 +1785,21 @@ function timelineRoleForThreadItem(item) {
 
 function sortedSessions() {
   const sessions = filteredSessions();
-  if (state.sortMode === 'project') {
-    return sessions.sort((left, right) => {
-      const projectCompare = projectNameForSession(left).localeCompare(projectNameForSession(right));
-      if (projectCompare !== 0) {
-        return projectCompare;
-      }
-      return lastInputAtForSession(right) - lastInputAtForSession(left);
-    });
-  }
   return sessions.sort((left, right) => lastInputAtForSession(right) - lastInputAtForSession(left));
 }
 
 function filteredSessions() {
-  const filter = state.projectFilter || 'all';
-  if (filter === 'all') {
-    return [...state.sessions];
+  if (state.sortMode === 'favorites') {
+    return state.sessions.filter(isFavoriteSession);
   }
-  return state.sessions.filter((session) => projectKeyForSession(session) === filter);
+  return [...state.sessions];
 }
 
 function uniqueSessionPaths() {
   const paths = [];
   const seen = new Set();
-  for (const session of sortedSessions()) {
+  const sessions = [...state.sessions].sort((left, right) => lastInputAtForSession(right) - lastInputAtForSession(left));
+  for (const session of sessions) {
     const cwd = session.cwd || '';
     if (!cwd || seen.has(cwd)) {
       continue;
@@ -1751,27 +1810,12 @@ function uniqueSessionPaths() {
   return paths;
 }
 
-function uniqueProjectOptions() {
-  const projects = new Map();
-  for (const session of state.sessions) {
-    const key = projectKeyForSession(session);
-    if (!key || projects.has(key)) {
-      continue;
-    }
-    projects.set(key, {
-      key,
-      label: projectNameForSession(session),
-    });
-  }
-  return [...projects.values()].sort((left, right) => left.label.localeCompare(right.label));
-}
-
-function projectKeyForSession(session) {
-  return session?.cwd || session?.projectName || '';
-}
-
 function projectNameForSession(session, fallbackCwd = '') {
   return session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || 'New Session';
+}
+
+function isFavoriteSession(session) {
+  return session?.favorite === true || session?.settings?.metadata?.favorite === true;
 }
 
 function projectNameFromCwd(cwd) {
@@ -1950,8 +1994,9 @@ function setupPwaPullToRefresh() {
   pullToRefreshCleanup = window.CodexPullToRefresh.init({
     root: document.querySelector('#app'),
     getScrollContainer: getActiveScrollContainer,
+    threshold: 120,
     onRefresh: () => {
-      window.location.reload();
+      return refreshCurrentView();
     },
   });
 }

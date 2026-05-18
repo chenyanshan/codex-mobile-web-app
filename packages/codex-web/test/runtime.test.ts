@@ -339,6 +339,63 @@ test('runtime uses full-access gpt-5.4 xhigh defaults and persists turn settings
   assert.equal(storedSettings.at(-1)?.settings.reasoningEffort, 'high');
 });
 
+test('runtime persists session favorite state and exposes it on session summaries', async () => {
+  let storedSettings: any = null;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [createThread('thread_favorite')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_favorite', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_favorite'),
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_favorite',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+  const settingsStore = {
+    get: () => storedSettings,
+    set: (_sessionId: string, settings: any) => {
+      storedSettings = settings;
+    },
+    delete: () => {
+      storedSettings = null;
+    },
+  };
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    settingsStore,
+  });
+
+  const initial = await runtime.readSession('thread_favorite');
+  assert.equal(initial?.favorite, false);
+
+  const favorited = await runtime.updateSessionFavorite('thread_favorite', true);
+  assert.equal(favorited?.favorite, true);
+  assert.equal(storedSettings.favorite, true);
+
+  const reloaded = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    settingsStore,
+  });
+  const listed = await reloaded.listSessions();
+  assert.equal(listed[0]?.favorite, true);
+
+  const unfavorited = await reloaded.updateSessionFavorite('thread_favorite', false);
+  assert.equal(unfavorited?.favorite, false);
+  assert.equal(storedSettings.favorite, false);
+});
+
 test('runtime resumes historical threads before treating them as missing', async () => {
   let resumed = false;
   const readCalls: string[] = [];

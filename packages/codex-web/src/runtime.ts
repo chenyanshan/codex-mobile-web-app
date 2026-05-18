@@ -23,7 +23,10 @@ import {
   normalizeTurnStartedEvent,
   type CodexWebEvent,
 } from './event_model.js';
-import type { CodexWebSessionSettingsStore } from './session_settings_store.js';
+import type {
+  CodexWebSessionSettingsStore,
+  CodexWebStoredSessionSettings,
+} from './session_settings_store.js';
 
 export interface CodexWebSession {
   id: string;
@@ -35,7 +38,8 @@ export interface CodexWebSession {
   firstUserInput: string | null;
   lastUserInput: string | null;
   lastInputAt: number | null;
-  settings: ProviderTurnSessionSettings;
+  favorite: boolean;
+  settings: CodexWebStoredSessionSettings;
   thread: ProviderThreadSummary;
 }
 
@@ -129,7 +133,7 @@ export class CodexWebRuntime {
 
   private readonly settingsStore: CodexWebSessionSettingsStore | null;
 
-  private readonly sessionSettings = new Map<string, ProviderTurnSessionSettings>();
+  private readonly sessionSettings = new Map<string, CodexWebStoredSessionSettings>();
 
   private readonly turnToThread = new Map<string, string>();
 
@@ -244,6 +248,20 @@ export class CodexWebRuntime {
     this.sessionSettings.delete(sessionId);
     this.settingsStore?.delete(sessionId);
     return true;
+  }
+
+  async updateSessionFavorite(sessionId: string, favorite: boolean): Promise<CodexWebSession | null> {
+    const thread = await this.readThreadSummary(sessionId);
+    if (!thread) {
+      return null;
+    }
+    const settings = {
+      ...this.getSessionSettings(sessionId),
+      favorite,
+      updatedAt: Date.now(),
+    };
+    this.persistSessionSettings(sessionId, settings);
+    return this.toSession(thread);
   }
 
   async startTurn(sessionId: string, input: StartTurnInput): Promise<{ turnId: string }> {
@@ -469,6 +487,7 @@ export class CodexWebRuntime {
       firstUserInput: inputSummary.firstUserInput,
       lastUserInput: inputSummary.lastUserInput,
       lastInputAt: updatedAt,
+      favorite: current.favorite === true,
       settings: current,
       thread,
     };
@@ -477,7 +496,7 @@ export class CodexWebRuntime {
   private mergeSettings(
     sessionId: string | null,
     patch: Partial<ProviderTurnSessionSettings> | UpdateSessionSettingsInput | undefined,
-  ): ProviderTurnSessionSettings {
+  ): CodexWebStoredSessionSettings {
     const current = sessionId
       ? this.getSessionSettings(sessionId)
       : createDefaultSettings('pending');
@@ -493,7 +512,7 @@ export class CodexWebRuntime {
     };
   }
 
-  private getSessionSettings(sessionId: string): ProviderTurnSessionSettings {
+  private getSessionSettings(sessionId: string): CodexWebStoredSessionSettings {
     const cached = this.sessionSettings.get(sessionId);
     if (cached) {
       return cached;
@@ -511,7 +530,7 @@ export class CodexWebRuntime {
     return settings;
   }
 
-  private persistSessionSettings(sessionId: string, settings: ProviderTurnSessionSettings): void {
+  private persistSessionSettings(sessionId: string, settings: CodexWebStoredSessionSettings): void {
     const normalized = {
       ...settings,
       bridgeSessionId: sessionId,
@@ -582,7 +601,7 @@ function summarizeSessionInputText(text: string | null | undefined): string | nu
   return `${normalized.slice(0, SESSION_INPUT_PREVIEW_MAX_LENGTH - 3).trimEnd()}...`;
 }
 
-function createDefaultSettings(sessionId: string): ProviderTurnSessionSettings {
+function createDefaultSettings(sessionId: string): CodexWebStoredSessionSettings {
   return {
     bridgeSessionId: sessionId,
     model: 'gpt-5.4',
@@ -596,6 +615,7 @@ function createDefaultSettings(sessionId: string): ProviderTurnSessionSettings {
     locale: null,
     metadata: {},
     updatedAt: Date.now(),
+    favorite: false,
   };
 }
 

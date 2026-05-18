@@ -2,15 +2,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ProviderTurnSessionSettings } from '@codex-mobile-web-app/codex-native-api';
 
+export type CodexWebStoredSessionSettings = ProviderTurnSessionSettings & {
+  favorite?: boolean;
+};
+
 export interface CodexWebSessionSettingsStore {
-  get(sessionId: string): ProviderTurnSessionSettings | null;
-  set(sessionId: string, settings: ProviderTurnSessionSettings): void;
+  get(sessionId: string): CodexWebStoredSessionSettings | null;
+  set(sessionId: string, settings: CodexWebStoredSessionSettings): void;
   delete(sessionId: string): void;
 }
 
 interface SessionSettingsFile {
   version: 1;
-  sessions: Record<string, ProviderTurnSessionSettings>;
+  sessions: Record<string, CodexWebStoredSessionSettings>;
 }
 
 export class FileSessionSettingsStore implements CodexWebSessionSettingsStore {
@@ -22,11 +26,11 @@ export class FileSessionSettingsStore implements CodexWebSessionSettingsStore {
     this.settingsPath = settingsPath;
   }
 
-  get(sessionId: string): ProviderTurnSessionSettings | null {
+  get(sessionId: string): CodexWebStoredSessionSettings | null {
     return normalizeSettings(sessionId, this.read().sessions[sessionId]);
   }
 
-  set(sessionId: string, settings: ProviderTurnSessionSettings): void {
+  set(sessionId: string, settings: CodexWebStoredSessionSettings): void {
     const file = this.read();
     file.sessions[sessionId] = normalizeSettings(sessionId, settings) ?? settings;
     this.write(file);
@@ -49,7 +53,7 @@ export class FileSessionSettingsStore implements CodexWebSessionSettingsStore {
       const parsed = JSON.parse(fs.readFileSync(this.settingsPath, 'utf8')) as Partial<SessionSettingsFile>;
       this.cache = {
         version: 1,
-        sessions: isRecord(parsed.sessions) ? parsed.sessions as Record<string, ProviderTurnSessionSettings> : {},
+        sessions: isRecord(parsed.sessions) ? parsed.sessions as Record<string, CodexWebStoredSessionSettings> : {},
       };
     } catch {
       this.cache = { version: 1, sessions: {} };
@@ -68,8 +72,8 @@ export class FileSessionSettingsStore implements CodexWebSessionSettingsStore {
 
 function normalizeSettings(
   sessionId: string,
-  value: ProviderTurnSessionSettings | undefined,
-): ProviderTurnSessionSettings | null {
+  value: CodexWebStoredSessionSettings | undefined,
+): CodexWebStoredSessionSettings | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -88,6 +92,7 @@ function normalizeSettings(
     locale: nullableString(value.locale),
     metadata: isRecord(value.metadata) ? value.metadata : {},
     updatedAt: Number.isFinite(value.updatedAt) ? Number(value.updatedAt) : Date.now(),
+    favorite: value.favorite === true,
   };
 }
 

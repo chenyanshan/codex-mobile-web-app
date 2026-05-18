@@ -23,6 +23,7 @@ function createRuntimeStub() {
     createSession: async () => ({ id: 'thread_1' }),
     readSession: async () => ({ id: 'thread_1' }),
     archiveSession: async () => true,
+    updateSessionFavorite: async () => ({ id: 'thread_1', favorite: true }),
     updateSessionSettings: async () => ({ id: 'thread_1' }),
     startTurn: async () => ({ turnId: 'turn_1' }),
     interruptTurn: async () => {},
@@ -595,6 +596,46 @@ test('DELETE /api/sessions/:id archives a session', async () => {
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { ok: true });
     assert.deepEqual(calls, ['thread_1']);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('PATCH /api/sessions/:id/favorite updates favorite state', async () => {
+  const calls: Array<{ sessionId: string; favorite: boolean }> = [];
+  const server = createCodexWebServer({
+    auth: {
+      isConfigured: async () => true,
+      login: async () => ({ token: 'cw_token', session: { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }, configuredNow: false }),
+      verifyToken: async (token) => token === 'cw_token'
+        ? { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }
+        : null,
+      logout: async () => {},
+    },
+    runtime: {
+      ...createRuntimeStub(),
+      updateSessionFavorite: async (sessionId: string, favorite: boolean) => {
+        calls.push({ sessionId, favorite });
+        return sessionId === 'thread_1' ? { id: sessionId, favorite } : null;
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_1/favorite`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ favorite: true }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      session: { id: 'thread_1', favorite: true },
+    });
+    assert.deepEqual(calls, [{ sessionId: 'thread_1', favorite: true }]);
   } finally {
     await server.stop();
   }

@@ -148,32 +148,6 @@ button:disabled {
   gap: 8px;
 }
 
-.project-filter {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  padding-bottom: 1px;
-  scrollbar-width: none;
-}
-
-.project-filter::-webkit-scrollbar {
-  display: none;
-}
-
-.project-filter button {
-  flex: 0 0 auto;
-  min-height: 32px;
-  padding: 0 10px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.project-filter button[aria-pressed="true"] {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
-  color: white;
-}
-
 .session-strip {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -404,8 +378,24 @@ button:disabled {
   background: transparent;
 }
 
-.session-archive {
+.session-card-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.session-card-actions .compact-button {
+  min-height: 34px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.session-archive,
+.session-favorite {
   color: var(--muted);
+}
+
+.session-favorite[aria-pressed="true"] {
+  color: var(--accent);
 }
 
 .session-card-main,
