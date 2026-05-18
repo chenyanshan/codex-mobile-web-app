@@ -471,6 +471,19 @@ test('favorite filter shows only favorite sessions and time shows all sessions',
   assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['favorite', 'old']));
 });
 
+test('session list shows loading state while sessions are still syncing', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sessions = [];
+  api.state.sortMode = 'time';
+  api.state.sessionsLoading = true;
+
+  assert.match(api.renderSessionCards(), /Loading sessions/u);
+
+  api.state.sessionsLoading = false;
+  assert.match(api.renderSessionCards(), /No sessions yet/u);
+});
+
 test('favorite action patches session favorite state without opening the session', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
@@ -707,6 +720,7 @@ globalThis.__codexWebTest = {
   MAX_TIMELINE_SUMMARY_TEXT: typeof MAX_TIMELINE_SUMMARY_TEXT === 'number' ? MAX_TIMELINE_SUMMARY_TEXT : null,
   firstInputForSession,
   previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
+  renderSessionCards: typeof renderSessionCards === 'function' ? renderSessionCards : null,
   hydrateTimelineFromSession,
   applySessionSettings: typeof applySessionSettings === 'function' ? applySessionSettings : null,
   updateSessionSettings: typeof updateSessionSettings === 'function' ? updateSessionSettings : null,

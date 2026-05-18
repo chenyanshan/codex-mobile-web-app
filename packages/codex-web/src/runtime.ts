@@ -169,14 +169,9 @@ export class CodexWebRuntime {
 
   async listSessions(): Promise<CodexWebSession[]> {
     const result = await this.client.listThreads({ limit: 100, archived: false });
-    const sessions: CodexWebSession[] = [];
-    for (const thread of result.items) {
-      const verified = await this.readThreadSummary(thread.threadId);
-      if (verified) {
-        sessions.push(this.toSession(verified));
-      }
-    }
-    return sessions;
+    return result.items
+      .filter((thread) => typeof thread.threadId === 'string' && thread.threadId)
+      .map((thread) => this.toSession(thread));
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<CodexWebSession> {

@@ -27,6 +27,7 @@ const state = {
   authSession: null,
   models: [],
   sessions: [],
+  sessionsLoading: false,
   currentSession: null,
   sessionId: null,
   view: 'sessions',
@@ -79,6 +80,7 @@ function bootstrap() {
     return;
   }
   state.authSession = createCachedAuthSession();
+  state.sessionsLoading = true;
   state.status = 'Loading';
   state.statusTone = 'warn';
   render();
@@ -124,6 +126,7 @@ function createCachedAuthSession() {
 function setLoggedOut(message = '') {
   state.authSession = null;
   state.sessions = [];
+  state.sessionsLoading = false;
   state.sessionId = null;
   state.currentSession = null;
   state.view = 'sessions';
@@ -310,6 +313,9 @@ function renderChat() {
 function renderSessionCards() {
   const sessions = sortedSessions();
   if (!sessions.length) {
+    if (state.sessionsLoading) {
+      return '<div class="empty-state">Loading sessions...</div>';
+    }
     const message = state.sortMode === 'favorites' ? 'No favorites yet.' : 'No sessions yet.';
     return `<div class="empty-state">${message}</div>`;
   }
@@ -734,6 +740,7 @@ async function onLoginSubmit(event) {
     state.token = payload.token;
     localStorage.setItem(TOKEN_KEY, payload.token);
     state.authSession = payload.session || createCachedAuthSession();
+    state.sessionsLoading = true;
     state.setupRequired = false;
     state.setupMessage = '';
     state.status = 'Syncing sessions';
@@ -1357,13 +1364,21 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
 }
 
 async function refreshSessionsList({ renderAfter = true } = {}) {
-  const payload = await apiFetch('/api/sessions');
-  state.sessions = normalizeSessions(payload);
-  syncCurrentSessionFromList();
+  state.sessionsLoading = true;
   if (renderAfter) {
     render();
   }
-  return state.sessions;
+  try {
+    const payload = await apiFetch('/api/sessions');
+    state.sessions = normalizeSessions(payload);
+    syncCurrentSessionFromList();
+    return state.sessions;
+  } finally {
+    state.sessionsLoading = false;
+    if (renderAfter) {
+      render();
+    }
+  }
 }
 
 async function refreshCurrentView() {

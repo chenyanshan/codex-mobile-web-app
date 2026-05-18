@@ -71,12 +71,12 @@ test('session summary extracts user inputs from turns and project name from cwd'
     eventBus: new CodexWebEventBus(),
   });
 
-  const sessions = await runtime.listSessions();
+  const session = await runtime.readSession('thread_summary');
 
-  assert.equal(sessions[0]?.projectName, 'alice/project');
-  assert.equal(sessions[0]?.firstUserInput, 'First user request');
-  assert.equal(sessions[0]?.lastUserInput, 'Latest user request');
-  assert.equal(sessions[0]?.lastInputAt, 123);
+  assert.equal(session?.projectName, 'alice/project');
+  assert.equal(session?.firstUserInput, 'First user request');
+  assert.equal(session?.lastUserInput, 'Latest user request');
+  assert.equal(session?.lastInputAt, 123);
 });
 
 test('session summary falls back to preview when turns have no user input', async () => {
@@ -116,6 +116,58 @@ test('session summary falls back to preview when turns have no user input', asyn
   assert.equal(session?.firstUserInput, 'Preview fallback text');
   assert.equal(session?.lastUserInput, 'Preview fallback text');
   assert.equal(session?.lastInputAt, 456);
+});
+
+test('runtime lists sessions from thread summaries without hydrating every thread', async () => {
+  let readThreadCalls = 0;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({
+      items: [
+        {
+          ...createThread('thread_fast_1'),
+          cwd: '/workspace/one',
+          updatedAt: 30,
+          preview: 'Fast preview one',
+        },
+        {
+          ...createThread('thread_fast_2'),
+          cwd: '/workspace/two',
+          updatedAt: 20,
+          preview: 'Fast preview two',
+        },
+      ],
+      nextCursor: null,
+    }),
+    startThread: async () => ({ threadId: 'thread_fast_1', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => {
+      readThreadCalls += 1;
+      return createThread('thread_fast_1');
+    },
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_fast_1',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const sessions = await runtime.listSessions();
+
+  assert.equal(readThreadCalls, 0);
+  assert.deepEqual(sessions.map((session) => session.id), ['thread_fast_1', 'thread_fast_2']);
+  assert.equal(sessions[0]?.firstUserInput, 'Fast preview one');
 });
 
 test('runtime falls back from includeTurns reads and escapes hyphenated profile config paths', async () => {
@@ -181,7 +233,7 @@ test('runtime falls back from includeTurns reads and escapes hyphenated profile 
   });
   assert.equal(updated?.settings.model, 'gpt-5');
   assert.equal(updated?.settings.reasoningEffort, 'high');
-  assert.deepEqual(readCalls, [true, false, true, false, true, false, true, false]);
+  assert.deepEqual(readCalls, [true, false, true, false, true, false]);
   assert.equal(writes.length, 1);
   assert.equal(writes[0]?.keyPath, 'profiles."thread-native-tools-1"');
 });
@@ -488,7 +540,7 @@ test('runtime resumes a readable historical thread before starting a turn', asyn
   ]);
 });
 
-test('runtime treats missing native threads as absent web sessions', async () => {
+test('runtime treats missing native threads as absent when opened or used', async () => {
   const client: CodexWebRuntimeClient = {
     listModels: async () => [],
     readUsage: async () => null,
@@ -512,7 +564,6 @@ test('runtime treats missing native threads as absent web sessions', async () =>
     eventBus: new CodexWebEventBus(),
   });
 
-  assert.deepEqual(await runtime.listSessions(), []);
   assert.equal(await runtime.readSession('thread_missing'), null);
   await assert.rejects(
     runtime.startTurn('thread_missing', { text: 'hi' }),
