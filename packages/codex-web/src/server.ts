@@ -148,6 +148,10 @@ function loadDefaultStaticFiles(): Record<string, { body: string; contentType: s
       body: readFileSync(path.join(publicDir, 'styles.css'), 'utf8'),
       contentType: 'text/css; charset=utf-8',
     },
+    '/pwa-pull-refresh.js': {
+      body: readFileSync(path.join(publicDir, 'pwa-pull-refresh.js'), 'utf8'),
+      contentType: 'application/javascript; charset=utf-8',
+    },
     '/manifest.webmanifest': {
       body: readFileSync(path.join(publicDir, 'manifest.webmanifest'), 'utf8'),
       contentType: 'application/manifest+json; charset=utf-8',

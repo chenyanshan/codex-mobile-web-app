@@ -8,6 +8,8 @@ const MAX_TIMELINE_SUMMARY_TEXT = 4000;
 const MAX_TIMELINE_SUMMARY_ARRAY_ITEMS = 24;
 const MAX_TIMELINE_SUMMARY_OBJECT_KEYS = 32;
 const MAX_TIMELINE_SUMMARY_DEPTH = 4;
+const MAX_HYDRATED_TIMELINE_ITEMS = 6;
+const MIN_HYDRATED_COMPLETE_EXCHANGES = 2;
 const DEFAULT_MODEL = 'gpt-5.4';
 const DEFAULT_REASONING_EFFORT = 'xhigh';
 const DEFAULT_COLLABORATION_MODE = 'default';
@@ -15,6 +17,10 @@ const DEFAULT_PERMISSION_PRESET = 'full-access';
 const DEFAULT_APPROVAL_POLICY = 'never';
 const DEFAULT_SANDBOX_MODE = 'danger-full-access';
 const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
+const STREAM_STALE_MS = 30_000;
+const EDGE_SWIPE_START_PX = 24;
+const EDGE_SWIPE_TRIGGER_PX = 72;
+const EDGE_SWIPE_MAX_VERTICAL_PX = 48;
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
@@ -26,6 +32,7 @@ const state = {
   view: 'sessions',
   sortMode: 'time',
   projectFilter: 'all',
+  archiveConfirmSessionId: null,
   cwd: '',
   newCwd: '',
   turnId: null,
@@ -49,14 +56,22 @@ const state = {
   batches: new Map(),
   approvals: new Map(),
   streamAbortController: null,
+  lastTurnEventSequence: null,
+  lastTurnEventAt: 0,
+  streamWasBackgrounded: false,
 };
 
 const app = document.querySelector('#app');
 let composerResizeObserver = null;
 let composerOffsetRun = 0;
+let pullToRefreshCleanup = null;
+let edgeSwipeStart = null;
 
 bootstrap();
 registerServiceWorker();
+setupPwaPullToRefresh();
+setupEdgeSwipeBackNavigation();
+document.addEventListener('visibilitychange', onVisibilityChange);
 
 async function bootstrap() {
   render();
@@ -100,10 +115,14 @@ function setLoggedOut(message = '') {
   state.currentSession = null;
   state.view = 'sessions';
   state.projectFilter = 'all';
+  state.archiveConfirmSessionId = null;
   state.cwd = '';
   state.newCwd = '';
   state.turnId = null;
   state.pendingTurn = false;
+  state.lastTurnEventSequence = null;
+  state.lastTurnEventAt = 0;
+  state.streamWasBackgrounded = false;
   state.timeline = [];
   state.timelineCache = loadTimelineCache();
   state.batches = new Map();
@@ -216,6 +235,7 @@ function renderSessionList() {
       </header>
       <main class="session-list">${renderSessionCards()}</main>
     </div>
+    ${renderArchiveConfirmModal()}
   `;
   return shell;
 }
@@ -254,9 +274,10 @@ function renderChat() {
   shell.innerHTML = `
     <div class="screen">
       <header class="topbar chat-topbar">
-        <div class="topbar-main">
+        <div class="chat-nav">
+          <button class="ghost chat-back-button" type="button" id="back-to-list-button" aria-label="Sessions">&lt;</button>
           <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
-          <button class="ghost compact-button" type="button" id="back-to-list-button">Sessions</button>
+          <div class="chat-nav-spacer" aria-hidden="true"></div>
         </div>
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
@@ -266,7 +287,7 @@ function renderChat() {
           ${state.error ? `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>` : ''}
           <div class="compact-composer-row">
             <button class="ghost icon-button" type="button" id="settings-toggle" aria-expanded="${String(state.settingsOpen)}">Set</button>
-            <textarea id="prompt-input" name="prompt" placeholder="Message" ${state.pendingTurn ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
+            <textarea id="prompt-input" name="prompt" rows="1" placeholder="Message" ${state.pendingTurn ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
             <button class="${state.pendingTurn ? 'danger' : 'primary'} compact-send" type="${state.pendingTurn ? 'button' : 'submit'}" id="${state.pendingTurn ? 'stop-button' : 'send-button'}">
               ${state.pendingTurn ? 'Stop' : 'Send'}
             </button>
@@ -295,9 +316,31 @@ function renderSessionCards() {
           <span>${escapeHtml(formatShortDateTime(lastInputAtForSession(session)))}</span>
         </span>
       </button>
-      <button class="ghost compact-button session-archive" type="button" data-session-archive-id="${escapeAttribute(session.id)}">Archive</button>
+      <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">Archive</button>
     </article>
   `).join('');
+}
+
+function renderArchiveConfirmModal() {
+  const session = state.sessions.find((item) => item.id === state.archiveConfirmSessionId);
+  if (!session) {
+    return '';
+  }
+  return `
+    <div class="modal-backdrop">
+      <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-confirm-title">
+        <div>
+          <h2 id="archive-confirm-title">Archive session?</h2>
+          <p class="meta">${escapeHtml(projectNameForSession(session))}</p>
+          <p class="meta">${escapeHtml(shorten(previewInputForSession(session), 120) || 'No prompt preview')}</p>
+        </div>
+        <div class="actions">
+          <button class="ghost" type="button" id="archive-cancel-button">Cancel</button>
+          <button class="danger" type="button" data-session-archive-confirm-id="${escapeAttribute(session.id)}">Archive</button>
+        </div>
+      </section>
+    </div>
+  `;
 }
 
 function renderProjectFilter() {
@@ -533,9 +576,22 @@ function bindGlobalEvents() {
     });
   }
 
-  for (const button of document.querySelectorAll('[data-session-archive-id]')) {
+  for (const button of document.querySelectorAll('[data-session-archive-request-id]')) {
     button.addEventListener('click', () => {
-      void archiveSession(button.getAttribute('data-session-archive-id') || '');
+      requestArchiveSession(button.getAttribute('data-session-archive-request-id') || '');
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-session-archive-confirm-id]')) {
+    button.addEventListener('click', () => {
+      void archiveSession(button.getAttribute('data-session-archive-confirm-id') || '');
+    });
+  }
+
+  const archiveCancelButton = document.querySelector('#archive-cancel-button');
+  if (archiveCancelButton) {
+    archiveCancelButton.addEventListener('click', () => {
+      cancelArchiveSession();
     });
   }
 
@@ -662,7 +718,7 @@ function autoGrowPromptInput(textarea) {
   }
   textarea.style.height = 'auto';
   const nextHeight = Math.min(textarea.scrollHeight, 116);
-  textarea.style.height = `${Math.max(42, nextHeight)}px`;
+  textarea.style.height = `${Math.max(38, nextHeight)}px`;
 }
 
 async function onLoginSubmit(event) {
@@ -705,6 +761,7 @@ function showSessionList() {
   saveCurrentTimeline();
   stopStream();
   state.view = 'sessions';
+  state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
   state.turnId = null;
@@ -719,6 +776,7 @@ function openNewSessionPage() {
   stopStream();
   applyDefaultSettings();
   state.view = 'new';
+  state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
   state.newCwd = state.cwd || '';
@@ -733,6 +791,7 @@ function onNewSessionSubmit(event) {
   stopStream();
   applyDefaultSettings();
   state.view = 'chat';
+  state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
   state.cwd = state.newCwd.trim();
@@ -769,6 +828,7 @@ async function selectSession(sessionId) {
   stopStream();
   state.sessionId = refreshedSession.id;
   state.currentSession = refreshedSession;
+  state.archiveConfirmSessionId = null;
   state.cwd = refreshedSession.cwd || '';
   applySessionSettings(refreshedSession);
   restoreTimelineForSession(refreshedSession);
@@ -778,6 +838,7 @@ async function selectSession(sessionId) {
   state.status = 'Ready';
   state.statusTone = 'success';
   render();
+  scrollTimelineToBottom();
 }
 
 async function onComposerSubmit(event) {
@@ -791,6 +852,9 @@ async function onComposerSubmit(event) {
   }
   state.error = '';
   state.pendingTurn = true;
+  state.lastTurnEventSequence = null;
+  state.lastTurnEventAt = Date.now();
+  state.streamWasBackgrounded = false;
   state.status = 'Starting turn';
   state.statusTone = 'warn';
   appendMessage({
@@ -858,11 +922,27 @@ async function ensureSession() {
   return state.sessionId;
 }
 
+function requestArchiveSession(sessionId) {
+  if (!sessionId || state.pendingTurn) {
+    render();
+    return;
+  }
+  state.archiveConfirmSessionId = sessionId;
+  state.error = '';
+  render();
+}
+
+function cancelArchiveSession() {
+  state.archiveConfirmSessionId = null;
+  render();
+}
+
 async function archiveSession(sessionId) {
   if (!sessionId || state.pendingTurn) {
     render();
     return;
   }
+  state.archiveConfirmSessionId = null;
   try {
     await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
     removeSession(sessionId);
@@ -890,18 +970,25 @@ async function archiveSession(sessionId) {
   }
 }
 
-async function streamTurnEvents(turnId) {
+async function streamTurnEvents(turnId, options = {}) {
   stopStream();
   const controller = new AbortController();
   state.streamAbortController = controller;
-  let assistantEntry = null;
+  state.lastTurnEventAt = Date.now();
+  if (options.forceReconnect) {
+    state.streamWasBackgrounded = false;
+  }
+  let assistantEntry = state.timeline.find((item) => item.id === `assistant_${turnId}`) || null;
   let buffer = '';
   let eventName = 'message';
   let eventId = '';
   let dataLines = [];
 
   try {
-    const response = await fetch(`/api/turns/${encodeURIComponent(turnId)}/events`, {
+    const after = state.lastTurnEventSequence == null
+      ? ''
+      : `?after=${encodeURIComponent(String(state.lastTurnEventSequence))}`;
+    const response = await fetch(`/api/turns/${encodeURIComponent(turnId)}/events${after}`, {
       headers: {
         Authorization: `Bearer ${state.token}`,
         Accept: 'text/event-stream',
@@ -936,6 +1023,12 @@ async function streamTurnEvents(turnId) {
     }
   } catch (error) {
     if (controller.signal.aborted) {
+      return;
+    }
+    if (isRecoverableBackgroundStreamError(turnId)) {
+      state.streamWasBackgrounded = true;
+      state.status = 'Stream paused';
+      state.statusTone = 'warn';
       return;
     }
     state.pendingTurn = false;
@@ -975,6 +1068,11 @@ async function streamTurnEvents(turnId) {
       if (eventId && !payload.sequence) {
         payload.sequence = eventId;
       }
+      const sequence = Number(payload.sequence);
+      if (Number.isFinite(sequence)) {
+        state.lastTurnEventSequence = sequence;
+      }
+      state.lastTurnEventAt = Date.now();
       assistantEntry = applyTurnEvent(payload, assistantEntry);
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
@@ -987,6 +1085,12 @@ async function streamTurnEvents(turnId) {
     eventId = '';
     dataLines = [];
   }
+}
+
+function isRecoverableBackgroundStreamError(turnId) {
+  return state.pendingTurn
+    && state.turnId === turnId
+    && (state.streamWasBackgrounded || document.visibilityState === 'hidden');
 }
 
 async function onStopTurn() {
@@ -1102,6 +1206,7 @@ function applyTurnEvent(event, assistantEntry) {
     }
     case 'turn.completed':
       state.pendingTurn = false;
+      state.streamWasBackgrounded = false;
       state.status = event.status === 'completed' ? 'Ready' : `Turn ${event.status}`;
       state.statusTone = event.status === 'completed' ? 'success' : 'warn';
       state.turnId = null;
@@ -1110,6 +1215,7 @@ function applyTurnEvent(event, assistantEntry) {
       break;
     case 'turn.failed':
       state.pendingTurn = false;
+      state.streamWasBackgrounded = false;
       state.status = 'Turn failed';
       state.statusTone = 'danger';
       state.turnId = null;
@@ -1141,6 +1247,9 @@ function upsertBatch(batchId, patch) {
 function resetTurnState() {
   state.turnId = null;
   state.pendingTurn = false;
+  state.lastTurnEventSequence = null;
+  state.lastTurnEventAt = 0;
+  state.streamWasBackgrounded = false;
   state.timeline = [];
   state.batches = new Map();
   state.approvals = new Map();
@@ -1179,7 +1288,7 @@ function isMissingSessionError(error) {
     || /thread not found|session not found|unknown session|unknown thread/i.test(message);
 }
 
-async function refreshCurrentSessionMetadata() {
+async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
   if (!state.sessionId) {
     return null;
   }
@@ -1192,9 +1301,13 @@ async function refreshCurrentSessionMetadata() {
       if (state.sessionId === sessionId) {
         state.currentSession = session;
         state.cwd = session?.cwd || state.cwd;
+        if (hydrateTimeline && session) {
+          hydrateCurrentTimelineFromSession(session);
+        }
       }
-      if (state.view === 'sessions') {
+      if (state.view === 'sessions' || hydrateTimeline) {
         render();
+        scrollTimelineToBottom();
       }
       return session;
     }
@@ -1213,6 +1326,30 @@ async function refreshCurrentSessionMetadata() {
     console.warn('[codex-web] session refresh failed', error);
   }
   return null;
+}
+
+function hydrateCurrentTimelineFromSession(session) {
+  const hydrated = hydrateTimelineFromSession(session);
+  if (!hydrated.length) {
+    return false;
+  }
+  const currentText = timelineMessageSignature(state.timeline);
+  const hydratedText = timelineMessageSignature(hydrated);
+  if (!hydratedText || hydratedText === currentText || currentText.includes(hydratedText)) {
+    return false;
+  }
+  state.timeline = hydrated;
+  state.batches = new Map();
+  state.approvals = new Map();
+  saveCurrentTimeline();
+  return true;
+}
+
+function timelineMessageSignature(items) {
+  return (Array.isArray(items) ? items : [])
+    .filter((item) => item?.kind === 'message')
+    .map((item) => `${item.role}:${item.text || ''}`)
+    .join('\n');
 }
 
 function removeSession(sessionId) {
@@ -1506,7 +1643,7 @@ function hydrateTimelineFromSession(session) {
     }
   }
   if (items.length) {
-    return items.slice(-6);
+    return selectHydratedTimelineItems(items);
   }
   const preview = firstInputForSession(session);
   return preview ? [{
@@ -1517,6 +1654,42 @@ function hydrateTimelineFromSession(session) {
     meta: 'preview',
     text: preview,
   }] : [];
+}
+
+function selectHydratedTimelineItems(items) {
+  if (items.length <= MAX_HYDRATED_TIMELINE_ITEMS) {
+    return items;
+  }
+  const completeExchangeStarts = findCompleteExchangeStarts(items);
+  if (completeExchangeStarts.length < MIN_HYDRATED_COMPLETE_EXCHANGES) {
+    return items;
+  }
+  const requiredStart = completeExchangeStarts[completeExchangeStarts.length - MIN_HYDRATED_COMPLETE_EXCHANGES];
+  return items.slice(requiredStart);
+}
+
+function findCompleteExchangeStarts(items) {
+  const starts = [];
+  let userIndex = -1;
+  let hasAssistantAnswer = false;
+  for (let index = 0; index < items.length; index += 1) {
+    const role = items[index]?.role;
+    if (role === 'user') {
+      if (userIndex >= 0 && hasAssistantAnswer) {
+        starts.push(userIndex);
+      }
+      userIndex = index;
+      hasAssistantAnswer = false;
+      continue;
+    }
+    if (role === 'assistant' && userIndex >= 0) {
+      hasAssistantAnswer = true;
+    }
+  }
+  if (userIndex >= 0 && hasAssistantAnswer) {
+    starts.push(userIndex);
+  }
+  return starts;
 }
 
 function normalizeMessageRole(role) {
@@ -1761,6 +1934,119 @@ function registerServiceWorker() {
   });
 }
 
+function isStandalonePwa() {
+  return window.navigator?.standalone === true
+    || navigator.standalone === true
+    || (typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches);
+}
+
+function setupPwaPullToRefresh() {
+  if (!isStandalonePwa()) {
+    return;
+  }
+  if (!window.CodexPullToRefresh || typeof window.CodexPullToRefresh.init !== 'function') {
+    return;
+  }
+  pullToRefreshCleanup = window.CodexPullToRefresh.init({
+    root: document.querySelector('#app'),
+    getScrollContainer: getActiveScrollContainer,
+    onRefresh: () => {
+      window.location.reload();
+    },
+  });
+}
+
+function getActiveScrollContainer() {
+  return document.querySelector('.timeline')
+    || document.querySelector('.session-list')
+    || document.querySelector('.new-session-page')
+    || document.scrollingElement;
+}
+
+function setupEdgeSwipeBackNavigation() {
+  document.addEventListener('touchstart', onEdgeSwipeStart, { passive: true });
+  document.addEventListener('touchmove', onEdgeSwipeMove, { passive: true });
+  document.addEventListener('touchend', onEdgeSwipeEnd, { passive: true });
+  document.addEventListener('touchcancel', resetEdgeSwipeNavigation, { passive: true });
+}
+
+function onEdgeSwipeStart(event) {
+  if (state.view !== 'chat') {
+    return;
+  }
+  if (!event.touches || event.touches.length !== 1) {
+    return;
+  }
+  const touch = event.touches[0];
+  if (touch.clientX > EDGE_SWIPE_START_PX) {
+    return;
+  }
+  edgeSwipeStart = {
+    x: touch.clientX,
+    y: touch.clientY,
+    shouldReturn: false,
+  };
+}
+
+function onEdgeSwipeMove(event) {
+  if (!edgeSwipeStart || !event.touches || event.touches.length !== 1) {
+    return;
+  }
+  const touch = event.touches[0];
+  const deltaX = touch.clientX - edgeSwipeStart.x;
+  const deltaY = Math.abs(touch.clientY - edgeSwipeStart.y);
+  if (deltaX < 0 || deltaY > EDGE_SWIPE_MAX_VERTICAL_PX) {
+    resetEdgeSwipeNavigation();
+    return;
+  }
+  edgeSwipeStart.shouldReturn = deltaX >= EDGE_SWIPE_TRIGGER_PX;
+}
+
+function onEdgeSwipeEnd() {
+  const shouldReturn = edgeSwipeStart?.shouldReturn;
+  resetEdgeSwipeNavigation();
+  if (shouldReturn && state.view === 'chat') {
+    showSessionList();
+  }
+}
+
+function resetEdgeSwipeNavigation() {
+  edgeSwipeStart = null;
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'hidden') {
+    if (state.pendingTurn) {
+      state.streamWasBackgrounded = true;
+    }
+    return;
+  }
+  if (document.visibilityState === 'visible') {
+    void recoverActiveTurnAfterForeground();
+  }
+}
+
+function isTurnStreamHealthy() {
+  if (!state.pendingTurn || !state.turnId) {
+    return true;
+  }
+  if (!state.streamAbortController || state.streamWasBackgrounded) {
+    return false;
+  }
+  return Date.now() - (state.lastTurnEventAt || 0) < STREAM_STALE_MS;
+}
+
+async function recoverActiveTurnAfterForeground() {
+  if (!state.authSession || !state.sessionId) {
+    return;
+  }
+  const shouldReconnect = state.pendingTurn && state.turnId && !isTurnStreamHealthy();
+  await refreshCurrentSessionMetadata({ hydrateTimeline: true });
+  if (shouldReconnect && state.pendingTurn && state.turnId) {
+    streamTurnEvents(state.turnId, { forceReconnect: true });
+  }
+}
+
 function stopStream() {
   if (state.streamAbortController) {
     state.streamAbortController.abort();
@@ -1856,7 +2142,6 @@ function scrollTimelineToBottom() {
     const timeline = document.querySelector('#timeline');
     if (timeline) {
       timeline.scrollTop = timeline.scrollHeight;
-      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
     }
   });
 }

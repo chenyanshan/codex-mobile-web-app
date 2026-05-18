@@ -90,6 +90,30 @@ button:disabled {
   padding: calc(env(safe-area-inset-top, 0px) + 8px) 12px 8px;
 }
 
+.chat-nav {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-back-button {
+  min-height: 38px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.chat-nav .project-title {
+  text-align: center;
+}
+
+.chat-nav-spacer {
+  width: 38px;
+  height: 38px;
+}
+
 .topbar-main,
 .topbar-meta {
   display: flex;
@@ -522,7 +546,7 @@ button:disabled {
 .compact-composer-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: 6px;
   align-items: end;
 }
 
@@ -588,16 +612,18 @@ button:disabled {
 }
 
 .compact-composer-row textarea {
-  min-height: 42px;
+  min-height: 38px;
   max-height: 116px;
-  padding: 10px 11px;
+  padding: 8px 10px;
   overflow-y: auto;
+  line-height: 1.45;
 }
 
 .icon-button,
 .compact-send {
-  min-height: 42px;
-  padding: 0 10px;
+  min-height: 38px;
+  padding: 0 8px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -642,6 +668,62 @@ button:disabled {
 .danger {
   border-color: rgba(255, 125, 125, 0.35);
   color: #ffd9d9;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: end center;
+  padding: 18px 12px calc(env(safe-area-inset-bottom, 0px) + 18px);
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.confirm-dialog {
+  width: min(100%, 360px);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.confirm-dialog h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.pull-refresh-indicator {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  left: 50%;
+  z-index: 50;
+  min-height: 32px;
+  padding: 7px 11px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(18, 23, 34, 0.96);
+  box-shadow: var(--shadow);
+  color: var(--muted);
+  font-size: 12px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -48px);
+  transition: opacity 120ms ease, transform 120ms ease, color 120ms ease;
+}
+
+.pull-refresh-indicator.is-visible {
+  opacity: 1;
+}
+
+.pull-refresh-indicator.is-ready,
+.pull-refresh-indicator.is-refreshing {
+  color: var(--text);
 }
 
 .empty-state {

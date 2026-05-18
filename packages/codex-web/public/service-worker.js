@@ -3,6 +3,7 @@ const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/styles.css',
+  '/pwa-pull-refresh.js',
   '/app.js',
   '/manifest.webmanifest',
   '/icon.svg',
