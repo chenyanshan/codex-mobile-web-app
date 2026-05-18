@@ -98,8 +98,14 @@ chmod 700 "${STATE_DIR}" "${LOG_DIR}" 2>/dev/null || true
 write_default_env_file_if_missing
 write_plist
 
-launchctl bootout "${LAUNCHD_DOMAIN}" "${PLIST_PATH}" >/dev/null 2>&1 || true
-launchctl bootstrap "${LAUNCHD_DOMAIN}" "${PLIST_PATH}"
+# Do not bootout an already loaded job here. This script may be invoked by a
+# Codex turn running under the service itself; unloading that job kills the
+# caller before it can bootstrap the replacement.
+if launchctl print "${LAUNCHD_TARGET}" >/dev/null 2>&1; then
+  echo "launch agent already loaded: ${LAUNCHD_TARGET}"
+else
+  launchctl bootstrap "${LAUNCHD_DOMAIN}" "${PLIST_PATH}"
+fi
 launchctl enable "${LAUNCHD_TARGET}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${LAUNCHD_TARGET}" >/dev/null 2>&1 || true
 
