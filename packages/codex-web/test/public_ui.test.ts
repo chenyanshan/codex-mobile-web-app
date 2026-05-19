@@ -26,11 +26,19 @@ test('mobile UI exposes iOS PWA install metadata and registers a service worker'
   assert.equal(parsedManifest.theme_color, '#0b0d12');
   assert.equal(parsedManifest.background_color, '#0b0d12');
   assert.match(index, /<link rel="manifest" href="\/manifest\.webmanifest">/u);
+  assert.match(index, /<link rel="icon" href="\/icon-192\.png" type="image\/png">/u);
+  assert.match(index, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png">/u);
   assert.match(index, /<meta name="theme-color" content="#0b0d12">/u);
   assert.match(index, /<meta name="apple-mobile-web-app-capable" content="yes">/u);
   assert.match(index, /<meta name="apple-mobile-web-app-title" content="Codex">/u);
+  assert.deepEqual(parsedManifest.icons.map((icon) => icon.src), ['/icon-192.png', '/icon-512.png']);
+  assert.deepEqual(parsedManifest.icons.map((icon) => icon.type), ['image/png', 'image/png']);
+  assert.deepEqual(parsedManifest.icons.map((icon) => icon.sizes), ['192x192', '512x512']);
   assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
-  assert.match(serviceWorker, /codex-web-static-2026-05-19-fast-session-open-v6/u);
+  assert.match(serviceWorker, /codex-web-static-2026-05-19-thread-activity-details-v16/u);
+  assert.match(serviceWorker, /'\/icon-192\.png'/u);
+  assert.match(serviceWorker, /'\/icon-512\.png'/u);
+  assert.match(serviceWorker, /'\/apple-touch-icon\.png'/u);
   assert.match(serviceWorker, /self\.addEventListener\('install'/u);
   assert.match(serviceWorker, /self\.addEventListener\('fetch'/u);
   assert.doesNotMatch(serviceWorker, /cached \|\| fetch\(request\)/u);
@@ -199,6 +207,30 @@ test('pull refresh indicator keeps readable themed colors', async () => {
   assert.match(styles, /\.pull-refresh-indicator\s*\{[^}]*background:\s*var\(--panel\);/su);
   assert.match(styles, /\.pull-refresh-indicator\s*\{[^}]*color:\s*var\(--text\);/su);
   assert.doesNotMatch(styles, /\.pull-refresh-indicator\s*\{[^}]*background:\s*rgba\(18,\s*23,\s*34/su);
+});
+
+test('new session path entry and primary submit buttons are readable on mobile', async () => {
+  const [app, styles] = await Promise.all([
+    readFile(appUrl, 'utf8'),
+    readFile(stylesUrl, 'utf8'),
+  ]);
+
+  assert.match(app, /<textarea id="new-cwd-input"[^>]*name="cwd"[^>]*rows="3"/u);
+  assert.doesNotMatch(app, /<input id="new-cwd-input"[^>]*type="text"/u);
+  assert.match(styles, /\.new-session-page \.panel\s*\{[^}]*width:\s*100%;/su);
+  assert.match(styles, /\.new-session-page textarea\s*\{[^}]*min-height:\s*92px;/su);
+  assert.match(styles, /\.new-session-page textarea\s*\{[^}]*resize:\s*vertical;/su);
+  assert.match(styles, /\.primary-action\s*\{[^}]*min-height:\s*48px;/su);
+  assert.match(app, /<button class="primary primary-action" type="submit">Start<\/button>/u);
+  assert.match(app, /<button class="primary primary-action" type="submit">Log in<\/button>/u);
+});
+
+test('danger buttons use theme-aware readable colors', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.danger\s*\{[^}]*border-color:\s*color-mix\(in srgb,\s*var\(--danger\) 58%,\s*var\(--border\)\);/su);
+  assert.match(styles, /\.danger\s*\{[^}]*color:\s*var\(--danger\);/su);
+  assert.doesNotMatch(styles, /\.danger\s*\{[^}]*color:\s*#ffd9d9;/su);
 });
 
 test('sessions without saved settings use app default thread settings', async () => {
@@ -655,7 +687,8 @@ test('work items expose detailed command output and file change metadata', async
     approvals: [],
   });
 
-  assert.match(html, /<details class="work-detail" open/u);
+  assert.match(html, /<details class="work-detail" data-work-kind="command">/u);
+  assert.doesNotMatch(html, /<details class="work-detail" open data-work-kind="command">/u);
   assert.match(html, /Command/u);
   assert.match(html, /npm test/u);
   assert.match(html, /42 passing/u);
@@ -664,6 +697,77 @@ test('work items expose detailed command output and file change metadata', async
   assert.match(html, /modified/u);
   assert.match(html, /\+12 \/ -3/u);
   assert.doesNotMatch(html, /No additional details/u);
+});
+
+test('work details stay collapsed until detailed activity is enabled in settings', async () => {
+  const { api, storage } = await loadAppHarness();
+
+  const work = {
+    id: 'work_turn_detail_toggle',
+    kind: 'work',
+    turnId: 'turn_detail_toggle',
+    status: 'running',
+    batches: [
+      {
+        batchId: 'cmd_detail_toggle',
+        batchKind: 'command',
+        title: 'npm test',
+        status: 'completed',
+        summary: {
+          command: 'npm test',
+          cwd: '/workspace',
+          output: '42 passing',
+          raw: { method: 'item/completed' },
+        },
+      },
+    ],
+    approvals: [],
+  };
+
+  api.state.view = 'chat';
+  api.state.settingsOpen = true;
+
+  const collapsedHtml = api.renderTimelineItem(work);
+  assert.match(collapsedHtml, /<details class="card work-card" open/u);
+  assert.match(collapsedHtml, /<details class="work-detail" data-work-kind="command">/u);
+  assert.doesNotMatch(collapsedHtml, /<details class="work-detail" open data-work-kind="command">/u);
+  assert.doesNotMatch(collapsedHtml, /Raw Event/u);
+  assert.match(api.renderSettingsDrawer(), /id="activity-detail-toggle"/u);
+
+  api.setActivityDetailsEnabled(true);
+
+  assert.equal(storage.get('codexWebActivityDetails'), 'true');
+  const expandedHtml = api.renderTimelineItem(work);
+  assert.match(expandedHtml, /<details class="work-detail" open data-work-kind="command">/u);
+  assert.match(expandedHtml, /Raw Event/u);
+  assert.match(expandedHtml, /item\/completed/u);
+});
+
+test('detailed activity renders raw SSE event payloads when enabled', async () => {
+  const { api } = await loadAppHarness();
+
+  api.setActivityDetailsEnabled(true);
+  let assistantEntry = null;
+  assistantEntry = api.applyTurnEvent({
+    type: 'turn.started',
+    turnId: 'turn_raw',
+    threadId: 'session_1',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.started',
+    turnId: 'turn_raw',
+    batchId: 'raw_batch',
+    kind: 'command',
+    title: 'npm test',
+    raw: { method: 'item/started', params: { item: { id: 'raw_batch' } } },
+  }, assistantEntry);
+
+  const work = api.state.timeline.find((item) => item.id === 'work_turn_raw');
+  const html = api.renderTimelineItem(work);
+
+  assert.match(html, /Raw Event/u);
+  assert.match(html, /item\/started/u);
+  assert.match(html, /raw_batch/u);
 });
 
 test('turn failures render as visible timeline error messages', async () => {
@@ -688,7 +792,8 @@ test('turn failures render as visible timeline error messages', async () => {
   assert.match(errorItem?.text || '', /Codex app-server disconnected/u);
 
   const html = api.renderTimelineItem(errorItem);
-  assert.match(html, /message-card system/u);
+  assert.match(html, /message-card system error-message/u);
+  assert.match(html, /<span class="error-badge">Error<\/span>/u);
   assert.match(html, /Codex app-server disconnected/u);
 });
 
@@ -716,7 +821,60 @@ test('stream failures render a visible timeline error instead of only composer s
   assert.equal(api.state.pendingTurn, false);
   assert.equal(errorItem?.kind, 'message');
   assert.equal(errorItem?.role, 'system');
+  assert.equal(errorItem?.severity, 'error');
   assert.match(errorItem?.text || '', /SSE failed hard/u);
+});
+
+test('thread work errors are highlighted and kept at the latest timeline position', async () => {
+  const { api } = await loadAppHarness();
+
+  let assistantEntry = null;
+  assistantEntry = api.applyTurnEvent({
+    type: 'turn.started',
+    turnId: 'turn_work_error',
+    threadId: 'session_1',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'assistant.delta',
+    turnId: 'turn_work_error',
+    threadId: 'session_1',
+    text: 'Working...',
+    phase: 'commentary',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.started',
+    turnId: 'turn_work_error',
+    batchId: 'cmd_error',
+    kind: 'command',
+    title: 'npm test',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.updated',
+    turnId: 'turn_work_error',
+    batchId: 'cmd_error',
+    summary: {
+      command: 'npm test',
+      output: '1 failing',
+      error: 'Command failed with exit code 1',
+      exitCode: 1,
+    },
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.completed',
+    turnId: 'turn_work_error',
+    batchId: 'cmd_error',
+    status: 'failed',
+  }, assistantEntry);
+
+  const latest = api.state.timeline.at(-1);
+  assert.equal(latest?.kind, 'work');
+  assert.equal(latest?.status, 'error');
+
+  const html = api.renderTimelineItem(latest);
+  assert.match(html, /work-card work-error/u);
+  assert.match(html, /<span class="error-badge">Error<\/span>/u);
+  assert.match(html, /Command failed with exit code 1/u);
+  assert.match(html, /1 failing/u);
 });
 
 test('composer API failures render a visible timeline error', async () => {
@@ -1127,7 +1285,7 @@ test('session history defaults to two recent exchanges and expands older history
   assert.equal(api.showMoreSessionHistory(), false);
 });
 
-test('session list defaults to favorites and supports time plus favorite actions', async () => {
+test('session list defaults to favorites and supports all sessions plus favorite actions', async () => {
   const app = await readFile(appUrl, 'utf8');
 
   assert.match(app, /sortMode:\s*'favorites'/u);
@@ -1138,9 +1296,10 @@ test('session list defaults to favorites and supports time plus favorite actions
   assert.match(app, /id="open-app-settings-button"/u);
   assert.match(app, /id="favorite-sort-save-button"/u);
   assert.match(app, /id="favorite-sort-cancel-button"/u);
-  assert.match(app, /id="favorite-sort-button"[\s\S]{0,300}id="open-new-session-button"[\s\S]{0,300}id="open-app-settings-button"/u);
   assert.match(app, /data-sort-mode="favorites"/u);
   assert.match(app, /data-sort-mode="time"/u);
+  assert.match(app, /data-sort-mode="time"[^>]*>All<\/button>/u);
+  assert.doesNotMatch(app, />Time<\/button>/u);
   assert.doesNotMatch(app, /data-sort-mode="project"/u);
   assert.doesNotMatch(app, /renderProjectFilter\(\)/u);
   assert.doesNotMatch(app, /data-project-filter/u);
@@ -1156,7 +1315,29 @@ test('session list defaults to favorites and supports time plus favorite actions
   assert.match(app, /apiFetch\(`\/api\/sessions\/\$\{encodeURIComponent\(sessionId\)\}`,\s*\{\s*method:\s*'DELETE'/su);
 });
 
-test('favorite filter shows only favorite sessions and time shows all sessions', async () => {
+test('session topbar shows Sort only on Favorites and keeps New visually neutral', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sortMode = 'favorites';
+  api.state.favoriteSortMode = false;
+  const favoritesHtml = api.renderSessionList().innerHTML;
+
+  assert.match(favoritesHtml, /id="favorite-sort-button"/u);
+  assert.match(favoritesHtml, /class="ghost compact-button" type="button" id="favorite-sort-button"/u);
+  assert.match(favoritesHtml, /class="ghost compact-button" type="button" id="open-new-session-button"/u);
+  assert.match(favoritesHtml, /class="ghost compact-button" type="button" id="open-app-settings-button"/u);
+  assert.doesNotMatch(favoritesHtml, /class="primary compact-button" type="button" id="open-new-session-button"/u);
+
+  api.state.sortMode = 'time';
+  api.state.favoriteSortMode = false;
+  const allHtml = api.renderSessionList().innerHTML;
+
+  assert.doesNotMatch(allHtml, /id="favorite-sort-button"/u);
+  assert.match(allHtml, /class="ghost compact-button" type="button" id="open-new-session-button"/u);
+  assert.match(allHtml, /class="ghost compact-button" type="button" id="open-app-settings-button"/u);
+});
+
+test('favorite filter shows only favorite sessions and all shows every session', async () => {
   const { api } = await loadAppHarness();
 
   api.state.sessions = [
@@ -1172,7 +1353,7 @@ test('favorite filter shows only favorite sessions and time shows all sessions',
   assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['favorite', 'old']));
 });
 
-test('session list initially fetches only favorites and loads time sessions on demand', async () => {
+test('session list initially fetches only favorites and loads all sessions on demand', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
     fetch: async (path) => {
@@ -1209,12 +1390,137 @@ test('session list initially fetches only favorites and loads time sessions on d
   await api.refreshSessionsList({ renderAfter: false });
 
   assert.deepEqual(fetchCalls, ['/api/sessions?favorite=true']);
-  assert.deepEqual(api.state.sessions.map((session) => session.id), ['favorite_session']);
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session']));
 
   await api.setSessionSortMode('time');
 
   assert.deepEqual(fetchCalls, ['/api/sessions?favorite=true', '/api/sessions']);
-  assert.deepEqual(api.state.sessions.map((session) => session.id), ['favorite_session', 'time_session']);
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session', 'time_session']));
+});
+
+test('session restore renders favorites first and preloads all sessions in the background', async () => {
+  const pending: Array<{
+    path: string;
+    resolve: (response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
+  }> = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => new Promise((resolve) => {
+      pending.push({ path, resolve });
+    }),
+  });
+
+  api.state.token = 'token';
+  const restore = api.restoreAuth();
+  await flushMicrotasks();
+
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me']);
+  pending[0]?.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({ session: { id: 'auth_1' } }),
+  });
+  await flushMicrotasks();
+
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true']);
+  pending[1]?.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({ items: [] }),
+  });
+  pending[2]?.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      items: [{ id: 'favorite_session', favorite: true, updatedAt: 20, settings: { metadata: {} } }],
+    }),
+  });
+  await restore;
+  await flushMicrotasks();
+
+  assert.equal(api.state.sortMode, 'favorites');
+  assert.equal(api.state.sessionsScope, 'favorites');
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session']));
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/sessions']);
+
+  pending[3]?.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      items: [
+        { id: 'favorite_session', favorite: true, updatedAt: 20, settings: { metadata: {} } },
+        { id: 'all_session', favorite: false, updatedAt: 30, settings: { metadata: {} } },
+      ],
+    }),
+  });
+  await flushMicrotasks();
+
+  assert.equal(api.state.sortMode, 'favorites');
+  assert.equal(api.state.sessionsScope, 'favorites');
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session']));
+  assert.equal(JSON.stringify(api.state.sessionsByScope.all.map((session) => session.id)), JSON.stringify(['favorite_session', 'all_session']));
+
+  await api.setSessionSortMode('time');
+
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/sessions']);
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session', 'all_session']));
+});
+
+test('all tab does not show stale favorites while full sessions are loading', async () => {
+  const pending: Array<{
+    path: string;
+    resolve: (response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
+  }> = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => new Promise((resolve) => {
+      pending.push({ path, resolve });
+    }),
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.sortMode = 'favorites';
+  api.state.sessionsScope = 'favorites';
+  api.state.sessions = [
+    { id: 'old_favorite', favorite: true, updatedAt: 5, settings: { metadata: {} } },
+  ];
+
+  const favoritesRefresh = api.refreshSessionsList({ renderAfter: false, scope: 'favorites' });
+  const timeSwitch = api.setSessionSortMode('time');
+
+  assert.deepEqual(pending.map((request) => request.path), ['/api/sessions?favorite=true', '/api/sessions']);
+  assert.equal(api.state.sortMode, 'time');
+  assert.equal(api.state.sessionsLoading, true);
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify([]));
+  assert.match(api.renderSessionCards(), /Loading sessions/u);
+
+  pending[0]?.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      items: [{ id: 'late_favorite', favorite: true, updatedAt: 10, settings: { metadata: {} } }],
+    }),
+  });
+  await favoritesRefresh;
+
+  assert.equal(api.state.sortMode, 'time');
+  assert.equal(api.state.sessionsLoading, true);
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify([]));
+
+  pending[1]?.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      items: [
+        { id: 'favorite_session', favorite: true, updatedAt: 20, settings: { metadata: {} } },
+        { id: 'time_session', favorite: false, updatedAt: 30, settings: { metadata: {} } },
+      ],
+    }),
+  });
+  await timeSwitch;
+
+  assert.equal(api.state.sessionsLoading, false);
+  assert.equal(api.state.sessionsScope, 'all');
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session', 'time_session']));
 });
 
 test('favorite sort mode drafts manual order and saves it explicitly', async () => {
@@ -1280,6 +1586,114 @@ test('favorite sort mode drafts manual order and saves it explicitly', async () 
   assert.equal(api.state.favoriteSortMode, false);
   assert.equal(JSON.stringify(api.state.favoriteSortDraft), JSON.stringify([]));
   assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['session_a', 'session_b']));
+});
+
+test('favorite sort save removes unavailable favorites and returns to the session list', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path.includes('session_missing')) {
+        return {
+          ok: false,
+          status: 404,
+          json: async () => ({ error: 'session_not_found', message: 'Unknown session' }),
+        };
+      }
+      const body = JSON.parse(options.body || '{}');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: 'session_live',
+            cwd: '/repo',
+            favorite: true,
+            favoriteOrder: body.favoriteOrder,
+            updatedAt: 1,
+            settings: { favorite: true, favoriteOrder: body.favoriteOrder, metadata: {} },
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sortMode = 'favorites';
+  api.state.sessions = [
+    { id: 'session_missing', favorite: true, favoriteOrder: 1, settings: { favorite: true, favoriteOrder: 1, metadata: {} } },
+    { id: 'session_live', favorite: true, favoriteOrder: 2, settings: { favorite: true, favoriteOrder: 2, metadata: {} } },
+  ];
+  api.state.sessionsByScope.favorites = [...api.state.sessions];
+
+  api.enterFavoriteSortMode();
+  await api.saveFavoriteSortOrder();
+
+  assert.deepEqual(fetchCalls.map((call) => call.path), [
+    '/api/sessions/session_missing/favorite',
+    '/api/sessions/session_live/favorite',
+  ]);
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.favoriteSortMode, false);
+  assert.equal(JSON.stringify(api.state.favoriteSortDraft), JSON.stringify([]));
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['session_live']));
+  assert.equal(JSON.stringify(api.state.sessionsByScope.favorites.map((session) => session.id)), JSON.stringify(['session_live']));
+  assert.doesNotMatch(api.renderSessionCards(), /data-session-favorite-move-id/u);
+  assert.match(api.renderSessionCards(), /data-session-favorite-id="session_live"/u);
+});
+
+test('favorite sort save treats missing rollout errors as unavailable sessions', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path.includes('session_missing')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: 'internal_error', message: 'no rollout found for thread id session_missing' }),
+        };
+      }
+      const body = JSON.parse(options.body || '{}');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: 'session_live',
+            cwd: '/repo',
+            favorite: true,
+            favoriteOrder: body.favoriteOrder,
+            updatedAt: 1,
+            settings: { favorite: true, favoriteOrder: body.favoriteOrder, metadata: {} },
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sortMode = 'favorites';
+  api.state.sessions = [
+    { id: 'session_missing', favorite: true, favoriteOrder: 1, settings: { favorite: true, favoriteOrder: 1, metadata: {} } },
+    { id: 'session_live', favorite: true, favoriteOrder: 2, settings: { favorite: true, favoriteOrder: 2, metadata: {} } },
+  ];
+  api.state.sessionsByScope.favorites = [...api.state.sessions];
+
+  api.enterFavoriteSortMode();
+  await api.saveFavoriteSortOrder();
+
+  assert.deepEqual(fetchCalls.map((call) => call.path), [
+    '/api/sessions/session_missing/favorite',
+    '/api/sessions/session_live/favorite',
+  ]);
+  assert.equal(api.state.favoriteSortMode, false);
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['session_live']));
+  assert.doesNotMatch(api.renderSessionCards(), /data-session-favorite-move-id/u);
 });
 
 test('favorite sort mode cancel restores the persisted order without patching', async () => {
@@ -1470,7 +1884,7 @@ test('PWA refresh updates the current view instead of reloading the app', async 
   api.state.view = 'sessions';
 
   await api.refreshCurrentView();
-  assert.deepEqual(api.state.sessions.map((session) => session.id), ['session_fresh']);
+  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['session_fresh']));
 
   api.state.view = 'chat';
   api.state.sessionId = 'session_fresh';
@@ -1784,6 +2198,7 @@ globalThis.__codexWebTest = {
   firstInputForSession,
   previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
   renderSessionCards: typeof renderSessionCards === 'function' ? renderSessionCards : null,
+  renderSessionList: typeof renderSessionList === 'function' ? renderSessionList : null,
   renderTimelineItem: typeof renderTimelineItem === 'function' ? renderTimelineItem : null,
   renderComposerStatus: typeof renderComposerStatus === 'function' ? renderComposerStatus : null,
   hydrateTimelineFromSession,
@@ -1795,6 +2210,7 @@ globalThis.__codexWebTest = {
   refreshCurrentSessionMetadata,
   refreshSessionsList: typeof refreshSessionsList === 'function' ? refreshSessionsList : null,
   refreshCurrentView: typeof refreshCurrentView === 'function' ? refreshCurrentView : null,
+  restoreAuth: typeof restoreAuth === 'function' ? restoreAuth : null,
   setSessionSortMode: typeof setSessionSortMode === 'function' ? setSessionSortMode : null,
   selectSession: typeof selectSession === 'function' ? selectSession : null,
   onComposerSubmit: typeof onComposerSubmit === 'function' ? onComposerSubmit : null,
@@ -1805,17 +2221,24 @@ globalThis.__codexWebTest = {
   saveFavoriteSortOrder: typeof saveFavoriteSortOrder === 'function' ? saveFavoriteSortOrder : null,
   cancelFavoriteSortMode: typeof cancelFavoriteSortMode === 'function' ? cancelFavoriteSortMode : null,
   moveFavoriteSession: typeof moveFavoriteSession === 'function' ? moveFavoriteSession : null,
-  reloadRuntime: typeof reloadRuntime === 'function' ? reloadRuntime : null,
-  applyTheme: typeof applyTheme === 'function' ? applyTheme : null,
-  applyDefaultThreadSettings: typeof applyDefaultThreadSettings === 'function' ? applyDefaultThreadSettings : null,
-  applyDefaultSettings: typeof applyDefaultSettings === 'function' ? applyDefaultSettings : null,
-  streamTurnEvents,
-  applyTurnEvent: typeof applyTurnEvent === 'function' ? applyTurnEvent : null,
-  saveCurrentTimeline,
-};`, context);
+	  reloadRuntime: typeof reloadRuntime === 'function' ? reloadRuntime : null,
+	  applyTheme: typeof applyTheme === 'function' ? applyTheme : null,
+	  applyDefaultThreadSettings: typeof applyDefaultThreadSettings === 'function' ? applyDefaultThreadSettings : null,
+	  applyDefaultSettings: typeof applyDefaultSettings === 'function' ? applyDefaultSettings : null,
+	  setActivityDetailsEnabled: typeof setActivityDetailsEnabled === 'function' ? setActivityDetailsEnabled : null,
+	  renderSettingsDrawer: typeof renderSettingsDrawer === 'function' ? renderSettingsDrawer : null,
+	  handleApiError: typeof handleApiError === 'function' ? handleApiError : null,
+	  streamTurnEvents,
+	  applyTurnEvent: typeof applyTurnEvent === 'function' ? applyTurnEvent : null,
+	  saveCurrentTimeline,
+	};`, context);
   return {
     api: context.__codexWebTest,
     storage,
     context,
   };
+}
+
+async function flushMicrotasks() {
+  await new Promise((resolve) => setImmediate(resolve));
 }

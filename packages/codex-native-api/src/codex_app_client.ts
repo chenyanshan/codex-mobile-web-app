@@ -1489,6 +1489,7 @@ export class CodexAppClient extends EventEmitter {
       lastAssistantActivityAt: 0,
     };
     const itemOutputKinds = new Map();
+    const emittedSnapshotWorkEvents = new Set<string>();
     let sawTerminalNotification = false;
     const onNotification = (notification) => {
       if (isTerminalNotificationForThread(notification, threadId, turnId)) {
@@ -1622,6 +1623,12 @@ export class CodexAppClient extends EventEmitter {
           turn: summarizeTurnSnapshot(turn),
           progress: summarizeProgressState(progressState),
         });
+        emitWorkEventsFromSessionPath({
+          sessionPath: thread?.path ?? null,
+          turnId,
+          onWorkEvent,
+          emittedKeys: emittedSnapshotWorkEvents,
+        });
         if (includeTurnsUnsupported) {
           const previewText = progressState.finalAnswerText || progressState.commentaryText;
           const settleAnchor = Math.max(
@@ -1676,6 +1683,11 @@ export class CodexAppClient extends EventEmitter {
           continue;
         }
         if (turn) {
+          emitWorkEventsFromTurnSnapshot({
+            turn,
+            onWorkEvent,
+            emittedKeys: emittedSnapshotWorkEvents,
+          });
           this.observeApprovedExecutionTurnSnapshot({
             threadId,
             turnId,
@@ -2767,6 +2779,7 @@ function mapTurnItem(raw) {
     text: extractStructuredText(raw),
     savedPath: extractStructuredString(raw?.savedPath),
     result: extractStructuredString(raw?.result),
+    raw: raw && typeof raw === 'object' ? cloneSessionResponseItem(raw) : null,
   };
 }
 
@@ -4038,6 +4051,218 @@ function extractWorkEventUpdate(
   return null;
 }
 
+function emitWorkEventsFromTurnSnapshot({
+  turn,
+  onWorkEvent,
+  emittedKeys,
+}: {
+  turn: any;
+  onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
+  emittedKeys: Set<string>;
+}): void {
+  if (typeof onWorkEvent !== 'function') {
+    return;
+  }
+  for (const event of extractWorkEventsFromTurnSnapshot(turn)) {
+    const key = buildWorkEventEmissionKey(event);
+    if (emittedKeys.has(key)) {
+      continue;
+    }
+    emittedKeys.add(key);
+    void onWorkEvent(event);
+  }
+}
+
+function emitWorkEventsFromSessionPath({
+  sessionPath,
+  turnId,
+  onWorkEvent,
+  emittedKeys,
+}: {
+  sessionPath: string | null | undefined;
+  turnId: string;
+  onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
+  emittedKeys: Set<string>;
+}): void {
+  if (typeof onWorkEvent !== 'function') {
+    return;
+  }
+  for (const event of extractWorkEventsFromSessionPath(sessionPath, turnId)) {
+    const key = buildWorkEventEmissionKey(event);
+    if (emittedKeys.has(key)) {
+      continue;
+    }
+    emittedKeys.add(key);
+    void onWorkEvent(event);
+  }
+}
+
+function buildWorkEventEmissionKey(event: ProviderTurnWorkEvent): string {
+  return `${event.itemId}:${event.type}:${JSON.stringify(event.summary ?? {})}`;
+}
+
+function extractWorkEventsFromTurnSnapshot(turn: any): ProviderTurnWorkEvent[] {
+  const items = Array.isArray(turn?.items) ? turn.items : [];
+  return extractWorkEventsFromResponseItems(items.map((item) => (
+    item?.raw && typeof item.raw === 'object' ? item.raw : item
+  )));
+}
+
+function extractWorkEventsFromSessionPath(
+  sessionPath: string | null | undefined,
+  turnId: string,
+): ProviderTurnWorkEvent[] {
+  if (!sessionPath || !turnId || !fs.existsSync(sessionPath)) {
+    return [];
+  }
+  try {
+    const lines = fs.readFileSync(sessionPath, 'utf8').split('\n');
+    return extractWorkEventsFromResponseItems(extractSessionResponseItemsForOpenTurn(lines, turnId));
+  } catch {
+    return [];
+  }
+}
+
+function extractWorkEventsFromResponseItems(items: any[]): ProviderTurnWorkEvent[] {
+  const startedByItemId = new Map<string, ProviderTurnWorkEvent>();
+  const events: ProviderTurnWorkEvent[] = [];
+  for (const item of items) {
+    const event = extractWorkEventFromTurnItem(item, startedByItemId);
+    if (!event) {
+      continue;
+    }
+    events.push(event);
+    if (event.type === 'started') {
+      startedByItemId.set(event.itemId, event);
+    }
+  }
+  return events;
+}
+
+function extractSessionResponseItemsForOpenTurn(lines: string[], turnId: string): ProviderResponseItem[] {
+  let startIndex = -1;
+  let endIndex = lines.length;
+  let taskCompleteIndex = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const entry = parseSessionLine(lines[index]);
+    if (!entry) {
+      continue;
+    }
+    const payload = entry.payload ?? null;
+    if (isSessionTurnStartBoundary(entry, turnId)) {
+      startIndex = index;
+      endIndex = lines.length;
+      continue;
+    }
+    if (entry.type === 'event_msg' && payload?.type === 'task_complete' && String(payload?.turn_id ?? '') === turnId) {
+      taskCompleteIndex = index;
+      if (startIndex >= 0) {
+        endIndex = index;
+        break;
+      }
+      continue;
+    }
+    if (startIndex >= 0 && isSessionAnyTurnBoundary(entry)) {
+      endIndex = index;
+      break;
+    }
+  }
+  if (startIndex < 0) {
+    return taskCompleteIndex >= 0
+      ? extractSessionResponseItemsForTurn(lines, taskCompleteIndex, turnId)
+      : [];
+  }
+  const responseItems: ProviderResponseItem[] = [];
+  for (let index = startIndex + 1; index < endIndex; index += 1) {
+    const entry = parseSessionLine(lines[index]);
+    const payload = entry?.payload ?? null;
+    if (entry?.type !== 'response_item' || !payload || typeof payload !== 'object') {
+      continue;
+    }
+    responseItems.push(cloneSessionResponseItem(payload));
+  }
+  return responseItems;
+}
+
+function parseSessionLine(line: string | undefined): any | null {
+  const text = line?.trim();
+  if (!text) {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function isSessionTurnStartBoundary(entry: any, turnId: string): boolean {
+  const payload = entry?.payload ?? null;
+  if (entry?.type === 'turn_context') {
+    return String(payload?.turn_id ?? '') === turnId;
+  }
+  return entry?.type === 'event_msg'
+    && payload?.type === 'task_started'
+    && String(payload?.turn_id ?? '') === turnId;
+}
+
+function isSessionAnyTurnBoundary(entry: any): boolean {
+  const payload = entry?.payload ?? null;
+  return entry?.type === 'turn_context'
+    || (
+      entry?.type === 'event_msg'
+      && (payload?.type === 'task_started' || payload?.type === 'task_complete')
+    );
+}
+
+function extractWorkEventFromTurnItem(
+  item: any,
+  startedByItemId: Map<string, ProviderTurnWorkEvent>,
+): ProviderTurnWorkEvent | null {
+  if (!item || typeof item !== 'object' || isAssistantVisibleItem(item) || isUserVisibleItem(item)) {
+    return null;
+  }
+  const itemType = normalizeEventItemType(item);
+  const itemId = extractItemId(item);
+  if (!itemId) {
+    return null;
+  }
+  if (itemType === 'functioncall' || itemType === 'customtoolcall') {
+    const summary = buildWorkSummary(item, item);
+    const kind = classifyWorkEventKind(item, item);
+    if (kind === 'unknown' && Object.keys(summary).length === 0) {
+      return null;
+    }
+    return {
+      type: 'started',
+      itemId,
+      kind,
+      title: buildWorkTitle(kind, item, summary),
+      status: normalizeNullableString(item?.status),
+      summary,
+      raw: item,
+    };
+  }
+  if (itemType === 'functioncalloutput' || itemType === 'customtoolcalloutput') {
+    const previous = startedByItemId.get(itemId);
+    const summary = buildWorkSummary(item, item);
+    const kind = previous?.kind ?? classifyWorkEventKind(item, item);
+    if (kind === 'unknown' && Object.keys(summary).length === 0) {
+      return null;
+    }
+    return {
+      type: 'completed',
+      itemId,
+      kind,
+      title: previous?.title ?? buildWorkTitle(kind, item, summary),
+      status: normalizeNullableString(item?.status) ?? 'completed',
+      summary,
+      raw: item,
+    };
+  }
+  return null;
+}
+
 function classifyWorkEventKind(item, params): ProviderTurnWorkEventKind {
   const toolName = extractToolName(item) ?? extractToolName(params);
   const parsedToolArguments = parseToolArguments(item) ?? parseToolArguments(params);
@@ -4260,11 +4485,11 @@ function extractPatchText(value): string | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
-  const direct = normalizeNullableString(value?.patch ?? value?.diff ?? value?.changeset ?? value?.item?.patch ?? value?.item?.diff);
+  const direct = normalizeNullableString(value?.patch ?? value?.diff ?? value?.changeset ?? value?.input ?? value?.item?.patch ?? value?.item?.diff ?? value?.item?.input);
   if (direct) {
     return direct;
   }
-  const rawArguments = value?.arguments ?? value?.item?.arguments;
+  const rawArguments = value?.arguments ?? value?.input ?? value?.item?.arguments ?? value?.item?.input;
   if (typeof rawArguments === 'string' && rawArguments.includes('*** Begin Patch')) {
     return rawArguments;
   }

@@ -439,9 +439,9 @@ test('static root is public', async () => {
     assert.match(serviceWorkerResponse.headers.get('content-type') ?? '', /^application\/javascript\b/i);
     assert.match(await serviceWorkerResponse.text(), /self\.addEventListener/u);
 
-    const iconResponse = await fetch(`${server.baseUrl}/icon.svg`);
+    const iconResponse = await fetch(`${server.baseUrl}/icon-192.png`);
     assert.equal(iconResponse.status, 200);
-    assert.match(iconResponse.headers.get('content-type') ?? '', /^image\/svg\+xml\b/i);
+    assert.match(iconResponse.headers.get('content-type') ?? '', /^image\/png\b/i);
   } finally {
     await server.stop();
   }

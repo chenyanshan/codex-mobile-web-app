@@ -1,8 +1,9 @@
-const APP_BUILD_ID = '2026-05-19-fast-session-open-v6';
+const APP_BUILD_ID = '2026-05-19-thread-activity-details-v16';
 const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
 const THEME_KEY = 'codexWebTheme';
 const DEFAULT_THREAD_SETTINGS_KEY = 'codexWebDefaultThreadSettings';
+const ACTIVITY_DETAILS_KEY = 'codexWebActivityDetails';
 const MAX_TIMELINE_CACHE_SESSIONS = 16;
 const MAX_TIMELINE_CACHE_ITEMS = 80;
 const MAX_TIMELINE_CACHE_MAP_ITEMS = 24;
@@ -30,7 +31,17 @@ const state = {
   authSession: null,
   models: [],
   sessions: [],
+  sessionsByScope: {
+    favorites: [],
+    all: [],
+  },
+  sessionsLoadedByScope: {
+    favorites: false,
+    all: false,
+  },
   sessionsLoading: false,
+  sessionsLoadingScope: null,
+  sessionsRequestId: 0,
   currentSession: null,
   sessionId: null,
   view: 'sessions',
@@ -59,6 +70,7 @@ const state = {
   permissionPreset: DEFAULT_PERMISSION_PRESET,
   approvalPolicy: DEFAULT_APPROVAL_POLICY,
   sandboxMode: DEFAULT_SANDBOX_MODE,
+  activityDetails: localStorage.getItem(ACTIVITY_DETAILS_KEY) === 'true',
   timeline: [],
   sessionHistoryItems: [],
   sessionHistoryStartIndex: 0,
@@ -76,6 +88,7 @@ let composerResizeObserver = null;
 let composerOffsetRun = 0;
 let pullToRefreshCleanup = null;
 let edgeSwipeStart = null;
+let allSessionsPreloadPromise = null;
 
 bootstrap();
 applyTheme(state.theme, { persist: false });
@@ -124,6 +137,7 @@ async function restoreAuth() {
     state.statusTone = 'success';
     state.error = '';
     render();
+    preloadAllSessionsInBackground();
   } catch (error) {
     handleApiError(error, { auth: true });
   }
@@ -140,7 +154,18 @@ function createCachedAuthSession() {
 function setLoggedOut(message = '') {
   state.authSession = null;
   state.sessions = [];
+  state.sessionsByScope = {
+    favorites: [],
+    all: [],
+  };
+  state.sessionsLoadedByScope = {
+    favorites: false,
+    all: false,
+  };
   state.sessionsLoading = false;
+  state.sessionsLoadingScope = null;
+  state.sessionsRequestId += 1;
+  allSessionsPreloadPromise = null;
   state.sessionId = null;
   state.currentSession = null;
   state.view = 'sessions';
@@ -231,7 +256,7 @@ function renderLogin() {
         </div>
         ${state.loginError ? `<p class="meta" style="color: var(--danger);">${escapeHtml(state.loginError)}</p>` : ''}
         <div class="actions">
-          <button class="primary" type="submit">Log in</button>
+          <button class="primary primary-action" type="submit">Log in</button>
         </div>
       </form>
     </div>
@@ -253,6 +278,7 @@ function renderMain() {
 }
 
 function renderSessionList() {
+  const canSortFavorites = state.sortMode === 'favorites';
   const topbarActions = state.favoriteSortMode
     ? `
           <div class="topbar-actions sort-edit-actions">
@@ -262,8 +288,8 @@ function renderSessionList() {
         `
     : `
           <div class="topbar-actions">
-            <button class="ghost compact-button" type="button" id="favorite-sort-button">Sort</button>
-            <button class="primary compact-button" type="button" id="open-new-session-button">New</button>
+            ${canSortFavorites ? '<button class="ghost compact-button" type="button" id="favorite-sort-button">Sort</button>' : ''}
+            <button class="ghost compact-button" type="button" id="open-new-session-button">New</button>
             <button class="ghost compact-button" type="button" id="open-app-settings-button">Set</button>
           </div>
         `;
@@ -279,7 +305,7 @@ function renderSessionList() {
         <div class="list-actions${state.favoriteSortMode ? ' is-hidden' : ''}">
           <div class="toggle sort-toggle">
             <button type="button" data-sort-mode="favorites" aria-pressed="${String(state.sortMode === 'favorites')}">Favorites</button>
-            <button type="button" data-sort-mode="time" aria-pressed="${String(state.sortMode === 'time')}">Time</button>
+            <button type="button" data-sort-mode="time" aria-pressed="${String(state.sortMode === 'time')}">All</button>
           </div>
         </div>
       </header>
@@ -365,11 +391,11 @@ function renderNewSession() {
         <form class="panel stack" id="new-session-form">
           <div class="field">
             <label for="new-cwd-input">Project path</label>
-            <input id="new-cwd-input" type="text" value="${escapeAttribute(state.newCwd || state.cwd)}" placeholder="Use server default">
+            <textarea id="new-cwd-input" name="cwd" rows="3" placeholder="Use server default">${escapeHtml(state.newCwd || state.cwd)}</textarea>
           </div>
           ${renderPathChoices()}
           <div class="actions">
-            <button class="primary" type="submit">Start</button>
+            <button class="primary primary-action" type="submit">Start</button>
           </div>
         </form>
       </main>
@@ -501,6 +527,10 @@ function renderSettingsDrawer() {
         <span class="meta">Runtime</span>
         <button class="ghost compact-button" type="button" id="runtime-reload-button">Reload</button>
       </div>
+      <label class="settings-toggle-row" for="activity-detail-toggle">
+        <span class="meta">Activity details</span>
+        <input id="activity-detail-toggle" type="checkbox" ${state.activityDetails ? 'checked' : ''}>
+      </label>
       <div class="controls">
         <div class="control-group">
           <label for="model-select">Model</label>
@@ -574,11 +604,12 @@ function renderTimelineItem(item) {
       ? `<div class="message-text markdown-body">${renderMarkdown(item.text)}</div>`
       : `<p class="message-text">${escapeHtml(item.text)}</p>`;
     return `
-      <article class="card message-card ${escapeHtml(item.role)}">
+      <article class="card message-card ${escapeHtml(item.role)}${item.severity === 'error' ? ' error-message' : ''}">
         <div class="card-header">
           <span class="card-title">${escapeHtml(item.label)}</span>
           <span class="card-kind">${escapeHtml(item.meta || '')}</span>
         </div>
+        ${item.severity === 'error' ? '<span class="error-badge">Error</span>' : ''}
         ${body}
       </article>
     `;
@@ -627,12 +658,13 @@ function renderTimelineItem(item) {
 function renderWorkItem(item) {
   const summary = summarizeWorkItem(item);
   const details = workDetailsForItem(item);
+  const hasError = workItemHasError(item);
   return `
-    <details class="card work-card" open>
+    <details class="card work-card${hasError ? ' work-error' : ''}" open>
       <summary>
         <span class="work-title">Work</span>
         <span class="work-counts">${escapeHtml(formatWorkCounts(summary))}</span>
-        <span class="card-kind">${escapeHtml(item.status || 'running')}</span>
+        ${hasError ? '<span class="error-badge">Error</span>' : `<span class="card-kind">${escapeHtml(item.status || 'running')}</span>`}
       </summary>
       ${details.length ? `
         <div class="work-events">
@@ -661,6 +693,22 @@ function summarizeWorkItem(item) {
     }
   }
   return summary;
+}
+
+function workItemHasError(item) {
+  return item?.status === 'error'
+    || item?.status === 'failed'
+    || (item.batches || []).some(workBatchHasError)
+    || (item.approvals || []).some((approval) => approval.summary?.error);
+}
+
+function workBatchHasError(batch) {
+  const status = String(batch?.status || '').toLowerCase();
+  const exitCode = Number(batch?.summary?.exitCode);
+  return Boolean(batch?.summary?.error)
+    || status === 'failed'
+    || status === 'error'
+    || (Number.isFinite(exitCode) && exitCode !== 0);
 }
 
 function formatWorkCounts(summary) {
@@ -701,8 +749,9 @@ function workDetailsForItem(item) {
 
 function renderWorkDetail(detail) {
   const body = renderWorkDetailBody(detail);
+  const openAttribute = state.activityDetails ? ' open' : '';
   return `
-    <details class="work-detail" open data-work-kind="${escapeAttribute(detail.kind)}">
+    <details class="work-detail"${openAttribute} data-work-kind="${escapeAttribute(detail.kind)}">
       <summary>
         <span class="work-event-kind">${escapeHtml(workKindLabel(detail.kind))}</span>
         <span class="work-event-title">${escapeHtml(detail.title)}</span>
@@ -717,16 +766,21 @@ function renderWorkDetail(detail) {
 
 function renderWorkDetailBody(detail) {
   const summary = detail.summary || {};
-  const rows = renderWorkSummaryRows(summary);
+  const rows = renderWorkSummaryRows(summary, { includeRaw: state.activityDetails });
   const files = renderWorkFileChanges(detail.fileChanges || []);
   const output = renderWorkTextBlock('Output', summary.output);
   const diff = renderWorkTextBlock('Diff', summary.diff || summary.patch);
-  return [rows, files, output, diff].filter(Boolean).join('');
+  const raw = state.activityDetails ? renderWorkTextBlock('Raw Event', summary.raw) : '';
+  return [rows, files, output, diff, raw].filter(Boolean).join('');
 }
 
-function renderWorkSummaryRows(summary) {
+function renderWorkSummaryRows(summary, options = {}) {
+  const excludedKeys = ['fileChanges', 'output', 'diff', 'patch'];
+  if (!options.includeRaw) {
+    excludedKeys.push('raw');
+  }
   const entries = Object.entries(summary || {})
-    .filter(([key, value]) => !['fileChanges', 'output', 'diff', 'patch'].includes(key) && hasSummaryValue(value));
+    .filter(([key, value]) => !excludedKeys.includes(key) && hasSummaryValue(value));
   if (!entries.length) {
     return '';
   }
@@ -1038,6 +1092,13 @@ function bindGlobalEvents() {
     settingsToggle.addEventListener('click', toggleSettingsDrawer);
   }
 
+  const activityDetailToggle = document.querySelector('#activity-detail-toggle');
+  if (activityDetailToggle) {
+    activityDetailToggle.addEventListener('change', (event) => {
+      setActivityDetailsEnabled(event.target.checked);
+    });
+  }
+
   const modelSelect = document.querySelector('#model-select');
   if (modelSelect) {
     modelSelect.addEventListener('change', (event) => {
@@ -1157,6 +1218,12 @@ function syncComposerOffset() {
 
 function toggleSettingsDrawer() {
   state.settingsOpen = !state.settingsOpen;
+  withTimelineScrollPreserved(() => render());
+}
+
+function setActivityDetailsEnabled(enabled) {
+  state.activityDetails = Boolean(enabled);
+  localStorage.setItem(ACTIVITY_DETAILS_KEY, String(state.activityDetails));
   withTimelineScrollPreserved(() => render());
 }
 
@@ -1527,23 +1594,33 @@ async function saveFavoriteSortOrder() {
     return;
   }
   const draft = favoriteSortDraftIds();
+  const missingIds = [];
   try {
     for (let index = 0; index < draft.length; index += 1) {
       const sessionId = draft[index];
-      const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/favorite`, {
-        method: 'PATCH',
-        body: { favorite: true, favoriteOrder: index + 1 },
-      });
-      if (payload?.session) {
-        upsertSession(payload.session);
-      } else {
-        applyFavoriteOrderLocally(sessionId, index + 1);
+      try {
+        const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/favorite`, {
+          method: 'PATCH',
+          body: { favorite: true, favoriteOrder: index + 1 },
+        });
+        if (payload?.session) {
+          upsertSession(payload.session);
+        } else {
+          applyFavoriteOrderLocally(sessionId, index + 1);
+        }
+      } catch (error) {
+        if (!isMissingSessionError(error) && !isUnavailableSessionError(error)) {
+          throw error;
+        }
+        missingIds.push(sessionId);
+        removeSession(sessionId);
       }
     }
     state.favoriteSortMode = false;
     state.favoriteSortDraft = [];
-    state.status = 'Favorite order saved';
-    state.statusTone = 'success';
+    state.view = 'sessions';
+    state.status = missingIds.length ? 'Favorite order saved; unavailable sessions removed' : 'Favorite order saved';
+    state.statusTone = missingIds.length ? 'warn' : 'success';
     state.error = '';
     render();
   } catch (error) {
@@ -1784,17 +1861,21 @@ function applyTurnEvent(event, assistantEntry) {
         batchKind: event.kind,
         title: event.title || 'Batch',
         status: 'started',
-        summary: {},
+        summary: event.raw ? { raw: event.raw } : {},
       });
       break;
     case 'batch.updated':
       upsertWorkBatch(event.turnId, event.batchId, {
-        summary: event.summary || {},
+        summary: {
+          ...(event.summary || {}),
+          ...(event.raw ? { raw: event.raw } : {}),
+        },
       });
       break;
     case 'batch.completed':
       upsertWorkBatch(event.turnId, event.batchId, {
         status: event.status || 'completed',
+        summary: event.raw ? { raw: event.raw } : {},
       });
       break;
     case 'approval.requested': {
@@ -1905,6 +1986,9 @@ function upsertWorkBatch(turnId, batchId, patch) {
     batches.push(next);
   }
   work.batches = batches;
+  if (workBatchHasError(next)) {
+    work.status = 'error';
+  }
   state.batches.set(batchId, next);
   appendOrReplace(work, (item) => item.id === work.id, { moveToEnd: true });
 }
@@ -1974,6 +2058,11 @@ function isMissingSessionError(error) {
     || /thread not found|session not found|unknown session|unknown thread/i.test(message);
 }
 
+function isUnavailableSessionError(error) {
+  const message = error?.payload?.message || error?.message || '';
+  return /thread not loaded|no rollout found for thread id/i.test(message);
+}
+
 async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
   if (!state.sessionId) {
     return null;
@@ -2016,22 +2105,50 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
   return null;
 }
 
-async function refreshSessionsList({ renderAfter = true, scope = state.sortMode === 'favorites' ? 'favorites' : 'all' } = {}) {
+async function refreshSessionsList({
+  renderAfter = true,
+  scope = state.sortMode === 'favorites' ? 'favorites' : 'all',
+  background = false,
+} = {}) {
+  const normalizedScope = scope === 'favorites' ? 'favorites' : 'all';
+  if (background) {
+    const payload = await apiFetch(normalizedScope === 'favorites' ? '/api/sessions?favorite=true' : '/api/sessions');
+    const sessions = normalizeSessions(payload);
+    state.sessionsByScope[normalizedScope] = sessions;
+    state.sessionsLoadedByScope[normalizedScope] = true;
+    return sessions;
+  }
+  const requestId = state.sessionsRequestId + 1;
+  state.sessionsRequestId = requestId;
   state.sessionsLoading = true;
+  state.sessionsLoadingScope = normalizedScope;
+  state.sessionsScope = normalizedScope;
+  state.sessions = normalizedScope === currentSessionScope()
+    ? [...(state.sessionsByScope[normalizedScope] || [])]
+    : [];
   if (renderAfter) {
     render();
   }
   try {
-    const payload = await apiFetch(scope === 'favorites' ? '/api/sessions?favorite=true' : '/api/sessions');
-    state.sessions = normalizeSessions(payload);
-    state.sessionsScope = scope === 'favorites' ? 'favorites' : 'all';
+    const payload = await apiFetch(normalizedScope === 'favorites' ? '/api/sessions?favorite=true' : '/api/sessions');
+    const sessions = normalizeSessions(payload);
+    state.sessionsByScope[normalizedScope] = sessions;
+    state.sessionsLoadedByScope[normalizedScope] = true;
+    if (requestId !== state.sessionsRequestId || normalizedScope !== currentSessionScope()) {
+      return sessions;
+    }
+    state.sessions = [...sessions];
+    state.sessionsScope = normalizedScope;
     if (state.favoriteSortMode) {
       syncFavoriteSortDraft();
     }
     syncCurrentSessionFromList();
     return state.sessions;
   } finally {
-    state.sessionsLoading = false;
+    if (requestId === state.sessionsRequestId) {
+      state.sessionsLoading = false;
+      state.sessionsLoadingScope = null;
+    }
     if (renderAfter) {
       render();
     }
@@ -2045,15 +2162,35 @@ async function setSessionSortMode(mode) {
     state.favoriteSortDraft = [];
   }
   state.sortMode = nextMode;
-  if (nextMode === 'time' && state.sessionsScope !== 'all') {
+  const scope = currentSessionScope();
+  const cached = state.sessionsByScope[scope] || [];
+  const isLoaded = state.sessionsLoadedByScope[scope] === true;
+  state.sessions = isLoaded ? [...cached] : [];
+  state.sessionsScope = scope;
+  if (nextMode === 'time' && !isLoaded) {
     await refreshSessionsList({ renderAfter: true, scope: 'all' });
     return;
   }
-  if (nextMode === 'favorites' && state.sessionsScope !== 'favorites') {
+  if (nextMode === 'favorites' && !isLoaded) {
     await refreshSessionsList({ renderAfter: true, scope: 'favorites' });
     return;
   }
   render();
+}
+
+function preloadAllSessionsInBackground() {
+  if (!state.token || state.sessionsLoadedByScope.all === true || allSessionsPreloadPromise) {
+    return allSessionsPreloadPromise;
+  }
+  allSessionsPreloadPromise = refreshSessionsList({ renderAfter: false, scope: 'all', background: true })
+    .catch((error) => {
+      console.warn('[codex-web] all sessions preload failed', error);
+      return null;
+    })
+    .finally(() => {
+      allSessionsPreloadPromise = null;
+    });
+  return allSessionsPreloadPromise;
 }
 
 async function refreshCurrentView() {
@@ -2191,6 +2328,9 @@ function removeSession(sessionId) {
     return;
   }
   state.sessions = state.sessions.filter((session) => session.id !== sessionId);
+  for (const scope of Object.keys(state.sessionsByScope)) {
+    state.sessionsByScope[scope] = (state.sessionsByScope[scope] || []).filter((session) => session.id !== sessionId);
+  }
   if (state.currentSession?.id === sessionId) {
     state.currentSession = null;
   }
@@ -2264,12 +2404,38 @@ function upsertSession(session) {
   } else {
     state.sessions.unshift(next);
   }
+  upsertSessionInScope('all', next);
+  if (isFavoriteSession(next)) {
+    upsertSessionInScope('favorites', next);
+  } else {
+    removeSessionFromScope('favorites', next.id);
+  }
   if (state.sessionId === next.id) {
     state.currentSession = next;
   }
   if (state.favoriteSortMode) {
     syncFavoriteSortDraft();
   }
+}
+
+function currentSessionScope() {
+  return state.sortMode === 'favorites' ? 'favorites' : 'all';
+}
+
+function upsertSessionInScope(scope, session) {
+  const list = state.sessionsByScope[scope] || [];
+  const index = list.findIndex((item) => item.id === session.id);
+  const next = mergeSessionSummary(index >= 0 ? list[index] : null, session);
+  if (index >= 0) {
+    list[index] = next;
+  } else {
+    list.unshift(next);
+  }
+  state.sessionsByScope[scope] = list;
+}
+
+function removeSessionFromScope(scope, sessionId) {
+  state.sessionsByScope[scope] = (state.sessionsByScope[scope] || []).filter((session) => session.id !== sessionId);
 }
 
 function mergeSessionSummary(previous, next) {
@@ -2744,7 +2910,7 @@ function uniqueSessionPaths() {
 }
 
 function projectNameForSession(session, fallbackCwd = '') {
-  return session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || 'New Session';
+  return session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || session?.title || 'New Session';
 }
 
 function isFavoriteSession(session) {
@@ -2977,10 +3143,11 @@ function appendTimelineError(turnId, message) {
     id,
     kind: 'message',
     role: 'system',
+    severity: 'error',
     label: 'Error',
     meta: 'failed',
     text,
-  }, (item) => item.id === id);
+  }, (item) => item.id === id, { moveToEnd: true });
 }
 
 function appendOrReplace(entry, matcher, options = {}) {

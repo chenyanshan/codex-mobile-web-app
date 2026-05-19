@@ -358,6 +358,7 @@ button:disabled {
 }
 
 .field input,
+.field textarea,
 .field select,
 .control-group input,
 .control-group select,
@@ -379,6 +380,12 @@ button:disabled {
   background: var(--accent-2);
   border-color: var(--accent-2);
   color: white;
+}
+
+.primary-action {
+  min-height: 48px;
+  padding: 0 14px;
+  font-weight: 650;
 }
 
 .ghost {
@@ -419,6 +426,16 @@ button:disabled {
   display: grid;
   gap: 10px;
   align-content: start;
+}
+
+.new-session-page .panel {
+  width: 100%;
+}
+
+.new-session-page textarea {
+  min-height: 92px;
+  resize: vertical;
+  line-height: 1.45;
 }
 
 .settings-section {
@@ -592,6 +609,24 @@ button:disabled {
   justify-self: stretch;
 }
 
+.message-card.error-message {
+  border-color: color-mix(in srgb, var(--danger) 72%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 26%, transparent);
+}
+
+.error-badge {
+  width: max-content;
+  margin-bottom: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 16%, var(--panel));
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
 .message-card.system .message-text {
   color: var(--text);
 }
@@ -634,6 +669,11 @@ button:disabled {
 .work-card {
   padding: 0;
   overflow: hidden;
+}
+
+.work-card.work-error {
+  border-color: color-mix(in srgb, var(--danger) 70%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
 }
 
 .work-card summary {
@@ -990,6 +1030,22 @@ button:disabled {
   font-size: 12px;
 }
 
+.settings-toggle-row {
+  margin-bottom: 8px;
+  padding: 2px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-toggle-row input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  accent-color: var(--accent-2);
+}
+
 .composer-error {
   margin-bottom: 6px;
   color: var(--danger);
@@ -1076,8 +1132,9 @@ button:disabled {
 }
 
 .danger {
-  border-color: rgba(255, 125, 125, 0.35);
-  color: #ffd9d9;
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, var(--panel-2));
+  color: var(--danger);
 }
 
 .modal-backdrop {

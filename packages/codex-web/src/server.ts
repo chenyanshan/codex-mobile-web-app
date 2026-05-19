@@ -128,7 +128,7 @@ export function createCodexWebServer({
   };
 }
 
-function loadDefaultStaticFiles(): Record<string, { body: string; contentType: string }> {
+function loadDefaultStaticFiles(): Record<string, { body: string | Buffer; contentType: string }> {
   const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
   const indexHtml = readFileSync(path.join(publicDir, 'index.html'), 'utf8');
   return {
@@ -160,9 +160,17 @@ function loadDefaultStaticFiles(): Record<string, { body: string; contentType: s
       body: readFileSync(path.join(publicDir, 'service-worker.js'), 'utf8'),
       contentType: 'application/javascript; charset=utf-8',
     },
-    '/icon.svg': {
-      body: readFileSync(path.join(publicDir, 'icon.svg'), 'utf8'),
-      contentType: 'image/svg+xml; charset=utf-8',
+    '/icon-192.png': {
+      body: readFileSync(path.join(publicDir, 'icon-192.png')),
+      contentType: 'image/png',
+    },
+    '/icon-512.png': {
+      body: readFileSync(path.join(publicDir, 'icon-512.png')),
+      contentType: 'image/png',
+    },
+    '/apple-touch-icon.png': {
+      body: readFileSync(path.join(publicDir, 'apple-touch-icon.png')),
+      contentType: 'image/png',
     },
   };
 }

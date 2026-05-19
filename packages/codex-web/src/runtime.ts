@@ -193,13 +193,44 @@ export class CodexWebRuntime {
     if (!favoriteIds.length) {
       return [];
     }
-    const favoriteIdSet = new Set(favoriteIds);
-    const result = await this.client.listThreads({ limit: 100, archived: false });
-    const sessions = result.items
-      .filter((thread) => favoriteIdSet.has(thread.threadId))
+    const threads = await Promise.all(favoriteIds.map((threadId) => this.readFavoriteThreadSummary(threadId)));
+    const sessions = threads
+      .filter((thread): thread is ProviderThreadSummary => Boolean(thread?.threadId))
       .map((thread) => this.toSession(thread));
     return sessions.sort((left, right) => (left.favoriteOrder ?? Number.MAX_SAFE_INTEGER) - (right.favoriteOrder ?? Number.MAX_SAFE_INTEGER)
       || (right.lastInputAt ?? 0) - (left.lastInputAt ?? 0));
+  }
+
+  private async readFavoriteThreadSummary(threadId: string): Promise<ProviderThreadSummary | null> {
+    try {
+      const thread = await this.client.readThread(threadId, false);
+      if (thread) {
+        return thread;
+      }
+    } catch (error) {
+      if (!isUnavailableThreadError(error)) {
+        throw error;
+      }
+    }
+    if (typeof this.client.resumeThread !== 'function') {
+      return null;
+    }
+    try {
+      await this.client.resumeThread({ threadId });
+    } catch (error) {
+      if (isUnavailableThreadError(error)) {
+        return null;
+      }
+      throw error;
+    }
+    try {
+      return await this.client.readThread(threadId, false);
+    } catch (error) {
+      if (isUnavailableThreadError(error)) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<CodexWebSession> {
@@ -259,14 +290,23 @@ export class CodexWebRuntime {
   }
 
   async archiveSession(sessionId: string): Promise<boolean> {
-    const thread = await this.readThreadSummary(sessionId);
-    if (!thread) {
-      return false;
-    }
     if (typeof this.client.archiveThread !== 'function') {
       throw new Error('Thread archive is not supported by this Codex runtime');
     }
-    await this.client.archiveThread(sessionId);
+    const current = this.getStoredSessionSettings(sessionId);
+    let thread: ProviderThreadSummary | null = null;
+    try {
+      thread = await this.readThreadSummary(sessionId);
+    } catch (error) {
+      if (!isUnavailableThreadError(error)) {
+        throw error;
+      }
+    }
+    if (thread) {
+      await this.client.archiveThread(sessionId);
+    } else if (!current?.favorite) {
+      return false;
+    }
     this.sessionSettings.delete(sessionId);
     this.settingsStore?.delete(sessionId);
     return true;
@@ -277,15 +317,44 @@ export class CodexWebRuntime {
     favorite: boolean,
     favoriteOrder?: number | null,
   ): Promise<CodexWebSession | null> {
+    const current = this.getStoredSessionSettings(sessionId);
+    if (favorite && current?.favorite === true && favoriteOrder !== undefined) {
+      const settings = {
+        ...current,
+        favorite: true,
+        favoriteOrder: favoriteOrder ?? current.favoriteOrder ?? this.nextFavoriteOrder(),
+        updatedAt: Date.now(),
+      };
+      this.persistSessionSettings(sessionId, settings);
+      return this.toStoredFavoriteSession(sessionId, settings);
+    }
+    if (!favorite && current?.favorite === true) {
+      const settings = {
+        ...current,
+        favorite: false,
+        favoriteOrder: null,
+        updatedAt: Date.now(),
+      };
+      this.persistSessionSettings(sessionId, settings);
+      let thread: ProviderThreadSummary | null = null;
+      try {
+        thread = await this.readThreadSummary(sessionId);
+      } catch (error) {
+        if (!isUnavailableThreadError(error)) {
+          throw error;
+        }
+      }
+      return thread ? this.toSession(thread) : null;
+    }
     const thread = await this.readThreadSummary(sessionId);
     if (!thread) {
       return null;
     }
-    const current = this.getSessionSettings(sessionId);
+    const existing = this.getSessionSettings(sessionId);
     const settings = {
-      ...current,
+      ...existing,
       favorite,
-      favoriteOrder: favorite ? favoriteOrder ?? current.favoriteOrder ?? this.nextFavoriteOrder() : null,
+      favoriteOrder: favorite ? favoriteOrder ?? existing.favoriteOrder ?? this.nextFavoriteOrder() : null,
       updatedAt: Date.now(),
     };
     this.persistSessionSettings(sessionId, settings);
@@ -551,6 +620,36 @@ export class CodexWebRuntime {
     };
   }
 
+  private toStoredFavoriteSession(
+    sessionId: string,
+    settings: CodexWebStoredSessionSettings,
+  ): CodexWebSession {
+    const updatedAt = settings.updatedAt ?? null;
+    const thread: ProviderThreadSummary = {
+      threadId: sessionId,
+      cwd: null,
+      title: null,
+      updatedAt,
+      preview: '',
+      turns: [],
+    };
+    return {
+      id: sessionId,
+      cwd: null,
+      projectName: null,
+      title: null,
+      updatedAt,
+      preview: null,
+      firstUserInput: null,
+      lastUserInput: null,
+      lastInputAt: updatedAt,
+      favorite: settings.favorite === true,
+      favoriteOrder: settings.favoriteOrder ?? null,
+      settings,
+      thread,
+    };
+  }
+
   private mergeSettings(
     sessionId: string | null,
     patch: Partial<ProviderTurnSessionSettings> | UpdateSessionSettingsInput | undefined,
@@ -593,6 +692,10 @@ export class CodexWebRuntime {
       };
     this.sessionSettings.set(sessionId, settings);
     return settings;
+  }
+
+  private getStoredSessionSettings(sessionId: string): CodexWebStoredSessionSettings | null {
+    return this.sessionSettings.get(sessionId) ?? this.settingsStore?.get(sessionId) ?? null;
   }
 
   private persistSessionSettings(sessionId: string, settings: CodexWebStoredSessionSettings): void {
@@ -764,8 +867,13 @@ function isIncludeTurnsRetryableError(error: unknown): boolean {
 export function isMissingThreadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /thread not found/i.test(message)
+    || /thread not loaded/i.test(message)
     || /session not found/i.test(message)
     || /unknown thread/i.test(message);
+}
+
+function isUnavailableThreadError(error: unknown): boolean {
+  return isMissingThreadError(error) || isMissingRolloutError(error);
 }
 
 function isMissingRolloutError(error: unknown): boolean {

@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'codex-web-static-2026-05-19-fast-session-open-v6';
+const STATIC_CACHE = 'codex-web-static-2026-05-19-thread-activity-details-v16';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -6,7 +6,9 @@ const STATIC_ASSETS = [
   '/pwa-pull-refresh.js',
   '/app.js',
   '/manifest.webmanifest',
-  '/icon.svg',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (event) => {

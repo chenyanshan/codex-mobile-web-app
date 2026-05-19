@@ -571,23 +571,84 @@ test('runtime persists session favorite state and exposes it on session summarie
   assert.equal(emptyFavoriteListed.length, 0);
 });
 
-test('runtime lists favorite sessions from thread summaries without reading every favorite thread', async () => {
+test('runtime reorders an existing favorite without hydrating its thread', async () => {
+  const readCalls: Array<{ threadId: string; includeTurns: boolean | undefined }> = [];
+  const store = new Map([
+    ['thread_favorite', {
+      bridgeSessionId: 'thread_favorite',
+      favorite: true,
+      favoriteOrder: 5,
+      updatedAt: 10,
+      metadata: {},
+    }],
+  ]);
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_favorite', cwd: '/workspace', title: 'Thread' }),
+    readThread: async (threadId, includeTurns) => {
+      readCalls.push({ threadId, includeTurns });
+      throw new Error(`no rollout found for thread id ${threadId}`);
+    },
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_favorite',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    settingsStore: {
+      get: (sessionId) => store.get(sessionId) as any,
+      list: () => [...store.entries()] as any,
+      set: (sessionId, settings) => {
+        store.set(sessionId, settings as any);
+      },
+      delete: (sessionId) => {
+        store.delete(sessionId);
+      },
+    },
+  });
+
+  const reordered = await runtime.updateSessionFavorite('thread_favorite', true, 1);
+
+  assert.deepEqual(readCalls, []);
+  assert.equal(reordered?.id, 'thread_favorite');
+  assert.equal(reordered?.favorite, true);
+  assert.equal(reordered?.favoriteOrder, 1);
+  assert.equal(store.get('thread_favorite')?.favoriteOrder, 1);
+});
+
+test('runtime lists favorite sessions by reading only favorite thread summaries', async () => {
+  let listCalls = 0;
   const readCalls: string[] = [];
   const client: CodexWebRuntimeClient = {
     listModels: async () => [],
     readUsage: async () => null,
-    listThreads: async () => ({
-      items: [
-        createThread('thread_favorite_a'),
-        createThread('thread_favorite_b'),
-        createThread('thread_other'),
-      ],
-      nextCursor: null,
-    }),
+    listThreads: async () => {
+      listCalls += 1;
+      return {
+        items: [
+          createThread('thread_favorite_a'),
+          createThread('thread_favorite_b'),
+          createThread('thread_other'),
+        ],
+        nextCursor: null,
+      };
+    },
     startThread: async () => ({ threadId: 'thread_favorite_a', cwd: '/workspace', title: 'Thread' }),
-    readThread: async (threadId) => {
+    readThread: async (threadId, includeTurns) => {
       readCalls.push(threadId);
-      throw new Error(`thread not loaded: ${threadId}`);
+      assert.equal(includeTurns, false);
+      return createThread(threadId);
     },
     writeConfigValue: async () => {},
     startTurn: async () => ({
@@ -623,7 +684,242 @@ test('runtime lists favorite sessions from thread summaries without reading ever
   const favorites = await runtime.listSessions({ favorite: true });
 
   assert.deepEqual(favorites.map((session) => session.id), ['thread_favorite_b', 'thread_favorite_a']);
-  assert.deepEqual(readCalls, []);
+  assert.equal(listCalls, 0);
+  assert.deepEqual(readCalls.sort(), ['thread_favorite_a', 'thread_favorite_b']);
+});
+
+test('runtime resumes favorite historical threads before hiding them', async () => {
+  let resumed = false;
+  const readCalls: string[] = [];
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_favorite_history', cwd: '/workspace', title: 'Thread' }),
+    readThread: async (threadId, includeTurns) => {
+      assert.equal(includeTurns, false);
+      readCalls.push(threadId);
+      if (!resumed) {
+        return null;
+      }
+      return createThread(threadId);
+    },
+    resumeThread: async ({ threadId }) => {
+      assert.equal(threadId, 'thread_favorite_history');
+      resumed = true;
+    },
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_favorite_history',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+  const store = new Map([
+    ['thread_favorite_history', { bridgeSessionId: 'thread_favorite_history', favorite: true, favoriteOrder: 1, metadata: {} }],
+  ]);
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    settingsStore: {
+      get: (sessionId) => store.get(sessionId) as any,
+      list: () => [...store.entries()] as any,
+      set: (sessionId, settings) => {
+        store.set(sessionId, settings as any);
+      },
+      delete: (sessionId) => {
+        store.delete(sessionId);
+      },
+    },
+  });
+
+  const favorites = await runtime.listSessions({ favorite: true });
+
+  assert.equal(resumed, true);
+  assert.deepEqual(readCalls, ['thread_favorite_history', 'thread_favorite_history']);
+  assert.deepEqual(favorites.map((session) => session.id), ['thread_favorite_history']);
+});
+
+test('runtime skips unavailable favorite threads without hiding readable favorites', async () => {
+  const readCalls: string[] = [];
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_favorite_visible', cwd: '/workspace', title: 'Thread' }),
+    readThread: async (threadId, includeTurns) => {
+      assert.equal(includeTurns, false);
+      readCalls.push(threadId);
+      if (threadId === 'thread_favorite_missing') {
+        throw new Error(`thread not loaded: ${threadId}`);
+      }
+      return createThread(threadId);
+    },
+    resumeThread: async ({ threadId }) => {
+      assert.equal(threadId, 'thread_favorite_missing');
+      throw new Error(`thread not loaded: ${threadId}`);
+    },
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_favorite_visible',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+  const store = new Map([
+    ['thread_favorite_missing', { bridgeSessionId: 'thread_favorite_missing', favorite: true, favoriteOrder: 1, metadata: {} }],
+    ['thread_favorite_visible', { bridgeSessionId: 'thread_favorite_visible', favorite: true, favoriteOrder: 2, metadata: {} }],
+  ]);
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    settingsStore: {
+      get: (sessionId) => store.get(sessionId) as any,
+      list: () => [...store.entries()] as any,
+      set: (sessionId, settings) => {
+        store.set(sessionId, settings as any);
+      },
+      delete: (sessionId) => {
+        store.delete(sessionId);
+      },
+    },
+  });
+
+  const favorites = await runtime.listSessions({ favorite: true });
+
+  assert.deepEqual(readCalls, ['thread_favorite_missing', 'thread_favorite_visible']);
+  assert.deepEqual(favorites.map((session) => session.id), ['thread_favorite_visible']);
+  assert.equal(favorites[0]?.title, 'Thread');
+});
+
+test('runtime returns no favorite sessions when every favorite thread is unavailable', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_favorite_a', cwd: '/workspace', title: 'Thread' }),
+    readThread: async (threadId, includeTurns) => {
+      assert.equal(includeTurns, false);
+      throw new Error(`no rollout found for thread id ${threadId}`);
+    },
+    resumeThread: async ({ threadId }) => {
+      throw new Error(`no rollout found for thread id ${threadId}`);
+    },
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_favorite_a',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+  const store = new Map([
+    ['thread_favorite_a', {
+      bridgeSessionId: 'thread_favorite_a',
+      favorite: true,
+      favoriteOrder: 2,
+      updatedAt: 20,
+      metadata: {},
+    }],
+    ['thread_favorite_b', {
+      bridgeSessionId: 'thread_favorite_b',
+      favorite: true,
+      favoriteOrder: 1,
+      updatedAt: 30,
+      metadata: {},
+    }],
+  ]);
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    settingsStore: {
+      get: (sessionId) => store.get(sessionId) as any,
+      list: () => [...store.entries()] as any,
+      set: (sessionId, settings) => {
+        store.set(sessionId, settings as any);
+      },
+      delete: (sessionId) => {
+        store.delete(sessionId);
+      },
+    },
+  });
+
+  const favorites = await runtime.listSessions({ favorite: true });
+
+  assert.deepEqual(favorites, []);
+});
+
+test('runtime archives an unavailable favorite by removing local favorite settings', async () => {
+  let archiveCalled = false;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_favorite_missing', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => {
+      throw new Error('no rollout found for thread id thread_favorite_missing');
+    },
+    archiveThread: async () => {
+      archiveCalled = true;
+      throw new Error('archive should not be attempted for fallback-only favorite');
+    },
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_favorite_missing',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+  const store = new Map([
+    ['thread_favorite_missing', {
+      bridgeSessionId: 'thread_favorite_missing',
+      favorite: true,
+      favoriteOrder: 1,
+      updatedAt: 20,
+      metadata: {},
+    }],
+  ]);
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    settingsStore: {
+      get: (sessionId) => store.get(sessionId) as any,
+      list: () => [...store.entries()] as any,
+      set: (sessionId, settings) => {
+        store.set(sessionId, settings as any);
+      },
+      delete: (sessionId) => {
+        store.delete(sessionId);
+      },
+    },
+  });
+
+  const archived = await runtime.archiveSession('thread_favorite_missing');
+  const favorites = await runtime.listSessions({ favorite: true });
+
+  assert.equal(archived, true);
+  assert.equal(archiveCalled, false);
+  assert.equal(store.has('thread_favorite_missing'), false);
+  assert.deepEqual(favorites.map((item) => item.id), []);
 });
 
 test('runtime resumes historical threads before treating them as missing', async () => {
@@ -964,6 +1260,92 @@ test('runtime emits command and file work events from native work callbacks', as
   assert.deepEqual((events[6] as any).summary.fileChanges, [
     { path: 'packages/codex-web/public/app.js', action: 'modified' },
   ]);
+});
+
+test('runtime forwards work events extracted from native polled turn items', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread()], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_1', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread(),
+    writeConfigValue: async () => {},
+    startTurn: async ({
+      onTurnStarted,
+      onWorkEvent,
+    }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_1', threadId: 'thread_1' });
+      await onWorkEvent?.({
+        type: 'started',
+        itemId: 'call_patch_1',
+        kind: 'file_change',
+        title: 'Edited packages/codex-web/public/app.js',
+        summary: {
+          fileChanges: [{ path: 'packages/codex-web/public/app.js', action: 'modified' }],
+          diff: '*** Begin Patch\n*** Update File: packages/codex-web/public/app.js\n@@\n-old\n+new\n*** End Patch',
+        },
+        raw: {
+          type: 'custom_tool_call',
+          name: 'apply_patch',
+          call_id: 'call_patch_1',
+        },
+      });
+      await onWorkEvent?.({
+        type: 'completed',
+        itemId: 'call_patch_1',
+        kind: 'file_change',
+        status: 'completed',
+        summary: {
+          output: 'Success. Updated the following files:\nM packages/codex-web/public/app.js',
+        },
+        raw: {
+          type: 'custom_tool_call_output',
+          call_id: 'call_patch_1',
+        },
+      });
+      return {
+        outputText: 'Final answer',
+        status: 'completed',
+        turnId: 'turn_1',
+        threadId: 'thread_1',
+      };
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const started = await runtime.startTurn('thread_1', { text: 'hi' });
+  assert.equal(started.turnId, 'turn_1');
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const events = runtime.getTurnEvents('turn_1').map((entry) => entry.event);
+
+  assert.deepEqual(events.map((event) => event.type), [
+    'turn.started',
+    'batch.started',
+    'batch.updated',
+    'batch.updated',
+    'batch.completed',
+    'assistant.final',
+    'turn.completed',
+  ]);
+  assert.equal((events[1] as any).kind, 'file_change');
+  assert.deepEqual((events[2] as any).summary.fileChanges, [
+    { path: 'packages/codex-web/public/app.js', action: 'modified' },
+  ]);
+  assert.match(String((events[2] as any).summary.diff), /Update File: packages\/codex-web\/public\/app\.js/u);
+  assert.match(String((events[3] as any).summary.output), /Success/u);
+  assert.deepEqual((events[3] as any).raw, {
+    type: 'custom_tool_call_output',
+    call_id: 'call_patch_1',
+  });
 });
 
 test('runtime publishes live work update summaries to subscribers', async () => {

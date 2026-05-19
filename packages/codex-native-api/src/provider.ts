@@ -126,6 +126,7 @@ export interface ProviderThreadTurnItem {
   text: string;
   savedPath?: string | null;
   result?: string | null;
+  raw?: Record<string, unknown> | null;
 }
 
 export interface ProviderThreadTurn {
