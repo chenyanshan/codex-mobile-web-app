@@ -347,6 +347,18 @@ export interface ProviderTurnProgress {
   outputKind: string;
 }
 
+export type ProviderTurnWorkEventKind = 'command' | 'file_change' | 'permission' | 'unknown';
+
+export interface ProviderTurnWorkEvent {
+  type: 'started' | 'updated' | 'completed';
+  itemId: string;
+  kind: ProviderTurnWorkEventKind;
+  title?: string | null;
+  status?: string | null;
+  summary?: Record<string, unknown>;
+  raw?: unknown;
+}
+
 export interface ProviderResponseItem {
   [key: string]: unknown;
 }
@@ -476,6 +488,7 @@ export interface ProviderPluginContract {
     inputText: string;
     developerInstructions?: string | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
   }): Promise<ProviderTurnResult>;
@@ -487,6 +500,7 @@ export interface ProviderPluginContract {
     target: ProviderReviewTarget;
     locale?: string | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
   }): Promise<ProviderTurnResult>;

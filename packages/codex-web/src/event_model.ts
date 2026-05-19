@@ -3,6 +3,7 @@ import type {
   ProviderApprovalRequest,
   ProviderTurnProgress,
   ProviderTurnResult,
+  ProviderTurnWorkEvent,
 } from '@codex-mobile-web-app/codex-native-api';
 
 export type CodexWebEvent =
@@ -55,6 +56,54 @@ export function normalizeProgressEvent({
   };
 }
 
+export function normalizeWorkBatchEvents({
+  turnId,
+  event,
+}: {
+  turnId: string;
+  event: ProviderTurnWorkEvent;
+}): CodexWebEvent[] {
+  const events: CodexWebEvent[] = [];
+  const summary = sanitizeWorkSummary(event.summary ?? {});
+  if (event.type === 'started') {
+    events.push({
+      id: createEventId(),
+      type: 'batch.started',
+      turnId,
+      batchId: event.itemId,
+      kind: event.kind,
+      title: event.title || workTitleFromEvent(event, summary),
+      raw: event.raw ?? event,
+    });
+    if (Object.keys(summary).length > 0) {
+      events.push(createBatchUpdatedEvent({
+        turnId,
+        batchId: event.itemId,
+        summary,
+        raw: event.raw ?? event,
+      }));
+    }
+    return events;
+  }
+  if (Object.keys(summary).length > 0) {
+    events.push(createBatchUpdatedEvent({
+      turnId,
+      batchId: event.itemId,
+      summary,
+      raw: event.raw ?? event,
+    }));
+  }
+  if (event.type === 'completed') {
+    events.push(createBatchCompletedEvent({
+      turnId,
+      batchId: event.itemId,
+      status: event.status || 'completed',
+      raw: event.raw ?? event,
+    }));
+  }
+  return events;
+}
+
 export function normalizeApprovalEvent({
   turnId,
   request,
@@ -71,6 +120,46 @@ export function normalizeApprovalEvent({
     summary: approvalSummary(request),
     raw: request,
   };
+}
+
+function sanitizeWorkSummary(summary: Record<string, unknown>): Record<string, unknown> {
+  const entries = Object.entries(summary);
+  if (entries.every(([, value]) => hasWorkSummaryValue(value))) {
+    return summary;
+  }
+  return Object.fromEntries(entries.filter(([, value]) => hasWorkSummaryValue(value)));
+}
+
+function hasWorkSummaryValue(value: unknown): boolean {
+  if (value == null) {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === 'string') {
+    return value.trim().length > 0;
+  }
+  return true;
+}
+
+function workTitleFromEvent(
+  event: ProviderTurnWorkEvent,
+  summary: Record<string, unknown>,
+): string {
+  if (event.kind === 'command' && typeof summary.command === 'string') {
+    return summary.command;
+  }
+  if (event.kind === 'file_change') {
+    const changes = Array.isArray(summary.fileChanges) ? summary.fileChanges : [];
+    if (changes.length === 1 && typeof (changes[0] as any)?.path === 'string') {
+      return `Edited ${(changes[0] as any).path}`;
+    }
+    if (changes.length > 1) {
+      return `Edited ${changes.length} files`;
+    }
+  }
+  return 'Tool activity';
 }
 
 export function normalizeApprovalBatchEvent({

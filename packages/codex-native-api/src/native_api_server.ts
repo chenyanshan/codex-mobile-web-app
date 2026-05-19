@@ -19,6 +19,7 @@ import type {
   ProviderProfile,
   ProviderResponseItem,
   ProviderTurnProgress,
+  ProviderTurnWorkEvent,
 } from './provider.js';
 
 type JsonRecord = Record<string, any>;
@@ -822,6 +823,7 @@ export class CodexNativeApiServer {
     developerInstructions = null,
     requestUser = null,
     onProgress = null,
+    onWorkEvent = null,
     onTurnStarted = null,
     routePath = '/v1/responses',
   }: {
@@ -842,6 +844,7 @@ export class CodexNativeApiServer {
     developerInstructions?: string | null;
     requestUser?: string | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: CodexNativeRuntimeTurnStartedMeta) => Promise<void> | void) | null;
     routePath?: string;
   }): Promise<CodexNativeRuntimeTurnResult> {
@@ -854,6 +857,7 @@ export class CodexNativeApiServer {
         reasoningEffort,
         serviceTier,
         onProgress,
+        onWorkEvent,
         onTurnStarted,
         prepareTurn: (session) => ({
           inputText: prompt,
@@ -894,6 +898,7 @@ export class CodexNativeApiServer {
         reasoningEffort,
         serviceTier,
         onProgress,
+        onWorkEvent,
         onTurnStarted,
         prepareTurn: (session) => ({
           inputText: prompt,

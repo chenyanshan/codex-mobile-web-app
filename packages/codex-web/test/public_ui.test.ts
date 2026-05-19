@@ -30,11 +30,22 @@ test('mobile UI exposes iOS PWA install metadata and registers a service worker'
   assert.match(index, /<meta name="apple-mobile-web-app-capable" content="yes">/u);
   assert.match(index, /<meta name="apple-mobile-web-app-title" content="Codex">/u);
   assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
+  assert.match(serviceWorker, /codex-web-static-2026-05-19-fast-session-open-v6/u);
   assert.match(serviceWorker, /self\.addEventListener\('install'/u);
   assert.match(serviceWorker, /self\.addEventListener\('fetch'/u);
   assert.doesNotMatch(serviceWorker, /cached \|\| fetch\(request\)/u);
   assert.match(serviceWorker, /fetch\(request\)/u);
   assert.match(serviceWorker, /cache\.put\(request, response\.clone\(\)\)/u);
+});
+
+test('PWA checks app version on foreground to escape stale standalone caches', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /const APP_BUILD_ID = /u);
+  assert.match(app, /setupAppVersionRefresh\(\)/u);
+  assert.match(app, /async function checkForAppUpdate\(\)/u);
+  assert.match(app, /fetch\(`\/app\.js\?version-check=\$\{Date\.now\(\)\}`/u);
+  assert.match(app, /window\.location\.reload\(\)/u);
 });
 
 test('new sessions default to gpt-5.4 xhigh full access settings', async () => {
@@ -135,6 +146,81 @@ test('repeat opens with a stored token render the app shell before auth verifica
   assert.doesNotMatch(app, /form\.get\('deviceName'\)/u);
 });
 
+test('session home opens a settings page and keeps logout inside settings', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /function renderAppSettings\(\)/u);
+  assert.match(app, /id="open-app-settings-button"/u);
+  assert.match(app, /id="settings-logout-button"/u);
+  assert.doesNotMatch(app, /renderSessionList\(\)[\s\S]{0,900}id="logout-button"/u);
+});
+
+test('app settings persist theme and default thread settings', async () => {
+  const { api, storage, context } = await loadAppHarness();
+
+  api.state.models = [
+    { id: 'gpt-5.4', label: 'GPT 5.4' },
+    { id: 'gpt-5.4-mini', label: 'GPT 5.4 Mini' },
+  ];
+
+  api.applyTheme('light');
+  assert.equal(storage.get('codexWebTheme'), 'light');
+  assert.equal(context.document.documentElement.dataset.theme, 'light');
+
+  api.applyDefaultThreadSettings({
+    model: 'gpt-5.4-mini',
+    reasoningEffort: 'medium',
+    collaborationMode: 'plan',
+    accessPreset: 'default',
+  });
+
+  assert.equal(storage.get('codexWebDefaultThreadSettings'), JSON.stringify({
+    model: 'gpt-5.4-mini',
+    reasoningEffort: 'medium',
+    collaborationMode: 'plan',
+    accessPreset: 'default',
+    approvalPolicy: 'on-request',
+    sandboxMode: 'workspace-write',
+    personality: 'pragmatic',
+  }));
+
+  api.applyDefaultSettings();
+  assert.equal(api.state.model, 'gpt-5.4-mini');
+  assert.equal(api.state.reasoningEffort, 'medium');
+  assert.equal(api.state.collaborationMode, 'plan');
+  assert.equal(api.state.permissionPreset, 'default');
+  assert.equal(api.state.approvalPolicy, 'on-request');
+  assert.equal(api.state.sandboxMode, 'workspace-write');
+});
+
+test('pull refresh indicator keeps readable themed colors', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.pull-refresh-indicator\s*\{[^}]*background:\s*var\(--panel\);/su);
+  assert.match(styles, /\.pull-refresh-indicator\s*\{[^}]*color:\s*var\(--text\);/su);
+  assert.doesNotMatch(styles, /\.pull-refresh-indicator\s*\{[^}]*background:\s*rgba\(18,\s*23,\s*34/su);
+});
+
+test('sessions without saved settings use app default thread settings', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyDefaultThreadSettings({
+    model: 'gpt-5.4-mini',
+    reasoningEffort: 'low',
+    collaborationMode: 'plan',
+    accessPreset: 'read-only',
+  });
+
+  api.applySessionSettings({ id: 'thread_without_settings', settings: {} });
+
+  assert.equal(api.state.model, 'gpt-5.4-mini');
+  assert.equal(api.state.reasoningEffort, 'low');
+  assert.equal(api.state.collaborationMode, 'plan');
+  assert.equal(api.state.permissionPreset, 'read-only');
+  assert.equal(api.state.approvalPolicy, 'never');
+  assert.equal(api.state.sandboxMode, 'read-only');
+});
+
 test('sessions navigation remains available during a pending turn', async () => {
   const app = await readFile(appUrl, 'utf8');
 
@@ -163,6 +249,114 @@ test('message input starts one line and auto-grows to a compact capped height', 
   assert.match(app, /autoGrowPromptInput\(promptInput\)/u);
 });
 
+test('running turns keep message sending available and move stop into settings', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /<textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">/u);
+  assert.doesNotMatch(app, /<textarea id="prompt-input"[^>]*state\.pendingTurn \? 'disabled'/u);
+  assert.match(app, /id="send-button"/u);
+  assert.doesNotMatch(app, /id="\$\{state\.pendingTurn \? 'stop-button' : 'send-button'\}"/u);
+  assert.match(app, /renderStopTurnControl\(\)/u);
+  assert.match(app, /id="stop-button"/u);
+  assert.match(app, /function onComposerSubmit\(event\)[\s\S]*const text = state\.prompt\.trim\(\);/u);
+  assert.doesNotMatch(app, /function onComposerSubmit\(event\)\s*\{[\s\S]{0,180}if \(state\.pendingTurn\)/u);
+});
+
+test('composer can submit a new message while a turn is already running', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/sessions/session_1/turns') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ turnId: 'turn_2' }),
+        };
+      }
+      if (path === '/api/turns/turn_2/events') {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => ({ done: true }),
+            }),
+          },
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.pendingTurn = true;
+  api.state.turnId = 'turn_1';
+  api.state.prompt = 'Follow-up while running';
+
+  await api.onComposerSubmit({
+    preventDefault() {},
+  });
+
+  assert.equal(fetchCalls[0]?.path, '/api/sessions/session_1/turns');
+  assert.equal(api.state.pendingTurn, true);
+  assert.equal(api.state.turnId, 'turn_2');
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Follow-up while running/u);
+});
+
+test('settings drawer exposes runtime reload and posts to the runtime endpoint', async () => {
+  const app = await readFile(appUrl, 'utf8');
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/runtime/reload') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, mcpServersReloaded: true }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  assert.match(app, /id="runtime-reload-button"/u);
+  assert.match(app, /function reloadRuntime\(\)/u);
+  assert.match(app, /apiFetch\('\/api\/runtime\/reload',\s*\{\s*method:\s*'POST'\s*\}\)/su);
+
+  api.state.token = 'token';
+
+  await api.reloadRuntime();
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0]?.path, '/api/runtime/reload');
+  assert.equal(fetchCalls[0]?.options.method, 'POST');
+  assert.equal(api.state.status, 'Runtime reloaded');
+  assert.equal(api.state.statusTone, 'success');
+});
+
+test('settings drawer opens without changing chat scroll geometry', async () => {
+  const [app, styles] = await Promise.all([
+    readFile(appUrl, 'utf8'),
+    readFile(stylesUrl, 'utf8'),
+  ]);
+
+  assert.match(app, /function toggleSettingsDrawer\(\)/u);
+  assert.match(app, /withTimelineScrollPreserved\(\(\) => render\(\)\)/u);
+  assert.match(app, /settingsToggle\.addEventListener\('click', toggleSettingsDrawer\)/u);
+  assert.match(styles, /\.composer\s*\{[^}]*position:\s*relative;/su);
+  assert.match(styles, /\.settings-drawer\s*\{[^}]*position:\s*absolute;/su);
+  assert.match(styles, /\.settings-drawer\s*\{[^}]*bottom:\s*calc\(100% \+ 8px\);/su);
+  assert.match(styles, /\.settings-drawer\s*\{[^}]*max-height:\s*min\(52dvh,\s*420px\);/su);
+  assert.match(styles, /\.settings-drawer\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.doesNotMatch(styles, /\.settings-drawer\s*\{[^}]*margin-bottom:/su);
+});
+
 test('chat and session list use separate scroll containers', async () => {
   const styles = await readFile(stylesUrl, 'utf8');
 
@@ -172,8 +366,8 @@ test('chat and session list use separate scroll containers', async () => {
   assert.match(styles, /\.screen\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/su);
   assert.match(styles, /\.timeline\s*\{[^}]*overflow-y:\s*auto;/su);
   assert.match(styles, /\.timeline\s*\{[^}]*overscroll-behavior:\s*contain;/su);
-  assert.match(styles, /\.session-list,\s*\.new-session-page\s*\{[^}]*overflow-y:\s*auto;/su);
-  assert.match(styles, /\.session-list,\s*\.new-session-page\s*\{[^}]*overscroll-behavior:\s*contain;/su);
+  assert.match(styles, /\.session-list,\s*\.new-session-page,\s*\.app-settings-page\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.match(styles, /\.session-list,\s*\.new-session-page,\s*\.app-settings-page\s*\{[^}]*overscroll-behavior:\s*contain;/su);
 });
 
 test('mobile timeline reserves the measured composer height', async () => {
@@ -197,6 +391,64 @@ test('opening a session jumps straight to the latest timeline content', async ()
   assert.match(app, /function scrollTimelineToBottom\(\)[\s\S]*timeline\.scrollTop = timeline\.scrollHeight;/u);
   assert.doesNotMatch(app, /window\.scrollTo\(/u);
   assert.match(app, /async function selectSession\(sessionId\)[\s\S]*render\(\);\s*scrollTimelineToBottom\(\);/u);
+});
+
+test('opening a session renders from the list summary before the detail request finishes', async () => {
+  let resolveFetch;
+  const detailReady = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path !== '/api/sessions/session_slow') {
+        throw new Error(`Unexpected fetch ${path}`);
+      }
+      await detailReady;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: 'session_slow',
+            cwd: '/repo',
+            settings: { metadata: {} },
+            thread: {
+              turns: [
+                {
+                  id: 'turn_1',
+                  items: [
+                    { type: 'message', role: 'user', text: 'Loaded detail' },
+                    { type: 'message', role: 'assistant', text: 'Detail answer' },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.sessions = [{
+    id: 'session_slow',
+    cwd: '/repo',
+    firstUserInput: 'Summary prompt',
+    settings: { metadata: {} },
+  }];
+
+  const opened = api.selectSession('session_slow');
+  await Promise.resolve();
+
+  assert.equal(api.state.view, 'chat');
+  assert.equal(api.state.sessionId, 'session_slow');
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Summary prompt/u);
+
+  resolveFetch();
+  await opened;
+
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Detail answer/u);
 });
 
 test('chat page uses app-style back header and left-edge swipe navigation', async () => {
@@ -348,7 +600,7 @@ test('work items summarize commands edits reads and approvals in a collapsible b
 
   const html = api.renderTimelineItem(work);
 
-  assert.match(html, /<details class="card work-card"/u);
+  assert.match(html, /<details class="card work-card" open/u);
   assert.match(html, /Work/u);
   assert.match(html, /Read 1/u);
   assert.match(html, /Ran 1/u);
@@ -360,6 +612,157 @@ test('work items summarize commands edits reads and approvals in a collapsible b
   assert.match(html, /packages\/codex-web\/public\/app\.js/u);
   assert.match(html, /npm run test --workspace packages\/codex-web -- public_ui\.test\.ts/u);
   assert.doesNotMatch(html, /<article class="card">\s*<div class="card-header">\s*<span class="card-title">npm run test/su);
+});
+
+test('work items expose detailed command output and file change metadata', async () => {
+  const { api } = await loadAppHarness();
+
+  const html = api.renderTimelineItem({
+    id: 'work_turn_detail',
+    kind: 'work',
+    turnId: 'turn_detail',
+    status: 'completed',
+    batches: [
+      {
+        batchId: 'cmd_detail',
+        batchKind: 'command',
+        title: 'npm test',
+        status: 'completed',
+        summary: {
+          command: 'npm test',
+          cwd: '/workspace',
+          output: '42 passing\n0 failing',
+          exitCode: 0,
+        },
+      },
+      {
+        batchId: 'edit_detail',
+        batchKind: 'file_change',
+        title: 'Edited packages/codex-web/public/app.js',
+        status: 'completed',
+        summary: {
+          fileChanges: [
+            {
+              path: 'packages/codex-web/public/app.js',
+              action: 'modified',
+              additions: 12,
+              deletions: 3,
+            },
+          ],
+        },
+      },
+    ],
+    approvals: [],
+  });
+
+  assert.match(html, /<details class="work-detail" open/u);
+  assert.match(html, /Command/u);
+  assert.match(html, /npm test/u);
+  assert.match(html, /42 passing/u);
+  assert.match(html, /Exit Code/u);
+  assert.match(html, /packages\/codex-web\/public\/app\.js/u);
+  assert.match(html, /modified/u);
+  assert.match(html, /\+12 \/ -3/u);
+  assert.doesNotMatch(html, /No additional details/u);
+});
+
+test('turn failures render as visible timeline error messages', async () => {
+  const { api } = await loadAppHarness();
+
+  let assistantEntry = api.applyTurnEvent({
+    type: 'turn.started',
+    turnId: 'turn_error',
+    threadId: 'session_1',
+  }, null);
+  assistantEntry = api.applyTurnEvent({
+    type: 'turn.failed',
+    turnId: 'turn_error',
+    threadId: 'session_1',
+    message: 'Codex app-server disconnected',
+  }, assistantEntry);
+
+  const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_error');
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(errorItem?.kind, 'message');
+  assert.equal(errorItem?.role, 'system');
+  assert.match(errorItem?.text || '', /Codex app-server disconnected/u);
+
+  const html = api.renderTimelineItem(errorItem);
+  assert.match(html, /message-card system/u);
+  assert.match(html, /Codex app-server disconnected/u);
+});
+
+test('stream failures render a visible timeline error instead of only composer status', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'internal_error', message: 'SSE failed hard' }),
+    }),
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.turnId = 'turn_stream_error';
+  api.state.pendingTurn = true;
+  api.state.streamWasBackgrounded = false;
+
+  await api.streamTurnEvents('turn_stream_error');
+
+  const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_stream_error');
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(errorItem?.kind, 'message');
+  assert.equal(errorItem?.role, 'system');
+  assert.match(errorItem?.text || '', /SSE failed hard/u);
+});
+
+test('composer API failures render a visible timeline error', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            session: {
+              id: 'session_new',
+              cwd: '/repo',
+              settings: {},
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_new/turns') {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: 'internal_error', message: 'Codex refused the first turn' }),
+        };
+      }
+      return { ok: true, status: 204, json: async () => ({}) };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.cwd = '/repo';
+  api.state.prompt = 'hello';
+
+  await api.onComposerSubmit({ preventDefault() {} });
+
+  const errorItem = api.state.timeline.find((item) => item.id.startsWith('error_'));
+  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_new/turns']);
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(errorItem?.kind, 'message');
+  assert.equal(errorItem?.role, 'system');
+  assert.match(errorItem?.text || '', /Codex refused the first turn/u);
 });
 
 test('turn events aggregate batches and approvals into one work item', async () => {
@@ -408,6 +811,46 @@ test('turn events aggregate batches and approvals into one work item', async () 
   assert.equal(work.approvals.length, 1);
   assert.match(api.renderTimelineItem(work), /Read 1/u);
   assert.match(api.renderTimelineItem(work), /Approval 1/u);
+});
+
+test('work item stays visible at the bottom after assistant text completes', async () => {
+  const { api } = await loadAppHarness();
+
+  let assistantEntry = null;
+  assistantEntry = api.applyTurnEvent({
+    type: 'turn.started',
+    turnId: 'turn_bottom',
+    threadId: 'session_1',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.started',
+    turnId: 'turn_bottom',
+    batchId: 'cmd_bottom',
+    kind: 'command',
+    title: 'npm test',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'assistant.final',
+    turnId: 'turn_bottom',
+    threadId: 'session_1',
+    text: 'Final response',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.updated',
+    turnId: 'turn_bottom',
+    batchId: 'cmd_bottom',
+    summary: { output: 'ok' },
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'turn.completed',
+    turnId: 'turn_bottom',
+    threadId: 'session_1',
+    status: 'completed',
+  }, assistantEntry);
+
+  assert.equal(api.state.timeline.at(-1)?.id, 'work_turn_bottom');
+  assert.equal(api.state.timeline.at(-1)?.kind, 'work');
+  assert.match(api.renderTimelineItem(api.state.timeline.at(-1)), /npm test/u);
 });
 
 test('mobile UI persists per-browser chat timelines across reloads', async () => {
@@ -688,6 +1131,14 @@ test('session list defaults to favorites and supports time plus favorite actions
   const app = await readFile(appUrl, 'utf8');
 
   assert.match(app, /sortMode:\s*'favorites'/u);
+  assert.match(app, /favoriteSortMode:\s*false/u);
+  assert.match(app, /favoriteSortDraft:\s*\[\]/u);
+  assert.match(app, /id="favorite-sort-button"/u);
+  assert.match(app, /id="open-new-session-button"/u);
+  assert.match(app, /id="open-app-settings-button"/u);
+  assert.match(app, /id="favorite-sort-save-button"/u);
+  assert.match(app, /id="favorite-sort-cancel-button"/u);
+  assert.match(app, /id="favorite-sort-button"[\s\S]{0,300}id="open-new-session-button"[\s\S]{0,300}id="open-app-settings-button"/u);
   assert.match(app, /data-sort-mode="favorites"/u);
   assert.match(app, /data-sort-mode="time"/u);
   assert.doesNotMatch(app, /data-sort-mode="project"/u);
@@ -697,6 +1148,9 @@ test('session list defaults to favorites and supports time plus favorite actions
   assert.match(app, /function isFavoriteSession\(session\)/u);
   assert.match(app, /data-session-favorite-id/u);
   assert.match(app, /data-session-archive-request-id/u);
+  assert.match(app, /function enterFavoriteSortMode\(\)/u);
+  assert.match(app, /function saveFavoriteSortOrder\(\)/u);
+  assert.match(app, /function cancelFavoriteSortMode\(\)/u);
   assert.match(app, /function toggleSessionFavorite\(sessionId\)/u);
   assert.match(app, /async function archiveSession\(sessionId\)/u);
   assert.match(app, /apiFetch\(`\/api\/sessions\/\$\{encodeURIComponent\(sessionId\)\}`,\s*\{\s*method:\s*'DELETE'/su);
@@ -716,6 +1170,145 @@ test('favorite filter shows only favorite sessions and time shows all sessions',
   api.state.sortMode = 'time';
   assert.equal(JSON.stringify(api.filteredSessions().map((session) => session.id).sort()), JSON.stringify(['favorite', 'old']));
   assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['favorite', 'old']));
+});
+
+test('session list initially fetches only favorites and loads time sessions on demand', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions?favorite=true') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [{ id: 'favorite_session', favorite: true, settings: { metadata: {} } }],
+          }),
+        };
+      }
+      if (path === '/api/sessions') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [
+              { id: 'favorite_session', favorite: true, settings: { metadata: {} } },
+              { id: 'time_session', favorite: false, settings: { metadata: {} } },
+            ],
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.sortMode = 'favorites';
+
+  await api.refreshSessionsList({ renderAfter: false });
+
+  assert.deepEqual(fetchCalls, ['/api/sessions?favorite=true']);
+  assert.deepEqual(api.state.sessions.map((session) => session.id), ['favorite_session']);
+
+  await api.setSessionSortMode('time');
+
+  assert.deepEqual(fetchCalls, ['/api/sessions?favorite=true', '/api/sessions']);
+  assert.deepEqual(api.state.sessions.map((session) => session.id), ['favorite_session', 'time_session']);
+});
+
+test('favorite sort mode drafts manual order and saves it explicitly', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      const body = JSON.parse(options.body || '{}');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: path.includes('session_b') ? 'session_b' : 'session_a',
+            cwd: '/repo',
+            favorite: true,
+            favoriteOrder: body.favoriteOrder,
+            updatedAt: 1,
+            settings: { favoriteOrder: body.favoriteOrder, metadata: {} },
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.sessions = [
+    { id: 'session_a', favorite: true, favoriteOrder: 20, updatedAt: 100, settings: { favoriteOrder: 20, metadata: {} } },
+    { id: 'session_b', favorite: true, favoriteOrder: 10, updatedAt: 50, settings: { favoriteOrder: 10, metadata: {} } },
+    { id: 'session_c', favorite: false, updatedAt: 200, settings: { metadata: {} } },
+  ];
+
+  assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['session_b', 'session_a']));
+  const normalHtml = api.renderSessionCards();
+  assert.doesNotMatch(normalHtml, /data-session-favorite-move-id/u);
+  assert.match(normalHtml, /data-session-favorite-id="session_a"/u);
+  assert.match(normalHtml, /data-session-archive-request-id="session_a"/u);
+
+  api.enterFavoriteSortMode();
+
+  const sortHtml = api.renderSessionCards();
+  assert.match(sortHtml, /data-session-favorite-move-id="session_a"/u);
+  assert.match(sortHtml, /data-session-favorite-move="up"/u);
+  assert.match(sortHtml, /data-session-favorite-move="down"/u);
+  assert.doesNotMatch(sortHtml, /data-session-favorite-id="session_a"/u);
+  assert.doesNotMatch(sortHtml, /data-session-archive-request-id="session_a"/u);
+
+  await api.moveFavoriteSession('session_a', 'up');
+
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['session_a', 'session_b']));
+
+  await api.saveFavoriteSortOrder();
+
+  assert.deepEqual(fetchCalls.map((call) => ({
+    path: call.path,
+    body: JSON.parse(call.options.body),
+  })), [
+    { path: '/api/sessions/session_a/favorite', body: { favorite: true, favoriteOrder: 1 } },
+    { path: '/api/sessions/session_b/favorite', body: { favorite: true, favoriteOrder: 2 } },
+  ]);
+  assert.equal(api.state.favoriteSortMode, false);
+  assert.equal(JSON.stringify(api.state.favoriteSortDraft), JSON.stringify([]));
+  assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['session_a', 'session_b']));
+});
+
+test('favorite sort mode cancel restores the persisted order without patching', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.sessions = [
+    { id: 'session_a', favorite: true, favoriteOrder: 20, updatedAt: 100, settings: { favoriteOrder: 20, metadata: {} } },
+    { id: 'session_b', favorite: true, favoriteOrder: 10, updatedAt: 50, settings: { favoriteOrder: 10, metadata: {} } },
+  ];
+
+  api.enterFavoriteSortMode();
+  await api.moveFavoriteSession('session_a', 'up');
+
+  assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['session_a', 'session_b']));
+
+  api.cancelFavoriteSortMode();
+
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(api.state.favoriteSortMode, false);
+  assert.equal(JSON.stringify(api.state.favoriteSortDraft), JSON.stringify([]));
+  assert.equal(JSON.stringify(api.sortedSessions().map((session) => session.id)), JSON.stringify(['session_b', 'session_a']));
 });
 
 test('session list shows loading state while sessions are still syncing', async () => {
@@ -763,6 +1356,7 @@ test('favorite action patches session favorite state without opening the session
   assert.equal(fetchCalls[0]?.options.method, 'PATCH');
   assert.deepEqual(JSON.parse(fetchCalls[0]?.options.body), {
     favorite: true,
+    favoriteOrder: 1,
   });
   assert.equal(api.state.sessions[0]?.favorite, true);
 });
@@ -803,7 +1397,7 @@ test('PWA standalone mode enables local pull-to-refresh without normal browser r
   assert.match(app, /window\.CodexPullToRefresh\.init/u);
   assert.match(app, /refreshCurrentView\(\)/u);
   assert.match(app, /threshold:\s*120/u);
-  assert.doesNotMatch(app, /window\.location\.reload\(\)/u);
+  assert.doesNotMatch(app, /onRefresh:\s*\([^)]*\)\s*=>\s*window\.location\.reload\(\)/u);
   assert.match(pullRefresh, /window\.CodexPullToRefresh/u);
   assert.match(pullRefresh, /touchstart/u);
   assert.match(pullRefresh, /touchmove/u);
@@ -834,7 +1428,7 @@ test('PWA refresh updates the current view instead of reloading the app', async 
   const { api } = await loadAppHarness({
     fetch: async (path) => {
       fetchCalls.push(path);
-      if (path === '/api/sessions') {
+      if (path === '/api/sessions?favorite=true' || path === '/api/sessions') {
         return {
           ok: true,
           status: 200,
@@ -883,7 +1477,7 @@ test('PWA refresh updates the current view instead of reloading the app', async 
   api.state.currentSession = api.state.sessions[0];
   await api.refreshCurrentView();
 
-  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_fresh']);
+  assert.deepEqual(fetchCalls, ['/api/sessions?favorite=true', '/api/sessions/session_fresh']);
   assert.match(api.state.timeline.map((item) => item.text).join('\n'), /Latest answer/u);
 });
 
@@ -1149,6 +1743,7 @@ async function loadAppHarness(overrides = {}) {
       body: { scrollHeight: 0 },
       visibilityState: 'visible',
       documentElement: {
+        dataset: {},
         style: {
           removeProperty() {},
           setProperty() {},
@@ -1198,11 +1793,22 @@ globalThis.__codexWebTest = {
   updateSessionSettings: typeof updateSessionSettings === 'function' ? updateSessionSettings : null,
   collectSettings,
   refreshCurrentSessionMetadata,
+  refreshSessionsList: typeof refreshSessionsList === 'function' ? refreshSessionsList : null,
   refreshCurrentView: typeof refreshCurrentView === 'function' ? refreshCurrentView : null,
+  setSessionSortMode: typeof setSessionSortMode === 'function' ? setSessionSortMode : null,
   selectSession: typeof selectSession === 'function' ? selectSession : null,
+  onComposerSubmit: typeof onComposerSubmit === 'function' ? onComposerSubmit : null,
   filteredSessions: typeof filteredSessions === 'function' ? filteredSessions : null,
   sortedSessions: typeof sortedSessions === 'function' ? sortedSessions : null,
   toggleSessionFavorite: typeof toggleSessionFavorite === 'function' ? toggleSessionFavorite : null,
+  enterFavoriteSortMode: typeof enterFavoriteSortMode === 'function' ? enterFavoriteSortMode : null,
+  saveFavoriteSortOrder: typeof saveFavoriteSortOrder === 'function' ? saveFavoriteSortOrder : null,
+  cancelFavoriteSortMode: typeof cancelFavoriteSortMode === 'function' ? cancelFavoriteSortMode : null,
+  moveFavoriteSession: typeof moveFavoriteSession === 'function' ? moveFavoriteSession : null,
+  reloadRuntime: typeof reloadRuntime === 'function' ? reloadRuntime : null,
+  applyTheme: typeof applyTheme === 'function' ? applyTheme : null,
+  applyDefaultThreadSettings: typeof applyDefaultThreadSettings === 'function' ? applyDefaultThreadSettings : null,
+  applyDefaultSettings: typeof applyDefaultSettings === 'function' ? applyDefaultSettings : null,
   streamTurnEvents,
   applyTurnEvent: typeof applyTurnEvent === 'function' ? applyTurnEvent : null,
   saveCurrentTimeline,
@@ -1210,5 +1816,6 @@ globalThis.__codexWebTest = {
   return {
     api: context.__codexWebTest,
     storage,
+    context,
   };
 }

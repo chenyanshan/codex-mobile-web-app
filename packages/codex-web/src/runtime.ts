@@ -8,6 +8,7 @@ import {
   type ProviderThreadSummary,
   type ProviderTurnResult,
   type ProviderTurnSessionSettings,
+  type ProviderTurnWorkEvent,
   type ProviderUsageReport,
 } from '@codex-mobile-web-app/codex-native-api';
 import { CodexWebEventBus } from './event_bus.js';
@@ -21,6 +22,7 @@ import {
   normalizeTurnCompletedEvent,
   normalizeTurnFailedEvent,
   normalizeTurnStartedEvent,
+  normalizeWorkBatchEvents,
   type CodexWebEvent,
 } from './event_model.js';
 import type {
@@ -39,6 +41,7 @@ export interface CodexWebSession {
   lastUserInput: string | null;
   lastInputAt: number | null;
   favorite: boolean;
+  favoriteOrder: number | null;
   settings: CodexWebStoredSessionSettings;
   thread: ProviderThreadSummary;
 }
@@ -71,6 +74,7 @@ export interface CodexWebRuntimeClient {
     filePath?: string | null;
     expectedVersion?: string | null;
   }): Promise<void>;
+  reloadMcpServers?(): Promise<void>;
   startTurn(args: {
     threadId: string;
     inputText: string;
@@ -84,6 +88,7 @@ export interface CodexWebRuntimeClient {
     collaborationMode?: string;
     developerInstructions?: string;
     onProgress?: ((progress: any) => Promise<void> | void) | null;
+    onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
     timeoutMs?: number;
@@ -124,6 +129,10 @@ export interface StartTurnInput {
   settings?: Partial<ProviderTurnSessionSettings>;
 }
 
+export interface ListSessionsOptions {
+  favorite?: boolean;
+}
+
 export class CodexWebRuntime {
   readonly client: CodexWebRuntimeClient;
 
@@ -142,6 +151,8 @@ export class CodexWebRuntime {
   private readonly approvalToBatch = new Map<string, string>();
 
   private readonly activeTurns = new Map<string, Promise<ProviderTurnResult>>();
+
+  private readonly workSummaries = new Map<string, Record<string, unknown>>();
 
   constructor({
     codexBin,
@@ -167,11 +178,28 @@ export class CodexWebRuntime {
     return this.client.readUsage();
   }
 
-  async listSessions(): Promise<CodexWebSession[]> {
+  async listSessions(options: ListSessionsOptions = {}): Promise<CodexWebSession[]> {
+    if (options.favorite === true) {
+      return this.listFavoriteSessions();
+    }
     const result = await this.client.listThreads({ limit: 100, archived: false });
     return result.items
       .filter((thread) => typeof thread.threadId === 'string' && thread.threadId)
       .map((thread) => this.toSession(thread));
+  }
+
+  private async listFavoriteSessions(): Promise<CodexWebSession[]> {
+    const favoriteIds = this.favoriteSessionIds();
+    if (!favoriteIds.length) {
+      return [];
+    }
+    const favoriteIdSet = new Set(favoriteIds);
+    const result = await this.client.listThreads({ limit: 100, archived: false });
+    const sessions = result.items
+      .filter((thread) => favoriteIdSet.has(thread.threadId))
+      .map((thread) => this.toSession(thread));
+    return sessions.sort((left, right) => (left.favoriteOrder ?? Number.MAX_SAFE_INTEGER) - (right.favoriteOrder ?? Number.MAX_SAFE_INTEGER)
+      || (right.lastInputAt ?? 0) - (left.lastInputAt ?? 0));
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<CodexWebSession> {
@@ -244,18 +272,32 @@ export class CodexWebRuntime {
     return true;
   }
 
-  async updateSessionFavorite(sessionId: string, favorite: boolean): Promise<CodexWebSession | null> {
+  async updateSessionFavorite(
+    sessionId: string,
+    favorite: boolean,
+    favoriteOrder?: number | null,
+  ): Promise<CodexWebSession | null> {
     const thread = await this.readThreadSummary(sessionId);
     if (!thread) {
       return null;
     }
+    const current = this.getSessionSettings(sessionId);
     const settings = {
-      ...this.getSessionSettings(sessionId),
+      ...current,
       favorite,
+      favoriteOrder: favorite ? favoriteOrder ?? current.favoriteOrder ?? this.nextFavoriteOrder() : null,
       updatedAt: Date.now(),
     };
     this.persistSessionSettings(sessionId, settings);
     return this.toSession(thread);
+  }
+
+  async reloadRuntime(): Promise<{ mcpServersReloaded: boolean }> {
+    if (typeof this.client.reloadMcpServers !== 'function') {
+      return { mcpServersReloaded: false };
+    }
+    await this.client.reloadMcpServers();
+    return { mcpServersReloaded: true };
   }
 
   async startTurn(sessionId: string, input: StartTurnInput): Promise<{ turnId: string }> {
@@ -308,6 +350,23 @@ export class CodexWebRuntime {
           progress,
         }));
       },
+      onWorkEvent: async (event) => {
+        if (!startedTurnId) {
+          return;
+        }
+        const existing = this.workSummaries.get(event.itemId) ?? {};
+        Object.assign(existing, event.summary ?? {});
+        this.workSummaries.set(event.itemId, existing);
+        for (const normalized of normalizeWorkBatchEvents({
+          turnId: startedTurnId,
+          event: {
+            ...event,
+            summary: { ...existing },
+          },
+        })) {
+          this.append(startedTurnId, normalized);
+        }
+      },
       onApprovalRequest: async (request) => {
         const turnId = request.turnId ?? startedTurnId;
         if (!turnId) {
@@ -332,7 +391,6 @@ export class CodexWebRuntime {
       })) {
         this.append(startedTurnId, event);
       }
-      this.activeTurns.delete(startedTurnId);
       return result;
     }).catch((error: unknown) => {
       if (!startedTurnId) {
@@ -344,17 +402,15 @@ export class CodexWebRuntime {
         threadId: sessionId,
         error,
       }));
-      this.activeTurns.delete(turnId);
       throw error;
     });
     runPromise.catch(() => {});
-    if (startedTurnId) {
-      this.activeTurns.set(startedTurnId, runPromise);
-    } else {
-      startedPromise.then(({ turnId }) => {
-        this.activeTurns.set(turnId, runPromise);
+    startedPromise.then(({ turnId }) => {
+      this.activeTurns.set(turnId, runPromise);
+      runPromise.finally(() => {
+        this.activeTurns.delete(turnId);
       }).catch(() => {});
-    }
+    }).catch(() => {});
     return startedPromise;
   }
 
@@ -464,7 +520,14 @@ export class CodexWebRuntime {
     if (typeof this.client.resumeThread !== 'function') {
       return;
     }
-    await this.client.resumeThread({ threadId });
+    try {
+      await this.client.resumeThread({ threadId });
+    } catch (error) {
+      if (isMissingRolloutError(error)) {
+        return;
+      }
+      throw error;
+    }
   }
 
   private toSession(thread: ProviderThreadSummary): CodexWebSession {
@@ -482,6 +545,7 @@ export class CodexWebRuntime {
       lastUserInput: inputSummary.lastUserInput,
       lastInputAt: updatedAt,
       favorite: current.favorite === true,
+      favoriteOrder: current.favoriteOrder ?? null,
       settings: current,
       thread,
     };
@@ -494,9 +558,13 @@ export class CodexWebRuntime {
     const current = sessionId
       ? this.getSessionSettings(sessionId)
       : createDefaultSettings('pending');
-    const metadata = patch?.metadata && typeof patch.metadata === 'object'
+    const metadataSource = patch?.metadata && typeof patch.metadata === 'object'
       ? patch.metadata
       : current.metadata;
+    const metadata = { ...metadataSource };
+    if (patch) {
+      delete metadata.codexWebDefaultsOnly;
+    }
     return {
       ...current,
       ...patch,
@@ -519,7 +587,10 @@ export class CodexWebRuntime {
         bridgeSessionId: sessionId,
         metadata: stored.metadata ?? {},
       }
-      : createDefaultSettings(sessionId);
+      : {
+        ...createDefaultSettings(sessionId),
+        metadata: { codexWebDefaultsOnly: true },
+      };
     this.sessionSettings.set(sessionId, settings);
     return settings;
   }
@@ -532,6 +603,31 @@ export class CodexWebRuntime {
     };
     this.sessionSettings.set(sessionId, normalized);
     this.settingsStore?.set(sessionId, normalized);
+  }
+
+  private favoriteSessionIds(): string[] {
+    const settingsById = new Map<string, CodexWebStoredSessionSettings>();
+    for (const [sessionId, settings] of this.settingsStore?.list?.() ?? []) {
+      settingsById.set(sessionId, settings);
+    }
+    for (const [sessionId, settings] of this.sessionSettings.entries()) {
+      settingsById.set(sessionId, settings);
+    }
+    return [...settingsById.entries()]
+      .filter(([, settings]) => settings.favorite === true)
+      .sort(([, left], [, right]) => (left.favoriteOrder ?? Number.MAX_SAFE_INTEGER) - (right.favoriteOrder ?? Number.MAX_SAFE_INTEGER)
+        || (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
+      .map(([sessionId]) => sessionId);
+  }
+
+  private nextFavoriteOrder(): number {
+    let maxOrder = 0;
+    for (const settings of this.sessionSettings.values()) {
+      if (settings.favorite === true && Number.isFinite(settings.favoriteOrder)) {
+        maxOrder = Math.max(maxOrder, Number(settings.favoriteOrder));
+      }
+    }
+    return maxOrder + 1;
   }
 
   private findOpenApprovals(turnId: string): string[] {
@@ -610,6 +706,7 @@ function createDefaultSettings(sessionId: string): CodexWebStoredSessionSettings
     metadata: {},
     updatedAt: Date.now(),
     favorite: false,
+    favoriteOrder: null,
   };
 }
 
@@ -669,4 +766,9 @@ export function isMissingThreadError(error: unknown): boolean {
   return /thread not found/i.test(message)
     || /session not found/i.test(message)
     || /unknown thread/i.test(message);
+}
+
+function isMissingRolloutError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no rollout found for thread id/i.test(message);
 }

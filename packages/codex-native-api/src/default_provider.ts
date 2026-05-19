@@ -16,6 +16,7 @@ import type {
   ProviderTurnResult,
   ProviderTurnSession,
   ProviderTurnSessionSettings,
+  ProviderTurnWorkEvent,
 } from './provider.js';
 
 export interface DefaultCodexProviderProfileConfig extends Record<string, unknown> {
@@ -176,6 +177,7 @@ export class DefaultCodexNativeProviderPlugin implements ProviderPluginContract 
     inputText,
     developerInstructions = null,
     onProgress = null,
+    onWorkEvent = null,
     onTurnStarted = null,
     onApprovalRequest = null,
   }: {
@@ -186,6 +188,7 @@ export class DefaultCodexNativeProviderPlugin implements ProviderPluginContract 
     inputText: string;
     developerInstructions?: string | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
   }): Promise<ProviderTurnResult> {
@@ -213,6 +216,7 @@ export class DefaultCodexNativeProviderPlugin implements ProviderPluginContract 
         developerInstructions,
       ),
       onProgress,
+      onWorkEvent,
       onTurnStarted,
       onApprovalRequest,
     });

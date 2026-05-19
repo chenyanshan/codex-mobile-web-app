@@ -156,6 +156,8 @@ export type {
   ProviderTurnResult,
   ProviderTurnSession,
   ProviderTurnSessionSettings,
+  ProviderTurnWorkEvent,
+  ProviderTurnWorkEventKind,
   ProviderUsageBucket,
   ProviderUsageCredits,
   ProviderUsageReport,

@@ -284,8 +284,15 @@ async function handleRequest({
     return;
   }
 
+  if (pathname === '/api/runtime/reload' && method === 'POST') {
+    const result = await runtime.reloadRuntime();
+    writeJson(response, 200, { ok: true, ...result });
+    return;
+  }
+
   if (pathname === '/api/sessions' && method === 'GET') {
-    writeJson(response, 200, { items: await runtime.listSessions() });
+    const options = url.searchParams.get('favorite') === 'true' ? { favorite: true } : {};
+    writeJson(response, 200, { items: await runtime.listSessions(options) });
     return;
   }
 
@@ -325,7 +332,8 @@ async function handleRequest({
       writeJson(response, 400, { error: 'favorite must be a boolean' });
       return;
     }
-    const session = await runtime.updateSessionFavorite(sessionId, body.favorite);
+    const favoriteOrder = Number.isFinite(body.favoriteOrder) ? Number(body.favoriteOrder) : null;
+    const session = await runtime.updateSessionFavorite(sessionId, body.favorite, favoriteOrder);
     if (!session) {
       writeSessionNotFound(response);
       return;

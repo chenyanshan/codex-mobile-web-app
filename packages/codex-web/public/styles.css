@@ -16,6 +16,54 @@
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+:root[data-theme="light"] {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --border: #d6dbe4;
+  --text: #171b23;
+  --muted: #687386;
+  --accent: #266fb5;
+  --accent-2: #1d5e9f;
+  --success: #238668;
+  --warn: #b97819;
+  --danger: #c84c4c;
+  --shadow: 0 12px 26px rgba(34, 42, 54, 0.14);
+  color-scheme: light;
+}
+
+:root[data-theme="sunny"] {
+  --bg: #fbf5e4;
+  --panel: #fffaf0;
+  --panel-2: #f5ecd6;
+  --border: #dfcfac;
+  --text: #2a2419;
+  --muted: #76694e;
+  --accent: #177c78;
+  --accent-2: #b86c10;
+  --success: #2f855a;
+  --warn: #a45f0b;
+  --danger: #b94e48;
+  --shadow: 0 12px 26px rgba(79, 58, 22, 0.15);
+  color-scheme: light;
+}
+
+:root[data-theme="forest"] {
+  --bg: #0d1412;
+  --panel: #13201c;
+  --panel-2: #1a2a25;
+  --border: #2e403a;
+  --text: #edf7f2;
+  --muted: #9dafaa;
+  --accent: #7bc8a4;
+  --accent-2: #2b7c68;
+  --success: #65bd8f;
+  --warn: #e3bd65;
+  --danger: #ec8383;
+  --shadow: 0 12px 30px rgba(0, 0, 0, 0.34);
+  color-scheme: dark;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -76,7 +124,7 @@ button:disabled {
   top: 0;
   z-index: 10;
   padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 10px;
-  background: rgba(11, 13, 18, 0.94);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--border);
 }
@@ -122,6 +170,18 @@ button:disabled {
   gap: 10px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.topbar-actions .compact-button {
+  min-width: 44px;
+}
+
 .topbar-meta {
   margin-top: 8px;
   color: var(--muted);
@@ -144,8 +204,12 @@ button:disabled {
 
 .list-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
+}
+
+.list-actions.is-hidden {
+  display: none;
 }
 
 .session-strip {
@@ -252,7 +316,7 @@ button:disabled {
   padding: 18px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: linear-gradient(180deg, rgba(23, 29, 42, 0.98), rgba(18, 23, 34, 0.98));
+  background: var(--panel);
   box-shadow: var(--shadow);
 }
 
@@ -335,7 +399,8 @@ button:disabled {
 }
 
 .session-list,
-.new-session-page {
+.new-session-page,
+.app-settings-page {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -348,6 +413,34 @@ button:disabled {
   display: grid;
   gap: 8px;
   align-content: start;
+}
+
+.app-settings-page {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.settings-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.settings-section-title {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.theme-toggle {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.full-width-button {
+  width: 100%;
 }
 
 .session-card,
@@ -383,6 +476,12 @@ button:disabled {
   gap: 6px;
 }
 
+.favorite-move-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
 .session-card-actions .compact-button {
   min-height: 34px;
   padding: 0 8px;
@@ -390,8 +489,16 @@ button:disabled {
 }
 
 .session-archive,
-.session-favorite {
+.session-favorite,
+.favorite-move {
   color: var(--muted);
+}
+
+.favorite-move {
+  width: 34px;
+  min-width: 34px;
+  font-size: 16px;
+  line-height: 1;
 }
 
 .session-favorite[aria-pressed="true"] {
@@ -470,13 +577,23 @@ button:disabled {
 }
 
 .message-card.user {
-  background: #131b28;
+  background: color-mix(in srgb, var(--panel-2) 84%, var(--accent) 16%);
   justify-self: end;
 }
 
 .message-card.assistant {
-  background: #111723;
+  background: var(--panel);
   justify-self: start;
+}
+
+.message-card.system {
+  background: color-mix(in srgb, var(--danger) 12%, var(--panel));
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--border));
+  justify-self: stretch;
+}
+
+.message-card.system .message-text {
+  color: var(--text);
 }
 
 .message-card {
@@ -568,16 +685,33 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
-.work-event {
-  padding: 10px 12px;
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 5px 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+.work-detail {
+  padding: 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
 }
 
-.work-event:first-child {
+.work-detail:first-child {
   border-top: 0;
+}
+
+.work-detail summary {
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  cursor: pointer;
+  list-style: none;
+}
+
+.work-detail summary::-webkit-details-marker {
+  display: none;
+}
+
+.work-detail-body {
+  padding: 0 12px 10px;
+  display: grid;
+  gap: 8px;
 }
 
 .work-event-main {
@@ -610,16 +744,23 @@ button:disabled {
 
 .work-files,
 .work-summary {
-  grid-column: 1 / -1;
   display: grid;
-  gap: 3px;
+  gap: 5px;
   color: var(--muted);
   font-size: 11px;
 }
 
-.work-files span,
-.work-summary span {
+.work-row,
+.work-file-change {
   min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+}
+
+.work-row span,
+.work-file-path {
   overflow-wrap: anywhere;
 }
 
@@ -628,22 +769,62 @@ button:disabled {
   font-weight: 600;
 }
 
+.work-file-change {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.work-file-action,
+.work-file-stats {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.work-text-block {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.work-text-block strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.work-output {
+  margin: 0;
+  padding: 8px;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 84%, var(--bg));
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .composer-wrap {
   position: fixed;
   left: 0;
   right: 0;
   bottom: 0;
   padding: 10px 12px calc(env(safe-area-inset-bottom, 0px) + 12px);
-  background: linear-gradient(180deg, rgba(11, 13, 18, 0), rgba(11, 13, 18, 0.88) 20%, rgba(11, 13, 18, 0.98));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg) 0%, transparent), color-mix(in srgb, var(--bg) 88%, transparent) 20%, color-mix(in srgb, var(--bg) 98%, transparent));
 }
 
 .composer {
+  position: relative;
   margin: 0 auto;
   width: min(100%, 720px);
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: rgba(18, 23, 34, 0.98);
+  background: color-mix(in srgb, var(--panel) 98%, transparent);
   box-shadow: var(--shadow);
 }
 
@@ -764,11 +945,49 @@ button:disabled {
 }
 
 .settings-drawer {
-  margin-bottom: 8px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  max-height: min(52dvh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.settings-stop-row {
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid rgba(255, 125, 125, 0.24);
+  border-radius: 8px;
+  background: rgba(255, 125, 125, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-stop-row .meta {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.settings-action-row {
+  margin-bottom: 8px;
+  padding: 2px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-action-row .meta {
+  min-width: 0;
+  font-size: 12px;
 }
 
 .composer-error {
@@ -898,9 +1117,9 @@ button:disabled {
   align-items: center;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: rgba(18, 23, 34, 0.96);
+  background: var(--panel);
   box-shadow: var(--shadow);
-  color: var(--muted);
+  color: var(--text);
   font-size: 12px;
   opacity: 0;
   pointer-events: none;
@@ -914,7 +1133,8 @@ button:disabled {
 
 .pull-refresh-indicator.is-ready,
 .pull-refresh-indicator.is-refreshing {
-  color: var(--text);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .empty-state {

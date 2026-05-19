@@ -13,6 +13,7 @@ import type {
   ProviderProfile,
   ProviderTurnProgress,
   ProviderTurnResult,
+  ProviderTurnWorkEvent,
 } from './provider.js';
 
 export interface CodexNativeRuntimeReadiness {
@@ -51,6 +52,7 @@ export interface CodexNativeRuntimeTurnStartedMeta {
 
 export interface CodexNativeRuntimeTurnHooks {
   onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+  onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
   onTurnStarted?: ((meta: CodexNativeRuntimeTurnStartedMeta) => Promise<void> | void) | null;
 }
 
@@ -269,6 +271,7 @@ export class CodexNativeRuntime {
     serviceTier = null,
     prepareTurn,
     onProgress = null,
+    onWorkEvent = null,
     onTurnStarted = null,
   }: CodexNativeRuntimeRunTurnOptions): Promise<CodexNativeRuntimeTurnResult> {
     this.assertSupportsIsolatedTurns(providerPlugin);
@@ -288,6 +291,7 @@ export class CodexNativeRuntime {
       serviceTier,
       prepareTurn,
       onProgress,
+      onWorkEvent,
       onTurnStarted,
     });
   }
@@ -301,6 +305,7 @@ export class CodexNativeRuntime {
     serviceTier = null,
     prepareTurn,
     onProgress = null,
+    onWorkEvent = null,
     onTurnStarted = null,
   }: CodexNativeRuntimeContinuationTurnOptions): Promise<CodexNativeRuntimeTurnResult> {
     this.assertSupportsIsolatedTurns(providerPlugin);
@@ -318,6 +323,7 @@ export class CodexNativeRuntime {
       serviceTier,
       prepareTurn,
       onProgress,
+      onWorkEvent,
       onTurnStarted,
     });
   }
@@ -331,6 +337,7 @@ export class CodexNativeRuntime {
     serviceTier = null,
     prepareTurn,
     onProgress = null,
+    onWorkEvent = null,
     onTurnStarted = null,
   }: {
     providerProfile: ProviderProfile;
@@ -341,6 +348,7 @@ export class CodexNativeRuntime {
     serviceTier?: string | null;
     prepareTurn: (session: CodexNativeSession) => CodexNativeRuntimeTurnPreparation;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: CodexNativeRuntimeTurnStartedMeta) => Promise<void> | void) | null;
   }): Promise<CodexNativeRuntimeTurnResult> {
     const request = prepareTurn(session);
@@ -364,6 +372,7 @@ export class CodexNativeRuntime {
       inputText: request.inputText,
       developerInstructions: request.developerInstructions ?? null,
       onProgress,
+      onWorkEvent,
       onTurnStarted: typeof onTurnStarted === 'function'
         ? async (meta) => {
           const threadId = typeof meta?.threadId === 'string' && meta.threadId.trim()

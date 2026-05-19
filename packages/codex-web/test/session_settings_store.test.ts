@@ -27,8 +27,10 @@ test('file session settings store persists session favorite flag', async (t) => 
     metadata: {},
     updatedAt: 1,
     favorite: true,
+    favoriteOrder: 4,
   } as any);
 
   const reloaded = new FileSessionSettingsStore({ settingsPath });
   assert.equal((reloaded.get('thread_favorite') as any)?.favorite, true);
+  assert.equal((reloaded.get('thread_favorite') as any)?.favoriteOrder, 4);
 });

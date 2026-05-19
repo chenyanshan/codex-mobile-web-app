@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'codex-web-static-v1';
+const STATIC_CACHE = 'codex-web-static-2026-05-19-fast-session-open-v6';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

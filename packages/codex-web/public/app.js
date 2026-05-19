@@ -1,5 +1,8 @@
+const APP_BUILD_ID = '2026-05-19-fast-session-open-v6';
 const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
+const THEME_KEY = 'codexWebTheme';
+const DEFAULT_THREAD_SETTINGS_KEY = 'codexWebDefaultThreadSettings';
 const MAX_TIMELINE_CACHE_SESSIONS = 16;
 const MAX_TIMELINE_CACHE_ITEMS = 80;
 const MAX_TIMELINE_CACHE_MAP_ITEMS = 24;
@@ -15,6 +18,7 @@ const DEFAULT_COLLABORATION_MODE = 'default';
 const DEFAULT_PERMISSION_PRESET = 'full-access';
 const DEFAULT_APPROVAL_POLICY = 'never';
 const DEFAULT_SANDBOX_MODE = 'danger-full-access';
+const DEFAULT_THEME = 'dark';
 const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
 const STREAM_STALE_MS = 30_000;
 const EDGE_SWIPE_START_PX = 24;
@@ -30,7 +34,12 @@ const state = {
   currentSession: null,
   sessionId: null,
   view: 'sessions',
+  theme: normalizeTheme(localStorage.getItem(THEME_KEY)),
+  defaultThreadSettings: loadDefaultThreadSettings(),
   sortMode: 'favorites',
+  favoriteSortMode: false,
+  favoriteSortDraft: [],
+  sessionsScope: 'favorites',
   archiveConfirmSessionId: null,
   cwd: '',
   newCwd: '',
@@ -69,9 +78,11 @@ let pullToRefreshCleanup = null;
 let edgeSwipeStart = null;
 
 bootstrap();
+applyTheme(state.theme, { persist: false });
 registerServiceWorker();
 setupPwaPullToRefresh();
 setupEdgeSwipeBackNavigation();
+setupAppVersionRefresh();
 document.addEventListener('visibilitychange', onVisibilityChange);
 window.addEventListener('pageshow', onPageResume);
 window.addEventListener('focus', onPageResume);
@@ -101,7 +112,7 @@ async function restoreAuth() {
     render();
     const [modelsPayload] = await Promise.all([
       apiFetch('/api/models').catch(() => ({ items: [] })),
-      refreshSessionsList({ renderAfter: false }).catch(() => null),
+      refreshSessionsList({ renderAfter: false, scope: 'favorites' }).catch(() => null),
     ]);
     state.authSession = session;
     state.models = Array.isArray(modelsPayload.items) ? modelsPayload.items : [];
@@ -134,6 +145,9 @@ function setLoggedOut(message = '') {
   state.currentSession = null;
   state.view = 'sessions';
   state.sortMode = 'favorites';
+  state.favoriteSortMode = false;
+  state.favoriteSortDraft = [];
+  state.sessionsScope = 'favorites';
   state.archiveConfirmSessionId = null;
   state.cwd = '';
   state.newCwd = '';
@@ -226,6 +240,9 @@ function renderLogin() {
 }
 
 function renderMain() {
+  if (state.view === 'settings') {
+    return renderAppSettings();
+  }
   if (state.view === 'new') {
     return renderNewSession();
   }
@@ -236,6 +253,20 @@ function renderMain() {
 }
 
 function renderSessionList() {
+  const topbarActions = state.favoriteSortMode
+    ? `
+          <div class="topbar-actions sort-edit-actions">
+            <button class="primary compact-button" type="button" id="favorite-sort-save-button">Save</button>
+            <button class="ghost compact-button" type="button" id="favorite-sort-cancel-button">Cancel</button>
+          </div>
+        `
+    : `
+          <div class="topbar-actions">
+            <button class="ghost compact-button" type="button" id="favorite-sort-button">Sort</button>
+            <button class="primary compact-button" type="button" id="open-new-session-button">New</button>
+            <button class="ghost compact-button" type="button" id="open-app-settings-button">Set</button>
+          </div>
+        `;
   const shell = document.createElement('div');
   shell.className = 'shell';
   shell.innerHTML = `
@@ -243,19 +274,78 @@ function renderSessionList() {
       <header class="topbar page-topbar">
         <div class="topbar-main">
           <div class="page-title">Sessions</div>
-          <button class="ghost compact-button" type="button" id="logout-button">Log out</button>
+          ${topbarActions}
         </div>
-        <div class="list-actions">
+        <div class="list-actions${state.favoriteSortMode ? ' is-hidden' : ''}">
           <div class="toggle sort-toggle">
             <button type="button" data-sort-mode="favorites" aria-pressed="${String(state.sortMode === 'favorites')}">Favorites</button>
             <button type="button" data-sort-mode="time" aria-pressed="${String(state.sortMode === 'time')}">Time</button>
           </div>
-          <button class="primary compact-button" type="button" id="open-new-session-button">New</button>
         </div>
       </header>
       <main class="session-list">${renderSessionCards()}</main>
     </div>
     ${renderArchiveConfirmModal()}
+  `;
+  return shell;
+}
+
+function renderAppSettings() {
+  const shell = document.createElement('div');
+  shell.className = 'shell';
+  shell.innerHTML = `
+    <div class="screen page-screen">
+      <header class="topbar page-topbar">
+        <div class="topbar-main">
+          <div class="page-title">Settings</div>
+          <button class="ghost compact-button" type="button" id="back-to-list-button">Sessions</button>
+        </div>
+      </header>
+      <main class="app-settings-page">
+        <section class="settings-section">
+          <div class="settings-section-title">Theme</div>
+          <div class="toggle theme-toggle">
+            <button type="button" data-app-theme="dark" aria-pressed="${String(state.theme === 'dark')}">Dark</button>
+            <button type="button" data-app-theme="light" aria-pressed="${String(state.theme === 'light')}">White</button>
+            <button type="button" data-app-theme="sunny" aria-pressed="${String(state.theme === 'sunny')}">Yellow</button>
+            <button type="button" data-app-theme="forest" aria-pressed="${String(state.theme === 'forest')}">Green</button>
+          </div>
+        </section>
+        <section class="settings-section">
+          <div class="settings-section-title">New Thread</div>
+          <div class="controls">
+            <div class="control-group">
+              <label for="default-model-select">Model</label>
+              <select id="default-model-select" name="defaultModel">${renderModelOptions(state.defaultThreadSettings.model)}</select>
+            </div>
+            <div class="control-group">
+              <label for="default-reasoning-select">Reasoning</label>
+              <select id="default-reasoning-select" name="defaultReasoningEffort">
+                ${renderOptions(['low', 'medium', 'high', 'xhigh'], state.defaultThreadSettings.reasoningEffort)}
+              </select>
+            </div>
+            <div class="control-group">
+              <label>Mode</label>
+              <div class="toggle">
+                <button type="button" data-default-mode="default" aria-pressed="${String(state.defaultThreadSettings.collaborationMode === 'default')}">Default</button>
+                <button type="button" data-default-mode="plan" aria-pressed="${String(state.defaultThreadSettings.collaborationMode === 'plan')}">Plan</button>
+              </div>
+            </div>
+            <div class="control-group">
+              <label>Permissions</label>
+              <div class="toggle permission-toggle">
+                <button type="button" data-default-permission-preset="read-only" aria-pressed="${String(state.defaultThreadSettings.accessPreset === 'read-only')}">Read</button>
+                <button type="button" data-default-permission-preset="default" aria-pressed="${String(state.defaultThreadSettings.accessPreset === 'default')}">Ask</button>
+                <button type="button" data-default-permission-preset="full-access" aria-pressed="${String(state.defaultThreadSettings.accessPreset === 'full-access')}">Full</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="settings-section">
+          <button class="danger compact-button full-width-button" type="button" id="settings-logout-button">Log out</button>
+        </section>
+      </main>
+    </div>
   `;
   return shell;
 }
@@ -308,10 +398,8 @@ function renderChat() {
           ${state.error ? `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>` : ''}
           <div class="compact-composer-row">
             <button class="ghost icon-button" type="button" id="settings-toggle" aria-expanded="${String(state.settingsOpen)}">Set</button>
-            <textarea id="prompt-input" name="prompt" rows="1" placeholder="Message" ${state.pendingTurn ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
-            <button class="${state.pendingTurn ? 'danger' : 'primary'} compact-send" type="${state.pendingTurn ? 'button' : 'submit'}" id="${state.pendingTurn ? 'stop-button' : 'send-button'}">
-              ${state.pendingTurn ? 'Stop' : 'Send'}
-            </button>
+            <textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">${escapeHtml(state.prompt)}</textarea>
+            <button class="primary compact-send" type="submit" id="send-button">Send</button>
           </div>
         </form>
       </div>
@@ -322,6 +410,7 @@ function renderChat() {
 
 function renderSessionCards() {
   const sessions = sortedSessions();
+  const isSortingFavorites = state.sortMode === 'favorites' && state.favoriteSortMode;
   if (!sessions.length) {
     if (state.sessionsLoading) {
       return '<div class="empty-state">Loading sessions...</div>';
@@ -331,7 +420,7 @@ function renderSessionCards() {
   }
   return sessions.map((session) => `
     <article class="session-card">
-      <button class="session-card-open" type="button" data-session-id="${escapeAttribute(session.id)}">
+      <button class="session-card-open" type="button" data-session-id="${escapeAttribute(session.id)}" ${isSortingFavorites ? 'disabled' : ''}>
         <span class="session-card-main">
           <span class="session-project">${escapeHtml(projectNameForSession(session))}</span>
           <span class="session-preview">${escapeHtml(shorten(previewInputForSession(session), 96) || 'No prompt preview')}</span>
@@ -342,11 +431,27 @@ function renderSessionCards() {
         </span>
       </button>
       <div class="session-card-actions">
-        <button class="ghost compact-button session-favorite" type="button" data-session-favorite-id="${escapeAttribute(session.id)}" aria-pressed="${String(isFavoriteSession(session))}">${isFavoriteSession(session) ? 'Unfavorite' : 'Favorite'}</button>
-        <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">Archive</button>
+        ${isSortingFavorites
+          ? renderFavoriteMoveControls(session)
+          : `
+            <button class="ghost compact-button session-favorite" type="button" data-session-favorite-id="${escapeAttribute(session.id)}" aria-pressed="${String(isFavoriteSession(session))}">${isFavoriteSession(session) ? 'Unfavorite' : 'Favorite'}</button>
+            <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">Archive</button>
+          `}
       </div>
     </article>
   `).join('');
+}
+
+function renderFavoriteMoveControls(session) {
+  if (state.sortMode !== 'favorites' || !state.favoriteSortMode || !isFavoriteSession(session)) {
+    return '';
+  }
+  return `
+    <div class="favorite-move-controls">
+      <button class="ghost compact-button favorite-move" type="button" data-session-favorite-move-id="${escapeAttribute(session.id)}" data-session-favorite-move="up" aria-label="Move favorite up">↑</button>
+      <button class="ghost compact-button favorite-move" type="button" data-session-favorite-move-id="${escapeAttribute(session.id)}" data-session-favorite-move="down" aria-label="Move favorite down">↓</button>
+    </div>
+  `;
 }
 
 function renderArchiveConfirmModal() {
@@ -391,6 +496,11 @@ function renderPathChoices() {
 function renderSettingsDrawer() {
   return `
     <div class="settings-drawer">
+      ${renderStopTurnControl()}
+      <div class="settings-action-row">
+        <span class="meta">Runtime</span>
+        <button class="ghost compact-button" type="button" id="runtime-reload-button">Reload</button>
+      </div>
       <div class="controls">
         <div class="control-group">
           <label for="model-select">Model</label>
@@ -418,6 +528,18 @@ function renderSettingsDrawer() {
           </div>
         </div>
       </div>
+    </div>
+  `;
+}
+
+function renderStopTurnControl() {
+  if (!state.pendingTurn || !state.turnId) {
+    return '';
+  }
+  return `
+    <div class="settings-stop-row">
+      <span class="meta">Current turn is running.</span>
+      <button class="danger compact-button" type="button" id="stop-button">Stop</button>
     </div>
   `;
 }
@@ -506,7 +628,7 @@ function renderWorkItem(item) {
   const summary = summarizeWorkItem(item);
   const details = workDetailsForItem(item);
   return `
-    <details class="card work-card">
+    <details class="card work-card" open>
       <summary>
         <span class="work-title">Work</span>
         <span class="work-counts">${escapeHtml(formatWorkCounts(summary))}</span>
@@ -565,45 +687,93 @@ function workDetailsForItem(item) {
       title: batch.title || workTitleFromSummary(batch.summary) || 'Tool activity',
       status: batch.status || '',
       summary: batch.summary || {},
-      files: workChangedFiles(batch),
+      fileChanges: workFileChanges(batch),
     })),
     ...(item.approvals || []).map((approval) => ({
       kind: 'approval',
       title: approval.summary?.command || approval.summary?.reason || approval.approvalKind || 'Approval requested',
       status: approval.resolved ? approval.summary?.decision || 'resolved' : 'requested',
       summary: approval.summary || {},
-      files: [],
+      fileChanges: [],
     })),
   ];
 }
 
 function renderWorkDetail(detail) {
-  const files = detail.files.length
-    ? `<div class="work-files">${detail.files.map((file) => `<span>${escapeHtml(file)}</span>`).join('')}</div>`
-    : '';
+  const body = renderWorkDetailBody(detail);
   return `
-    <div class="work-event" data-work-kind="${escapeAttribute(detail.kind)}">
-      <div class="work-event-main">
+    <details class="work-detail" open data-work-kind="${escapeAttribute(detail.kind)}">
+      <summary>
         <span class="work-event-kind">${escapeHtml(workKindLabel(detail.kind))}</span>
         <span class="work-event-title">${escapeHtml(detail.title)}</span>
+        <span class="work-event-status">${escapeHtml(detail.status || '')}</span>
+      </summary>
+      <div class="work-detail-body">
+        ${body || '<p class="meta">No additional details.</p>'}
       </div>
-      <span class="work-event-status">${escapeHtml(detail.status || '')}</span>
-      ${files}
-      ${renderCompactSummary(detail.summary)}
-    </div>
+    </details>
   `;
 }
 
-function renderCompactSummary(summary) {
+function renderWorkDetailBody(detail) {
+  const summary = detail.summary || {};
+  const rows = renderWorkSummaryRows(summary);
+  const files = renderWorkFileChanges(detail.fileChanges || []);
+  const output = renderWorkTextBlock('Output', summary.output);
+  const diff = renderWorkTextBlock('Diff', summary.diff || summary.patch);
+  return [rows, files, output, diff].filter(Boolean).join('');
+}
+
+function renderWorkSummaryRows(summary) {
   const entries = Object.entries(summary || {})
-    .filter(([key, value]) => key !== 'fileChanges' && hasSummaryValue(value))
-    .slice(0, 3);
+    .filter(([key, value]) => !['fileChanges', 'output', 'diff', 'patch'].includes(key) && hasSummaryValue(value));
   if (!entries.length) {
     return '';
   }
   return `<div class="work-summary">${entries.map(([key, value]) => `
-    <span><strong>${escapeHtml(startCase(key))}</strong> ${escapeHtml(shorten(formatSummaryValue(value), 140))}</span>
+    <div class="work-row"><strong>${escapeHtml(startCase(key))}</strong><span>${escapeHtml(shorten(formatSummaryValue(value), 800))}</span></div>
   `).join('')}</div>`;
+}
+
+function renderWorkFileChanges(changes) {
+  if (!Array.isArray(changes) || !changes.length) {
+    return '';
+  }
+  return `<div class="work-files">${changes.map((change) => {
+    const path = change?.path || change?.file || change?.target || change?.source || '';
+    const action = change?.action || change?.type || change?.status || '';
+    const stats = formatWorkChangeStats(change);
+    return `
+      <div class="work-file-change">
+        <span class="work-file-path">${escapeHtml(path)}</span>
+        ${action ? `<span class="work-file-action">${escapeHtml(action)}</span>` : ''}
+        ${stats ? `<span class="work-file-stats">${escapeHtml(stats)}</span>` : ''}
+      </div>
+    `;
+  }).join('')}</div>`;
+}
+
+function renderWorkTextBlock(label, value) {
+  if (!hasSummaryValue(value)) {
+    return '';
+  }
+  return `
+    <div class="work-text-block">
+      <strong>${escapeHtml(label)}</strong>
+      <pre class="work-output">${escapeHtml(String(value))}</pre>
+    </div>
+  `;
+}
+
+function formatWorkChangeStats(change) {
+  const additions = Number(change?.additions ?? change?.added ?? NaN);
+  const deletions = Number(change?.deletions ?? change?.deleted ?? NaN);
+  const hasAdditions = Number.isFinite(additions);
+  const hasDeletions = Number.isFinite(deletions);
+  if (!hasAdditions && !hasDeletions) {
+    return '';
+  }
+  return `+${hasAdditions ? additions : 0} / -${hasDeletions ? deletions : 0}`;
 }
 
 function hasSummaryValue(value) {
@@ -640,14 +810,19 @@ function isReadCommand(command) {
 }
 
 function workChangedFiles(batch) {
-  const changes = batch.summary?.fileChanges;
-  if (!Array.isArray(changes)) {
-    return [];
-  }
-  return changes
+  return workFileChanges(batch)
     .map((change) => change?.path || change?.file || change?.target || change?.source)
     .filter(Boolean)
     .map(String);
+}
+
+function workFileChanges(batch) {
+  const changes = batch.summary?.fileChanges;
+  if (Array.isArray(changes)) {
+    return changes;
+  }
+  const path = batch.summary?.path || batch.summary?.file;
+  return path ? [{ path }] : [];
 }
 
 function workTitleFromSummary(summary) {
@@ -677,8 +852,8 @@ function renderSummary(summary) {
   `).join('')}</div>`;
 }
 
-function renderModelOptions() {
-  const current = state.model || '';
+function renderModelOptions(currentValue = state.model) {
+  const current = currentValue || '';
   const options = [];
   if (!state.models.length) {
     options.push({ id: current, label: current || 'Default model' });
@@ -724,15 +899,55 @@ function bindGlobalEvents() {
     logoutButton.addEventListener('click', onLogout);
   }
 
+  const settingsLogoutButton = document.querySelector('#settings-logout-button');
+  if (settingsLogoutButton) {
+    settingsLogoutButton.addEventListener('click', onLogout);
+  }
+
+  const openAppSettingsButton = document.querySelector('#open-app-settings-button');
+  if (openAppSettingsButton) {
+    openAppSettingsButton.addEventListener('click', () => {
+      openAppSettingsPage();
+    });
+  }
+
   const stopButton = document.querySelector('#stop-button');
   if (stopButton) {
     stopButton.addEventListener('click', onStopTurn);
+  }
+
+  const runtimeReloadButton = document.querySelector('#runtime-reload-button');
+  if (runtimeReloadButton) {
+    runtimeReloadButton.addEventListener('click', () => {
+      void reloadRuntime();
+    });
   }
 
   const openNewSessionButton = document.querySelector('#open-new-session-button');
   if (openNewSessionButton) {
     openNewSessionButton.addEventListener('click', () => {
       openNewSessionPage();
+    });
+  }
+
+  const favoriteSortButton = document.querySelector('#favorite-sort-button');
+  if (favoriteSortButton) {
+    favoriteSortButton.addEventListener('click', () => {
+      enterFavoriteSortMode();
+    });
+  }
+
+  const favoriteSortSaveButton = document.querySelector('#favorite-sort-save-button');
+  if (favoriteSortSaveButton) {
+    favoriteSortSaveButton.addEventListener('click', () => {
+      void saveFavoriteSortOrder();
+    });
+  }
+
+  const favoriteSortCancelButton = document.querySelector('#favorite-sort-cancel-button');
+  if (favoriteSortCancelButton) {
+    favoriteSortCancelButton.addEventListener('click', () => {
+      cancelFavoriteSortMode();
     });
   }
 
@@ -751,14 +966,22 @@ function bindGlobalEvents() {
 
   for (const button of document.querySelectorAll('[data-sort-mode]')) {
     button.addEventListener('click', () => {
-      state.sortMode = button.getAttribute('data-sort-mode') || 'favorites';
-      render();
+      void setSessionSortMode(button.getAttribute('data-sort-mode') || 'favorites');
     });
   }
 
   for (const button of document.querySelectorAll('[data-session-favorite-id]')) {
     button.addEventListener('click', () => {
       void toggleSessionFavorite(button.getAttribute('data-session-favorite-id') || '');
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-session-favorite-move-id]')) {
+    button.addEventListener('click', () => {
+      void moveFavoriteSession(
+        button.getAttribute('data-session-favorite-move-id') || '',
+        button.getAttribute('data-session-favorite-move') || '',
+      );
     });
   }
 
@@ -812,10 +1035,7 @@ function bindGlobalEvents() {
 
   const settingsToggle = document.querySelector('#settings-toggle');
   if (settingsToggle) {
-    settingsToggle.addEventListener('click', () => {
-      state.settingsOpen = !state.settingsOpen;
-      render();
-    });
+    settingsToggle.addEventListener('click', toggleSettingsDrawer);
   }
 
   const modelSelect = document.querySelector('#model-select');
@@ -846,6 +1066,43 @@ function bindGlobalEvents() {
     button.addEventListener('click', () => {
       applyPermissionPreset(button.getAttribute('data-permission-preset') || 'default');
       void updateSessionSettings();
+      render();
+    });
+  }
+
+  const defaultModelSelect = document.querySelector('#default-model-select');
+  if (defaultModelSelect) {
+    defaultModelSelect.addEventListener('change', (event) => {
+      applyDefaultThreadSettings({ model: event.target.value });
+      render();
+    });
+  }
+
+  const defaultReasoningSelect = document.querySelector('#default-reasoning-select');
+  if (defaultReasoningSelect) {
+    defaultReasoningSelect.addEventListener('change', (event) => {
+      applyDefaultThreadSettings({ reasoningEffort: event.target.value });
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-app-theme]')) {
+    button.addEventListener('click', () => {
+      applyTheme(button.getAttribute('data-app-theme') || DEFAULT_THEME);
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-default-mode]')) {
+    button.addEventListener('click', () => {
+      applyDefaultThreadSettings({ collaborationMode: button.getAttribute('data-default-mode') || DEFAULT_COLLABORATION_MODE });
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-default-permission-preset]')) {
+    button.addEventListener('click', () => {
+      applyDefaultThreadSettings({ accessPreset: button.getAttribute('data-default-permission-preset') || DEFAULT_PERMISSION_PRESET });
       render();
     });
   }
@@ -895,6 +1152,26 @@ function syncComposerOffset() {
       composerResizeObserver = new ResizeObserver(applyComposerOffset);
       composerResizeObserver.observe(composerWrap);
     }
+  });
+}
+
+function toggleSettingsDrawer() {
+  state.settingsOpen = !state.settingsOpen;
+  withTimelineScrollPreserved(() => render());
+}
+
+function withTimelineScrollPreserved(callback) {
+  const timeline = document.querySelector('#timeline');
+  const previousScrollTop = timeline?.scrollTop ?? null;
+  const previousScrollHeight = timeline?.scrollHeight ?? null;
+  callback();
+  requestAnimationFrame(() => {
+    const nextTimeline = document.querySelector('#timeline');
+    if (!nextTimeline || previousScrollTop === null || previousScrollHeight === null) {
+      return;
+    }
+    const heightDelta = nextTimeline.scrollHeight - previousScrollHeight;
+    nextTimeline.scrollTop = Math.max(0, previousScrollTop + heightDelta);
   });
 }
 
@@ -951,6 +1228,8 @@ function showSessionList() {
   saveCurrentTimeline();
   stopStream();
   state.view = 'sessions';
+  state.favoriteSortMode = false;
+  state.favoriteSortDraft = [];
   state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
@@ -962,10 +1241,26 @@ function showSessionList() {
   render();
 }
 
+function openAppSettingsPage() {
+  saveCurrentTimeline();
+  stopStream();
+  state.favoriteSortMode = false;
+  state.favoriteSortDraft = [];
+  state.view = 'settings';
+  state.archiveConfirmSessionId = null;
+  state.sessionId = null;
+  state.currentSession = null;
+  resetTurnState();
+  state.error = '';
+  render();
+}
+
 function openNewSessionPage() {
   saveCurrentTimeline();
   stopStream();
   applyDefaultSettings();
+  state.favoriteSortMode = false;
+  state.favoriteSortDraft = [];
   state.view = 'new';
   state.archiveConfirmSessionId = null;
   state.sessionId = null;
@@ -996,15 +1291,31 @@ function onNewSessionSubmit(event) {
 }
 
 async function selectSession(sessionId) {
+  if (state.favoriteSortMode) {
+    return;
+  }
   const nextSession = state.sessions.find((session) => session.id === sessionId) || null;
   if (!nextSession) {
     openNewSessionPage();
     return;
   }
   saveCurrentTimeline();
-  state.status = 'Checking session';
+  stopStream();
+  resetSessionHistoryWindow();
+  state.sessionId = nextSession.id;
+  state.currentSession = nextSession;
+  state.archiveConfirmSessionId = null;
+  state.cwd = nextSession.cwd || '';
+  applySessionSettings(nextSession);
+  restoreTimelineForSession(nextSession);
+  const restoredActiveTurn = restoreActiveTurnFromSession(nextSession);
+  state.view = 'chat';
+  state.settingsOpen = false;
+  state.error = '';
+  state.status = restoredActiveTurn ? 'Turn running' : 'Loading session';
   state.statusTone = 'warn';
   render();
+  scrollTimelineToBottom();
   try {
     const payload = await apiFetch(`/api/sessions/${encodeURIComponent(nextSession.id)}`);
     upsertSession(payload.session);
@@ -1015,35 +1326,29 @@ async function selectSession(sessionId) {
     handleApiError(error);
     return;
   }
+  if (state.sessionId !== sessionId) {
+    return;
+  }
   const refreshedSession = state.sessions.find((session) => session.id === sessionId) || nextSession;
-  stopStream();
-  resetSessionHistoryWindow();
-  state.sessionId = refreshedSession.id;
   state.currentSession = refreshedSession;
-  state.archiveConfirmSessionId = null;
   state.cwd = refreshedSession.cwd || '';
   applySessionSettings(refreshedSession);
   restoreTimelineForSession(refreshedSession);
-  const restoredActiveTurn = restoreActiveTurnFromSession(refreshedSession);
-  state.view = 'chat';
-  state.settingsOpen = false;
+  const refreshedActiveTurn = restoreActiveTurnFromSession(refreshedSession);
   state.error = '';
-  if (!restoredActiveTurn) {
+  if (!refreshedActiveTurn) {
     state.status = 'Ready';
     state.statusTone = 'success';
   }
   render();
   scrollTimelineToBottom();
-  if (restoredActiveTurn && state.turnId) {
+  if (refreshedActiveTurn && state.turnId) {
     streamTurnEvents(state.turnId, { forceReconnect: true });
   }
 }
 
 async function onComposerSubmit(event) {
   event.preventDefault();
-  if (state.pendingTurn) {
-    return;
-  }
   const text = state.prompt.trim();
   if (!text) {
     return;
@@ -1097,6 +1402,7 @@ async function onComposerSubmit(event) {
     if (handleMissingSession(error, promptToSend)) {
       return;
     }
+    appendTimelineError(state.turnId || `request_${Date.now()}`, error?.payload?.message || error?.message || 'Request failed');
     handleApiError(error);
   }
 }
@@ -1175,10 +1481,11 @@ async function toggleSessionFavorite(sessionId) {
     return;
   }
   const favorite = !isFavoriteSession(session);
+  const favoriteOrder = favorite ? nextFavoriteOrder() : null;
   try {
     const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/favorite`, {
       method: 'PATCH',
-      body: { favorite },
+      body: { favorite, favoriteOrder },
     });
     if (payload?.session) {
       upsertSession(payload.session);
@@ -1195,6 +1502,72 @@ async function toggleSessionFavorite(sessionId) {
       return;
     }
     handleApiError(error);
+  }
+}
+
+function enterFavoriteSortMode() {
+  if (state.sortMode !== 'favorites') {
+    return;
+  }
+  state.favoriteSortMode = true;
+  state.favoriteSortDraft = sortedFavoriteSessions().map((session) => session.id);
+  state.archiveConfirmSessionId = null;
+  render();
+}
+
+function cancelFavoriteSortMode() {
+  state.favoriteSortMode = false;
+  state.favoriteSortDraft = [];
+  state.error = '';
+  render();
+}
+
+async function saveFavoriteSortOrder() {
+  if (!state.favoriteSortMode) {
+    return;
+  }
+  const draft = favoriteSortDraftIds();
+  try {
+    for (let index = 0; index < draft.length; index += 1) {
+      const sessionId = draft[index];
+      const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/favorite`, {
+        method: 'PATCH',
+        body: { favorite: true, favoriteOrder: index + 1 },
+      });
+      if (payload?.session) {
+        upsertSession(payload.session);
+      } else {
+        applyFavoriteOrderLocally(sessionId, index + 1);
+      }
+    }
+    state.favoriteSortMode = false;
+    state.favoriteSortDraft = [];
+    state.status = 'Favorite order saved';
+    state.statusTone = 'success';
+    state.error = '';
+    render();
+  } catch (error) {
+    if (handleMissingSession(error, '')) {
+      return;
+    }
+    handleApiError(error);
+  }
+}
+
+async function moveFavoriteSession(sessionId, direction) {
+  if (state.favoriteSortMode) {
+    const draft = favoriteSortDraftIds();
+    const index = draft.indexOf(sessionId);
+    const offset = direction === 'up' ? -1 : direction === 'down' ? 1 : 0;
+    const targetIndex = index + offset;
+    if (index < 0 || offset === 0 || targetIndex < 0 || targetIndex >= draft.length) {
+      return;
+    }
+    const nextDraft = [...draft];
+    [nextDraft[index], nextDraft[targetIndex]] = [nextDraft[targetIndex], nextDraft[index]];
+    state.favoriteSortDraft = nextDraft;
+    render();
+    return;
   }
 }
 
@@ -1262,6 +1635,7 @@ async function streamTurnEvents(turnId, options = {}) {
     state.pendingTurn = false;
     state.status = 'Stream failed';
     state.statusTone = 'danger';
+    appendTimelineError(turnId, error?.payload?.message || error?.message || 'Stream failed');
     handleApiError(error);
   } finally {
     if (state.streamAbortController === controller) {
@@ -1303,7 +1677,9 @@ async function streamTurnEvents(turnId, options = {}) {
       state.lastTurnEventAt = Date.now();
       assistantEntry = applyTurnEvent(payload, assistantEntry);
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
+      state.error = message;
+      appendTimelineError(turnId, message);
     }
     resetFrame();
   }
@@ -1329,6 +1705,21 @@ async function onStopTurn() {
     await apiFetch(`/api/turns/${encodeURIComponent(state.turnId)}/interrupt`, { method: 'POST' });
     state.status = 'Interrupt requested';
     state.statusTone = 'warn';
+    render();
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+async function reloadRuntime() {
+  try {
+    state.status = 'Reloading runtime';
+    state.statusTone = 'warn';
+    render();
+    await apiFetch('/api/runtime/reload', { method: 'POST' });
+    state.status = 'Runtime reloaded';
+    state.statusTone = 'success';
+    state.error = '';
     render();
   } catch (error) {
     handleApiError(error);
@@ -1451,6 +1842,7 @@ function applyTurnEvent(event, assistantEntry) {
       state.turnId = null;
       stopStream();
       state.error = event.message || 'Turn failed';
+      appendTimelineError(event.turnId, state.error);
       setWorkStatus(event.turnId, 'failed');
       break;
   }
@@ -1514,7 +1906,7 @@ function upsertWorkBatch(turnId, batchId, patch) {
   }
   work.batches = batches;
   state.batches.set(batchId, next);
-  appendOrReplace(work, (item) => item.id === work.id);
+  appendOrReplace(work, (item) => item.id === work.id, { moveToEnd: true });
 }
 
 function upsertWorkApproval(turnId, approval) {
@@ -1533,7 +1925,7 @@ function upsertWorkApproval(turnId, approval) {
 function setWorkStatus(turnId, status) {
   const work = ensureWorkItem(turnId);
   work.status = status;
-  appendOrReplace(work, (item) => item.id === work.id);
+  appendOrReplace(work, (item) => item.id === work.id, { moveToEnd: true });
 }
 
 function resetTurnState() {
@@ -1624,14 +2016,18 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
   return null;
 }
 
-async function refreshSessionsList({ renderAfter = true } = {}) {
+async function refreshSessionsList({ renderAfter = true, scope = state.sortMode === 'favorites' ? 'favorites' : 'all' } = {}) {
   state.sessionsLoading = true;
   if (renderAfter) {
     render();
   }
   try {
-    const payload = await apiFetch('/api/sessions');
+    const payload = await apiFetch(scope === 'favorites' ? '/api/sessions?favorite=true' : '/api/sessions');
     state.sessions = normalizeSessions(payload);
+    state.sessionsScope = scope === 'favorites' ? 'favorites' : 'all';
+    if (state.favoriteSortMode) {
+      syncFavoriteSortDraft();
+    }
     syncCurrentSessionFromList();
     return state.sessions;
   } finally {
@@ -1640,6 +2036,24 @@ async function refreshSessionsList({ renderAfter = true } = {}) {
       render();
     }
   }
+}
+
+async function setSessionSortMode(mode) {
+  const nextMode = mode === 'time' ? 'time' : 'favorites';
+  if (nextMode !== 'favorites') {
+    state.favoriteSortMode = false;
+    state.favoriteSortDraft = [];
+  }
+  state.sortMode = nextMode;
+  if (nextMode === 'time' && state.sessionsScope !== 'all') {
+    await refreshSessionsList({ renderAfter: true, scope: 'all' });
+    return;
+  }
+  if (nextMode === 'favorites' && state.sessionsScope !== 'favorites') {
+    await refreshSessionsList({ renderAfter: true, scope: 'favorites' });
+    return;
+  }
+  render();
 }
 
 async function refreshCurrentView() {
@@ -1659,7 +2073,10 @@ async function refreshCurrentView() {
         streamTurnEvents(state.turnId, { forceReconnect: true });
       }
     } else {
-      await refreshSessionsList({ renderAfter: false });
+      await refreshSessionsList({
+        renderAfter: false,
+        scope: state.sortMode === 'favorites' ? 'favorites' : 'all',
+      });
       render();
     }
     if (!state.pendingTurn) {
@@ -1849,6 +2266,9 @@ function upsertSession(session) {
   }
   if (state.sessionId === next.id) {
     state.currentSession = next;
+  }
+  if (state.favoriteSortMode) {
+    syncFavoriteSortDraft();
   }
 }
 
@@ -2218,6 +2638,9 @@ function timelineRoleForThreadItem(item) {
 
 function sortedSessions() {
   const sessions = filteredSessions();
+  if (state.sortMode === 'favorites') {
+    return sortedFavoriteSessions();
+  }
   return sessions.sort((left, right) => lastInputAtForSession(right) - lastInputAtForSession(left));
 }
 
@@ -2226,6 +2649,83 @@ function filteredSessions() {
     return state.sessions.filter(isFavoriteSession);
   }
   return [...state.sessions];
+}
+
+function sortedFavoriteSessions() {
+  const favorites = state.sessions
+    .filter(isFavoriteSession)
+    .sort((left, right) => favoriteOrderForSession(left) - favoriteOrderForSession(right)
+      || lastInputAtForSession(right) - lastInputAtForSession(left));
+  if (!state.favoriteSortMode) {
+    return favorites;
+  }
+  const byId = new Map(favorites.map((session) => [session.id, session]));
+  const ordered = [];
+  const seen = new Set();
+  for (const id of state.favoriteSortDraft) {
+    const session = byId.get(id);
+    if (!session || seen.has(id)) {
+      continue;
+    }
+    ordered.push(session);
+    seen.add(id);
+  }
+  for (const session of favorites) {
+    if (!seen.has(session.id)) {
+      ordered.push(session);
+    }
+  }
+  return ordered;
+}
+
+function favoriteOrderForSession(session, fallback = Number.MAX_SAFE_INTEGER) {
+  const value = session?.favoriteOrder ?? session?.settings?.favoriteOrder ?? session?.settings?.metadata?.favoriteOrder;
+  return Number.isFinite(value) ? Number(value) : fallback;
+}
+
+function nextFavoriteOrder() {
+  const orders = state.sessions
+    .filter(isFavoriteSession)
+    .map((session, index) => favoriteOrderForSession(session, index + 1))
+    .filter(Number.isFinite);
+  return orders.length ? Math.max(...orders) + 1 : 1;
+}
+
+function favoriteSortDraftIds() {
+  syncFavoriteSortDraft();
+  return [...state.favoriteSortDraft];
+}
+
+function syncFavoriteSortDraft() {
+  if (!state.favoriteSortMode) {
+    return;
+  }
+  const favorites = state.sessions
+    .filter(isFavoriteSession)
+    .sort((left, right) => favoriteOrderForSession(left) - favoriteOrderForSession(right)
+      || lastInputAtForSession(right) - lastInputAtForSession(left));
+  const favoriteIds = new Set(favorites.map((session) => session.id));
+  const draft = state.favoriteSortDraft.filter((id) => favoriteIds.has(id));
+  for (const session of favorites) {
+    if (!draft.includes(session.id)) {
+      draft.push(session.id);
+    }
+  }
+  state.favoriteSortDraft = draft;
+}
+
+function applyFavoriteOrderLocally(sessionId, favoriteOrder) {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  if (!session) {
+    return;
+  }
+  session.favorite = true;
+  session.favoriteOrder = favoriteOrder;
+  session.settings = {
+    ...(session.settings || {}),
+    favorite: true,
+    favoriteOrder,
+  };
 }
 
 function uniqueSessionPaths() {
@@ -2248,7 +2748,7 @@ function projectNameForSession(session, fallbackCwd = '') {
 }
 
 function isFavoriteSession(session) {
-  return session?.favorite === true || session?.settings?.metadata?.favorite === true;
+  return session?.favorite === true || session?.settings?.favorite === true || session?.settings?.metadata?.favorite === true;
 }
 
 function projectNameFromCwd(cwd) {
@@ -2287,16 +2787,33 @@ function applyPermissionPreset(preset) {
   state.sandboxMode = 'workspace-write';
 }
 
+function applyDefaultThreadPermissionPreset(settings, preset) {
+  settings.accessPreset = preset;
+  if (preset === 'read-only') {
+    settings.approvalPolicy = 'never';
+    settings.sandboxMode = 'read-only';
+    return;
+  }
+  if (preset === 'full-access') {
+    settings.approvalPolicy = 'never';
+    settings.sandboxMode = 'danger-full-access';
+    return;
+  }
+  settings.approvalPolicy = 'on-request';
+  settings.sandboxMode = 'workspace-write';
+}
+
 function applyDefaultSettings() {
-  state.model = DEFAULT_MODEL;
-  state.reasoningEffort = DEFAULT_REASONING_EFFORT;
-  state.collaborationMode = DEFAULT_COLLABORATION_MODE;
-  applyPermissionPreset(DEFAULT_PERMISSION_PRESET);
+  const defaults = state.defaultThreadSettings || createDefaultThreadSettings();
+  state.model = defaults.model || DEFAULT_MODEL;
+  state.reasoningEffort = defaults.reasoningEffort || DEFAULT_REASONING_EFFORT;
+  state.collaborationMode = defaults.collaborationMode || DEFAULT_COLLABORATION_MODE;
+  applyPermissionPreset(defaults.accessPreset || DEFAULT_PERMISSION_PRESET);
 }
 
 function applySessionSettings(session) {
   const settings = session?.settings;
-  if (!settings || typeof settings !== 'object') {
+  if (!settings || typeof settings !== 'object' || settings.metadata?.codexWebDefaultsOnly === true || !hasSavedThreadSettings(settings)) {
     applyDefaultSettings();
     return;
   }
@@ -2319,6 +2836,80 @@ function applySessionSettings(session) {
   state.sandboxMode = typeof settings.sandboxMode === 'string' && settings.sandboxMode
     ? settings.sandboxMode
     : sandboxModeForPreset(preset);
+}
+
+function createDefaultThreadSettings() {
+  return {
+    model: DEFAULT_MODEL,
+    reasoningEffort: DEFAULT_REASONING_EFFORT,
+    collaborationMode: DEFAULT_COLLABORATION_MODE,
+    accessPreset: DEFAULT_PERMISSION_PRESET,
+    approvalPolicy: DEFAULT_APPROVAL_POLICY,
+    sandboxMode: DEFAULT_SANDBOX_MODE,
+    personality: 'pragmatic',
+  };
+}
+
+function hasSavedThreadSettings(settings) {
+  return ['model', 'reasoningEffort', 'collaborationMode', 'accessPreset', 'approvalPolicy', 'sandboxMode']
+    .some((key) => typeof settings[key] === 'string' && settings[key]);
+}
+
+function loadDefaultThreadSettings() {
+  try {
+    return normalizeThreadSettings(JSON.parse(localStorage.getItem(DEFAULT_THREAD_SETTINGS_KEY) || 'null'));
+  } catch (_error) {
+    return createDefaultThreadSettings();
+  }
+}
+
+function applyDefaultThreadSettings(patch = {}) {
+  const next = normalizeThreadSettings({
+    ...state.defaultThreadSettings,
+    ...patch,
+  });
+  if (typeof patch.accessPreset === 'string') {
+    applyDefaultThreadPermissionPreset(next, patch.accessPreset);
+  }
+  state.defaultThreadSettings = next;
+  localStorage.setItem(DEFAULT_THREAD_SETTINGS_KEY, JSON.stringify(next));
+  if (!state.sessionId) {
+    applyDefaultSettings();
+  }
+}
+
+function normalizeThreadSettings(value) {
+  const next = createDefaultThreadSettings();
+  if (!value || typeof value !== 'object') {
+    return next;
+  }
+  if (typeof value.model === 'string' && value.model) {
+    next.model = value.model;
+  }
+  if (['low', 'medium', 'high', 'xhigh'].includes(value.reasoningEffort)) {
+    next.reasoningEffort = value.reasoningEffort;
+  }
+  if (value.collaborationMode === 'plan' || value.collaborationMode === 'default') {
+    next.collaborationMode = value.collaborationMode;
+  }
+  const preset = ['read-only', 'default', 'full-access'].includes(value.accessPreset)
+    ? value.accessPreset
+    : DEFAULT_PERMISSION_PRESET;
+  applyDefaultThreadPermissionPreset(next, preset);
+  return next;
+}
+
+function applyTheme(theme, options = {}) {
+  const nextTheme = normalizeTheme(theme);
+  state.theme = nextTheme;
+  document.documentElement.dataset.theme = nextTheme;
+  if (options.persist !== false) {
+    localStorage.setItem(THEME_KEY, nextTheme);
+  }
+}
+
+function normalizeTheme(theme) {
+  return ['dark', 'light', 'sunny', 'forest'].includes(theme) ? theme : DEFAULT_THEME;
 }
 
 function permissionPresetFromSettings(settings) {
@@ -2379,10 +2970,28 @@ function appendMessage(entry) {
   state.timeline.push(entry);
 }
 
-function appendOrReplace(entry, matcher) {
+function appendTimelineError(turnId, message) {
+  const text = String(message || 'Turn failed');
+  const id = `error_${turnId || Date.now()}`;
+  appendOrReplace({
+    id,
+    kind: 'message',
+    role: 'system',
+    label: 'Error',
+    meta: 'failed',
+    text,
+  }, (item) => item.id === id);
+}
+
+function appendOrReplace(entry, matcher, options = {}) {
   const index = state.timeline.findIndex(matcher);
   if (index >= 0) {
-    state.timeline[index] = entry;
+    if (options.moveToEnd) {
+      state.timeline.splice(index, 1);
+      state.timeline.push(entry);
+    } else {
+      state.timeline[index] = entry;
+    }
   } else {
     state.timeline.push(entry);
   }
@@ -2527,6 +3136,7 @@ function onVisibilityChange() {
     return;
   }
   if (document.visibilityState === 'visible') {
+    void checkForAppUpdate();
     void recoverActiveTurnAfterForeground();
   }
 }
@@ -2535,7 +3145,35 @@ function onPageResume() {
   if (document.visibilityState === 'hidden') {
     return;
   }
+  void checkForAppUpdate();
   void recoverActiveTurnAfterForeground();
+}
+
+function setupAppVersionRefresh() {
+  if (!isStandalonePwa()) {
+    return;
+  }
+  window.addEventListener('load', () => {
+    void checkForAppUpdate();
+  });
+}
+
+async function checkForAppUpdate() {
+  if (!isStandalonePwa()) {
+    return;
+  }
+  try {
+    const response = await fetch(`/app.js?version-check=${Date.now()}`, { cache: 'no-store' });
+    if (!response.ok) {
+      return;
+    }
+    const text = await response.text();
+    const match = text.match(/const APP_BUILD_ID = ['"]([^'"]+)['"]/u);
+    if (match?.[1] && match[1] !== APP_BUILD_ID) {
+      window.location.reload();
+    }
+  } catch (_error) {
+  }
 }
 
 function isTurnStreamHealthy() {

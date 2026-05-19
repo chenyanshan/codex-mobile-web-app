@@ -25,6 +25,7 @@ function createRuntimeStub() {
     archiveSession: async () => true,
     updateSessionFavorite: async () => ({ id: 'thread_1', favorite: true }),
     updateSessionSettings: async () => ({ id: 'thread_1' }),
+    reloadRuntime: async () => ({ mcpServersReloaded: true }),
     startTurn: async () => ({ turnId: 'turn_1' }),
     interruptTurn: async () => {},
     resolveApproval: async () => {},
@@ -567,6 +568,43 @@ test('POST /api/sessions/:id/turns returns 404 without starting a replacement se
   }
 });
 
+test('POST /api/runtime/reload reloads the runtime for authenticated clients', async () => {
+  let reloadCalls = 0;
+  const server = createCodexWebServer({
+    auth: {
+      isConfigured: async () => true,
+      login: async () => ({ token: 'cw_token', session: { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }, configuredNow: false }),
+      verifyToken: async (token) => token === 'cw_token'
+        ? { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }
+        : null,
+      logout: async () => {},
+    },
+    runtime: {
+      ...createRuntimeStub(),
+      reloadRuntime: async () => {
+        reloadCalls += 1;
+        return { mcpServersReloaded: true };
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/runtime/reload`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer cw_token' },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      mcpServersReloaded: true,
+    });
+    assert.equal(reloadCalls, 1);
+  } finally {
+    await server.stop();
+  }
+});
+
 test('DELETE /api/sessions/:id archives a session', async () => {
   const calls: string[] = [];
   const server = createCodexWebServer({
@@ -601,8 +639,8 @@ test('DELETE /api/sessions/:id archives a session', async () => {
   }
 });
 
-test('PATCH /api/sessions/:id/favorite updates favorite state', async () => {
-  const calls: Array<{ sessionId: string; favorite: boolean }> = [];
+test('PATCH /api/sessions/:id/favorite updates favorite state and order', async () => {
+  const calls: Array<{ sessionId: string; favorite: boolean; favoriteOrder?: number | null }> = [];
   const server = createCodexWebServer({
     auth: {
       isConfigured: async () => true,
@@ -614,9 +652,9 @@ test('PATCH /api/sessions/:id/favorite updates favorite state', async () => {
     },
     runtime: {
       ...createRuntimeStub(),
-      updateSessionFavorite: async (sessionId: string, favorite: boolean) => {
-        calls.push({ sessionId, favorite });
-        return sessionId === 'thread_1' ? { id: sessionId, favorite } : null;
+      updateSessionFavorite: async (sessionId: string, favorite: boolean, favoriteOrder?: number | null) => {
+        calls.push({ sessionId, favorite, favoriteOrder });
+        return sessionId === 'thread_1' ? { id: sessionId, favorite, favoriteOrder } : null;
       },
     } as any,
     config: createConfig(),
@@ -629,13 +667,52 @@ test('PATCH /api/sessions/:id/favorite updates favorite state', async () => {
         Authorization: 'Bearer cw_token',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ favorite: true }),
+      body: JSON.stringify({ favorite: true, favoriteOrder: 3 }),
     });
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
-      session: { id: 'thread_1', favorite: true },
+      session: { id: 'thread_1', favorite: true, favoriteOrder: 3 },
     });
-    assert.deepEqual(calls, [{ sessionId: 'thread_1', favorite: true }]);
+    assert.deepEqual(calls, [{ sessionId: 'thread_1', favorite: true, favoriteOrder: 3 }]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('GET /api/sessions passes the favorite filter to the runtime', async () => {
+  const calls: Array<{ favorite?: boolean }> = [];
+  const server = createCodexWebServer({
+    auth: {
+      isConfigured: async () => true,
+      login: async () => ({ token: 'cw_token', session: { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }, configuredNow: false }),
+      verifyToken: async (token) => token === 'cw_token'
+        ? { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }
+        : null,
+      logout: async () => {},
+    },
+    runtime: {
+      ...createRuntimeStub(),
+      listSessions: async (options?: { favorite?: boolean }) => {
+        calls.push(options ?? {});
+        return [{ id: options?.favorite ? 'favorite_thread' : 'thread_1', favorite: options?.favorite === true }];
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const favoritesResponse = await fetch(`${server.baseUrl}/api/sessions?favorite=true`, {
+      headers: { Authorization: 'Bearer cw_token' },
+    });
+    assert.equal(favoritesResponse.status, 200);
+    assert.equal((await favoritesResponse.json()).items[0].id, 'favorite_thread');
+
+    const allResponse = await fetch(`${server.baseUrl}/api/sessions`, {
+      headers: { Authorization: 'Bearer cw_token' },
+    });
+    assert.equal(allResponse.status, 200);
+    assert.equal((await allResponse.json()).items[0].id, 'thread_1');
+    assert.deepEqual(calls, [{ favorite: true }, {}]);
   } finally {
     await server.stop();
   }

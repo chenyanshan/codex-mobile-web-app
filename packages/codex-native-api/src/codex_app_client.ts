@@ -31,6 +31,8 @@ import type {
   ProviderThreadSummary,
   ProviderTurnProgress,
   ProviderTurnResult,
+  ProviderTurnWorkEvent,
+  ProviderTurnWorkEventKind,
 } from './provider.js';
 
 const APP_SERVER_CONNECT_TIMEOUT_MS = 20_000;
@@ -612,6 +614,7 @@ export class CodexAppClient extends EventEmitter {
     collaborationMode = 'default',
     developerInstructions = '',
     onProgress = null,
+    onWorkEvent = null,
     onTurnStarted = null,
     onApprovalRequest = null,
     timeoutMs = 15 * 60 * 1000,
@@ -629,6 +632,7 @@ export class CodexAppClient extends EventEmitter {
     collaborationMode?: string;
     developerInstructions?: string;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
     timeoutMs?: number;
@@ -699,6 +703,7 @@ export class CodexAppClient extends EventEmitter {
       threadId,
       turnId: String(turn.id),
       onProgress,
+      onWorkEvent,
       onApprovalRequest,
       timeoutMs,
     });
@@ -1132,7 +1137,6 @@ export class CodexAppClient extends EventEmitter {
           'codex/event/agent_reasoning_delta',
           'codex/event/reasoning_content_delta',
           'codex/event/reasoning_raw_content_delta',
-          'codex/event/exec_command_output_delta',
         ],
       },
     }, { timeoutMs: 30_000 });
@@ -1457,12 +1461,14 @@ export class CodexAppClient extends EventEmitter {
     threadId,
     turnId,
     onProgress,
+    onWorkEvent,
     onApprovalRequest,
     timeoutMs,
   }: {
     threadId: string;
     turnId: string;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
     timeoutMs: number;
   }): Promise<ProviderTurnResult> {
@@ -1487,6 +1493,10 @@ export class CodexAppClient extends EventEmitter {
     const onNotification = (notification) => {
       if (isTerminalNotificationForThread(notification, threadId, turnId)) {
         sawTerminalNotification = true;
+      }
+      const workEvent = extractWorkEventUpdate(notification, { threadId, turnId });
+      if (workEvent && typeof onWorkEvent === 'function') {
+        void onWorkEvent(workEvent);
       }
       const progress = extractProgressUpdate(notification, turnId, itemOutputKinds, progressState);
       if (!progress) {
@@ -3954,6 +3964,432 @@ function extractProgressUpdate(notification, turnId, itemOutputKinds, progressSt
   return buildProgressUpdate(currentText, `${currentText}${delta}`, outputKind);
 }
 
+function extractWorkEventUpdate(
+  notification,
+  {
+    threadId,
+    turnId,
+  }: {
+    threadId: string;
+    turnId: string;
+  },
+): ProviderTurnWorkEvent | null {
+  if (!notification || typeof notification.method !== 'string') {
+    return null;
+  }
+  const params = notification.params ?? {};
+  const notificationTurnId = extractNotificationTurnId(params);
+  if (notificationTurnId && notificationTurnId !== turnId) {
+    return null;
+  }
+  if (!notificationTurnId) {
+    const notificationThreadId = extractThreadIdFromNotification(notification);
+    if (notificationThreadId && notificationThreadId !== threadId) {
+      return null;
+    }
+    if (!notificationThreadId) {
+      return null;
+    }
+  }
+  if (isAssistantVisibleItem(params?.item ?? params) || isUserVisibleItem(params?.item ?? params)) {
+    return null;
+  }
+  const method = notification.method;
+  if (method === 'item/started' || method === 'item/completed') {
+    const item = params?.item ?? params;
+    if (isAssistantVisibleItem(item) || isUserVisibleItem(item)) {
+      return null;
+    }
+    const itemId = extractItemId(item) ?? extractItemId(params);
+    if (!itemId) {
+      return null;
+    }
+    const summary = buildWorkSummary(item, params);
+    const kind = classifyWorkEventKind(item, params);
+    if (kind === 'unknown' && Object.keys(summary).length === 0) {
+      return null;
+    }
+    return {
+      type: method === 'item/started' ? 'started' : 'completed',
+      itemId,
+      kind,
+      title: buildWorkTitle(kind, item, summary),
+      status: normalizeNullableString(item?.status ?? params?.status),
+      summary,
+      raw: notification,
+    };
+  }
+  if (method === 'codex/event/exec_command_output_delta') {
+    const itemId = extractItemId(params);
+    const delta = extractNotificationDelta(params)
+      ?? normalizeNullableString(params?.chunk)
+      ?? normalizeNullableString(params?.output);
+    if (!itemId || !delta) {
+      return null;
+    }
+    return {
+      type: 'updated',
+      itemId,
+      kind: 'command',
+      summary: { output: delta },
+      raw: notification,
+    };
+  }
+  return null;
+}
+
+function classifyWorkEventKind(item, params): ProviderTurnWorkEventKind {
+  const toolName = extractToolName(item) ?? extractToolName(params);
+  const parsedToolArguments = parseToolArguments(item) ?? parseToolArguments(params);
+  const typeText = [
+    item?.type,
+    item?.kind,
+    item?.name,
+    item?.toolName,
+    item?.tool_name,
+    params?.type,
+    params?.kind,
+    params?.method,
+  ]
+    .map((entry) => String(entry ?? ''))
+    .join(' ')
+    .toLowerCase();
+  if (
+    isCommandToolName(toolName)
+    || typeText.includes('command')
+    || typeText.includes('exec')
+    || typeText.includes('shell')
+    || hasAnyOwnProperty(item, ['command', 'cmd', 'args', 'argv'])
+    || hasAnyOwnProperty(params, ['command', 'cmd'])
+    || hasAnyOwnProperty(parsedToolArguments, ['command', 'cmd', 'args', 'argv'])
+  ) {
+    return 'command';
+  }
+  if (
+    isFileChangeToolName(toolName)
+    || typeText.includes('file')
+    || typeText.includes('patch')
+    || typeText.includes('diff')
+    || hasAnyOwnProperty(item, ['fileChanges', 'file_changes', 'changes', 'diff', 'patch', 'path'])
+    || hasAnyOwnProperty(params, ['fileChanges', 'file_changes', 'changes', 'diff', 'patch', 'path'])
+    || hasAnyOwnProperty(parsedToolArguments, ['fileChanges', 'file_changes', 'changes', 'diff', 'patch', 'path'])
+    || extractPatchText(item)
+    || extractPatchText(params)
+  ) {
+    return 'file_change';
+  }
+  if (typeText.includes('permission') || typeText.includes('approval')) {
+    return 'permission';
+  }
+  return 'unknown';
+}
+
+function buildWorkSummary(item, params): Record<string, unknown> {
+  const summary: Record<string, unknown> = {};
+  const itemArguments = parseToolArguments(item);
+  const paramsArguments = parseToolArguments(params);
+  const command = extractCommandValue(item)
+    ?? extractCommandValue(params)
+    ?? extractCommandValue(itemArguments)
+    ?? extractCommandValue(paramsArguments);
+  if (command) {
+    summary.command = command;
+  }
+  const cwd = normalizeNullableString(
+    item?.cwd
+      ?? item?.workingDirectory
+      ?? item?.working_directory
+      ?? params?.cwd
+      ?? itemArguments?.cwd
+      ?? itemArguments?.workdir
+      ?? itemArguments?.workingDirectory
+      ?? itemArguments?.working_directory
+      ?? paramsArguments?.cwd
+      ?? paramsArguments?.workdir
+      ?? paramsArguments?.workingDirectory
+      ?? paramsArguments?.working_directory,
+  );
+  if (cwd) {
+    summary.cwd = cwd;
+  }
+  const output = extractWorkOutputValue(item)
+    ?? extractWorkOutputValue(params)
+    ?? extractWorkOutputValue(itemArguments)
+    ?? extractWorkOutputValue(paramsArguments);
+  if (output) {
+    summary.output = output;
+  }
+  const exitCode = extractNumericValue(item, ['exitCode', 'exit_code', 'code'])
+    ?? extractNumericValue(params, ['exitCode', 'exit_code', 'code'])
+    ?? extractNumericValue(itemArguments, ['exitCode', 'exit_code', 'code'])
+    ?? extractNumericValue(paramsArguments, ['exitCode', 'exit_code', 'code']);
+  if (exitCode !== null) {
+    summary.exitCode = exitCode;
+  }
+  const patchText = extractPatchText(item) ?? extractPatchText(params) ?? extractPatchText(itemArguments) ?? extractPatchText(paramsArguments);
+  const fileChanges = firstNonEmptyFileChanges([
+    extractFileChangesValue(item),
+    extractFileChangesValue(params),
+    extractFileChangesValue(itemArguments),
+    extractFileChangesValue(paramsArguments),
+    extractFileChangesFromPatch(patchText),
+  ]);
+  if (fileChanges.length) {
+    summary.fileChanges = fileChanges;
+  }
+  const diff = normalizeNullableString(item?.diff ?? item?.patch ?? params?.diff ?? params?.patch ?? itemArguments?.diff ?? itemArguments?.patch ?? paramsArguments?.diff ?? paramsArguments?.patch ?? patchText);
+  if (diff) {
+    summary.diff = diff;
+  }
+  const pathValue = normalizeNullableString(item?.path ?? item?.file ?? params?.path ?? params?.file ?? itemArguments?.path ?? itemArguments?.file ?? paramsArguments?.path ?? paramsArguments?.file);
+  if (pathValue) {
+    summary.path = pathValue;
+  }
+  const status = normalizeNullableString(item?.status ?? params?.status);
+  if (status) {
+    summary.status = status;
+  }
+  const error = extractStructuredString(item?.error ?? params?.error);
+  if (error) {
+    summary.error = error;
+  }
+  return summary;
+}
+
+function buildWorkTitle(
+  kind: ProviderTurnWorkEventKind,
+  item,
+  summary: Record<string, unknown>,
+): string {
+  const explicit = normalizeNullableString(item?.title ?? item?.name ?? item?.label);
+  if (explicit) {
+    return explicit;
+  }
+  if (kind === 'command' && typeof summary.command === 'string' && summary.command.trim()) {
+    return summary.command;
+  }
+  if (kind === 'file_change') {
+    const changes = Array.isArray(summary.fileChanges) ? summary.fileChanges : [];
+    if (changes.length === 1) {
+      const pathValue = normalizeNullableString((changes[0] as any)?.path);
+      if (pathValue) {
+        return `Edited ${pathValue}`;
+      }
+    }
+    if (changes.length > 1) {
+      return `Edited ${changes.length} files`;
+    }
+    if (typeof summary.path === 'string' && summary.path.trim()) {
+      return `Edited ${summary.path}`;
+    }
+  }
+  if (kind === 'permission') {
+    return 'Permission request';
+  }
+  return 'Tool activity';
+}
+
+function extractCommandValue(value): string | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  if (Array.isArray(value?.command)) {
+    const command = value.command.map((entry) => String(entry ?? '').trim()).filter(Boolean).join(' ');
+    return command || null;
+  }
+  if (Array.isArray(value?.cmd)) {
+    const command = value.cmd.map((entry) => String(entry ?? '').trim()).filter(Boolean).join(' ');
+    return command || null;
+  }
+  if (Array.isArray(value?.args) && typeof value?.cmd === 'string') {
+    const command = [value.cmd, ...value.args].map((entry) => String(entry ?? '').trim()).filter(Boolean).join(' ');
+    return command || null;
+  }
+  return normalizeNullableString(value?.command ?? value?.cmd);
+}
+
+function extractToolName(value): string | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  return normalizeNullableString(value?.name ?? value?.toolName ?? value?.tool_name ?? value?.item?.name ?? value?.item?.toolName ?? value?.item?.tool_name);
+}
+
+function isCommandToolName(value: string | null): boolean {
+  const normalized = normalizeToolName(value);
+  return normalized === 'execcommand'
+    || normalized === 'exec'
+    || normalized === 'shell'
+    || normalized === 'bash'
+    || normalized === 'command';
+}
+
+function isFileChangeToolName(value: string | null): boolean {
+  const normalized = normalizeToolName(value);
+  return normalized === 'applypatch'
+    || normalized === 'patch'
+    || normalized === 'edit'
+    || normalized === 'filechange'
+    || normalized === 'writefile';
+}
+
+function normalizeToolName(value: string | null): string {
+  return String(value ?? '').replace(/[^a-z]/giu, '').toLowerCase();
+}
+
+function parseToolArguments(value): any | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const raw = value?.arguments ?? value?.args_json ?? value?.argumentsJson ?? value?.item?.arguments;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw;
+  }
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractPatchText(value): string | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const direct = normalizeNullableString(value?.patch ?? value?.diff ?? value?.changeset ?? value?.item?.patch ?? value?.item?.diff);
+  if (direct) {
+    return direct;
+  }
+  const rawArguments = value?.arguments ?? value?.item?.arguments;
+  if (typeof rawArguments === 'string' && rawArguments.includes('*** Begin Patch')) {
+    return rawArguments;
+  }
+  return null;
+}
+
+function firstNonEmptyFileChanges(groups: Array<Array<Record<string, unknown>>>): Array<Record<string, unknown>> {
+  for (const group of groups) {
+    if (Array.isArray(group) && group.length > 0) {
+      return group;
+    }
+  }
+  return [];
+}
+
+function extractFileChangesFromPatch(value: string | null): Array<Record<string, unknown>> {
+  if (!value) {
+    return [];
+  }
+  const changes = new Map<string, Record<string, unknown>>();
+  for (const line of value.split(/\r?\n/u)) {
+    const match = line.match(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/u);
+    if (!match) {
+      continue;
+    }
+    const pathValue = match[1]?.trim();
+    if (!pathValue) {
+      continue;
+    }
+    const action = line.startsWith('*** Add File:')
+      ? 'added'
+      : line.startsWith('*** Delete File:')
+        ? 'deleted'
+        : 'modified';
+    changes.set(pathValue, { path: pathValue, action });
+  }
+  return [...changes.values()];
+}
+
+function extractWorkOutputValue(value): string | null {
+  const direct = normalizeNullableString(
+    value?.output
+      ?? value?.stdout
+      ?? value?.stderr
+      ?? value?.text
+      ?? value?.content
+      ?? value?.result?.output,
+  );
+  if (direct) {
+    return direct;
+  }
+  if (Array.isArray(value?.outputs)) {
+    const output = value.outputs
+      .map((entry) => extractStructuredString(entry))
+      .filter(Boolean)
+      .join('\n');
+    return output || null;
+  }
+  return null;
+}
+
+function extractFileChangesValue(value): Array<Record<string, unknown>> {
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+  const raw = value?.fileChanges ?? value?.file_changes ?? value?.changes ?? value?.files;
+  if (Array.isArray(raw)) {
+    return raw.map(normalizeFileChange).filter(Boolean) as Array<Record<string, unknown>>;
+  }
+  if (raw && typeof raw === 'object') {
+    return Object.entries(raw)
+      .map(([pathValue, change]) => normalizeFileChange({ path: pathValue, ...(change && typeof change === 'object' ? change : {}) }))
+      .filter(Boolean) as Array<Record<string, unknown>>;
+  }
+  const pathValue = normalizeNullableString(value?.path ?? value?.file);
+  if (!pathValue) {
+    return [];
+  }
+  return [normalizeFileChange(value) ?? { path: pathValue }];
+}
+
+function normalizeFileChange(value): Record<string, unknown> | null {
+  if (typeof value === 'string') {
+    return { path: value };
+  }
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const pathValue = normalizeNullableString(value?.path ?? value?.file ?? value?.target ?? value?.source);
+  if (!pathValue) {
+    return null;
+  }
+  const change: Record<string, unknown> = { path: pathValue };
+  const action = normalizeNullableString(value?.action ?? value?.type ?? value?.status);
+  if (action) {
+    change.action = action;
+  }
+  const additions = extractNumericValue(value, ['additions', 'added', 'linesAdded']);
+  if (additions !== null) {
+    change.additions = additions;
+  }
+  const deletions = extractNumericValue(value, ['deletions', 'deleted', 'linesDeleted']);
+  if (deletions !== null) {
+    change.deletions = deletions;
+  }
+  return change;
+}
+
+function extractNumericValue(value, keys: string[]): number | null {
+  for (const key of keys) {
+    const candidate = value?.[key];
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return candidate;
+    }
+    if (typeof candidate === 'string' && candidate.trim() && Number.isFinite(Number(candidate))) {
+      return Number(candidate);
+    }
+  }
+  return null;
+}
+
+function hasAnyOwnProperty(value, keys: string[]): boolean {
+  return Boolean(value && typeof value === 'object' && keys.some((key) => Object.prototype.hasOwnProperty.call(value, key)));
+}
+
 function extractNotificationTurnId(params) {
   const direct = typeof params?.turnId === 'string' ? params.turnId : null;
   if (direct) {
@@ -4068,7 +4504,16 @@ function isAgentDeltaNotificationMethod(method) {
 }
 
 function extractItemId(value) {
-  const candidates = [value?.itemId, value?.item_id, value?.id, value?.item?.id];
+  const candidates = [
+    value?.itemId,
+    value?.item_id,
+    value?.id,
+    value?.call_id,
+    value?.callId,
+    value?.item?.id,
+    value?.item?.call_id,
+    value?.item?.callId,
+  ];
   for (const candidate of candidates) {
     if (candidate !== null && candidate !== undefined && String(candidate).trim()) {
       return String(candidate);

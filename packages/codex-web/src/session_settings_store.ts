@@ -4,10 +4,12 @@ import type { ProviderTurnSessionSettings } from '@codex-mobile-web-app/codex-na
 
 export type CodexWebStoredSessionSettings = ProviderTurnSessionSettings & {
   favorite?: boolean;
+  favoriteOrder?: number | null;
 };
 
 export interface CodexWebSessionSettingsStore {
   get(sessionId: string): CodexWebStoredSessionSettings | null;
+  list?(): Array<[string, CodexWebStoredSessionSettings]>;
   set(sessionId: string, settings: CodexWebStoredSessionSettings): void;
   delete(sessionId: string): void;
 }
@@ -28,6 +30,12 @@ export class FileSessionSettingsStore implements CodexWebSessionSettingsStore {
 
   get(sessionId: string): CodexWebStoredSessionSettings | null {
     return normalizeSettings(sessionId, this.read().sessions[sessionId]);
+  }
+
+  list(): Array<[string, CodexWebStoredSessionSettings]> {
+    return Object.entries(this.read().sessions)
+      .map(([sessionId, settings]) => [sessionId, normalizeSettings(sessionId, settings)] as const)
+      .filter((entry): entry is [string, CodexWebStoredSessionSettings] => Boolean(entry[1]));
   }
 
   set(sessionId: string, settings: CodexWebStoredSessionSettings): void {
@@ -93,6 +101,7 @@ function normalizeSettings(
     metadata: isRecord(value.metadata) ? value.metadata : {},
     updatedAt: Number.isFinite(value.updatedAt) ? Number(value.updatedAt) : Date.now(),
     favorite: value.favorite === true,
+    favoriteOrder: Number.isFinite(value.favoriteOrder) ? Number(value.favoriteOrder) : null,
   };
 }
 
