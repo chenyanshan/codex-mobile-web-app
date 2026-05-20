@@ -28,11 +28,13 @@ test('README files point AI installers to install.md and include PWA setup guida
 
   assert.match(readme, /install\.md/u);
   assert.match(readme, /AI install/i);
+  assert.match(readme, /Help me install https:\/\/github\.com\/chenyanshan\/codex-mobile-web-app\/blob\/main\/README\.md/u);
   assert.match(readme, /Add to Home Screen/u);
   assert.match(readme, /Android/u);
 
   assert.match(readmeZh, /install\.md/u);
   assert.match(readmeZh, /AI 安装/u);
+  assert.match(readmeZh, /帮我安装 https:\/\/github\.com\/chenyanshan\/codex-mobile-web-app\/blob\/main\/README\.md/u);
   assert.match(readmeZh, /添加到主屏幕/u);
   assert.match(readmeZh, /Android/u);
 });

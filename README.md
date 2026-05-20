@@ -46,6 +46,10 @@ GitHub blob links and local checkouts.
 
 Expected agent behavior:
 
+- The user can say this directly in a Codex chat:
+  `Help me install https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
+- The user can also say:
+  `Help me install this project`
 - If the user shares a GitHub `README.md` or `install.md` blob link, derive the
   repo root and follow `install.md`.
 - If the user says "help me install this project" from inside a local checkout,
@@ -87,6 +91,15 @@ scripts/install/install-codex-web-macos.sh
 The installer script handles dependency install, password setup, service start,
 and optional launchd autostart. The detailed AI-oriented flow lives in
 [`install.md`](install.md).
+
+Typical Codex chat flow:
+
+1. The user says `Help me install https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
+2. Codex resolves the repo root and reads `install.md`
+3. Codex asks for:
+   the password
+   whether launchd autostart should be installed
+4. Codex runs the installer script on macOS
 
 ## Install The Report Skill
 

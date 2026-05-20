@@ -46,6 +46,10 @@ docs/assets/codex-web-reference.jpg
 
 约定的 agent 行为：
 
+- 用户可以直接在 Codex 对话里说：
+  `帮我安装 https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
+- 也可以直接说：
+  `帮我安装这个项目`
 - 如果用户发来 GitHub 的 `README.md` 或 `install.md` blob 链接，先还原仓库
   根目录，再执行 `install.md`。
 - 如果用户在本地 checkout 里说“帮我安装这个项目”，先定位仓库根目录，再执行
@@ -84,6 +88,15 @@ scripts/install/install-codex-web-macos.sh
 
 这个脚本会处理依赖安装、密码设置、服务启动，以及可选的 launchd 自启动安装。
 面向 AI 的完整流程说明写在 [`install.md`](install.md)。
+
+典型的 Codex 对话安装流程：
+
+1. 用户说：`帮我安装 https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
+2. Codex 自动还原仓库根目录并读取 `install.md`
+3. Codex 继续问两个问题：
+   密码是什么
+   要不要安装 launchd 开机自启动
+4. Codex 在 macOS 上执行安装脚本
 
 ## 安装报告 Skill
 
