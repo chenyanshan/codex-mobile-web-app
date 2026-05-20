@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'codex-web-static-2026-05-20-chat-render-bottom-v29';
+const STATIC_CACHE = 'codex-web-static-2026-05-20-first-turn-recovery-v30';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

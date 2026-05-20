@@ -35,7 +35,7 @@ test('mobile UI exposes iOS PWA install metadata and registers a service worker'
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.type), ['image/png', 'image/png']);
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.sizes), ['192x192', '512x512']);
   assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
-  assert.match(serviceWorker, /codex-web-static-2026-05-20-chat-render-bottom-v29/u);
+  assert.match(serviceWorker, /codex-web-static-2026-05-20-first-turn-recovery-v30/u);
   assert.match(serviceWorker, /'\/icon-192\.png'/u);
   assert.match(serviceWorker, /'\/icon-512\.png'/u);
   assert.match(serviceWorker, /'\/apple-touch-icon\.png'/u);
@@ -1671,6 +1671,207 @@ test('composer API failures render a visible timeline error', async () => {
   assert.match(errorItem?.text || '', /Codex refused the first turn/u);
 });
 
+test('new first-turn rollout errors wait before showing a timeline error', async () => {
+  const fetchCalls = [];
+  const timers = [];
+  const { api } = await loadAppHarness({
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            session: {
+              id: 'session_new',
+              cwd: '/repo',
+              settings: {},
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_new/turns') {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            error: 'internal_error',
+            message: 'failed to read thread: thread-store internal error: rollout at /Users/test/.codex/sessions/rollout.jsonl is empty',
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ session: { id: 'session_new', cwd: '/repo', thread: { turns: [] } } }) };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.cwd = '/repo';
+  api.state.prompt = 'hello';
+
+  await api.onComposerSubmit({ preventDefault() {} });
+
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0]?.delay, 10_000);
+  assert.equal(api.state.pendingTurn, true);
+  assert.equal(api.state.timeline.some((item) => item.id.startsWith('error_')), false);
+  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_new/turns']);
+});
+
+test('new first-turn rollout errors recover from refreshed session history before reporting', async () => {
+  const timers = [];
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            session: {
+              id: 'session_new',
+              cwd: '/repo',
+              settings: {},
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_new/turns') {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            error: 'internal_error',
+            message: 'failed to read thread: thread-store internal error: rollout at /Users/test/.codex/sessions/rollout.jsonl is empty',
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_new') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_new',
+              cwd: '/repo',
+              settings: {},
+              thread: {
+                turns: [{
+                  id: 'turn_recovered',
+                  status: 'completed',
+                  items: [
+                    { type: 'message', role: 'user', text: 'hello' },
+                    { type: 'message', role: 'assistant', text: 'Recovered answer' },
+                  ],
+                }],
+              },
+            },
+          }),
+        };
+      }
+      return { ok: true, status: 204, json: async () => ({}) };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.cwd = '/repo';
+  api.state.prompt = 'hello';
+
+  await api.onComposerSubmit({ preventDefault() {} });
+  timers[0].callback();
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_new/turns', '/api/sessions/session_new']);
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.status, 'Ready');
+  assert.equal(api.state.timeline.some((item) => item.id.startsWith('error_')), false);
+  assert.equal(api.state.timeline.some((item) => item.role === 'assistant' && item.text === 'Recovered answer'), true);
+});
+
+test('new first-turn rollout errors report after the recovery delay when history is still empty', async () => {
+  const timers = [];
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            session: {
+              id: 'session_new',
+              cwd: '/repo',
+              settings: {},
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_new/turns') {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            error: 'internal_error',
+            message: 'failed to read thread: thread-store internal error: rollout at /Users/test/.codex/sessions/rollout.jsonl is empty',
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_new') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_new',
+              cwd: '/repo',
+              settings: {},
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      return { ok: true, status: 204, json: async () => ({}) };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.cwd = '/repo';
+  api.state.prompt = 'hello';
+
+  await api.onComposerSubmit({ preventDefault() {} });
+  timers[0].callback();
+  await flushMicrotasks();
+
+  const errorItem = api.state.timeline.find((item) => item.id.startsWith('error_'));
+  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_new/turns', '/api/sessions/session_new']);
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(errorItem?.kind, 'message');
+  assert.equal(errorItem?.role, 'system');
+  assert.match(errorItem?.text || '', /rollout.*is empty/u);
+});
+
 test('approval requests still render as standalone actionable cards without work timeline items', async () => {
   const { api } = await loadAppHarness();
 
@@ -2973,6 +3174,124 @@ test('PWA foreground recovery refreshes session history and reconnects unhealthy
   assert.match(app, /after=\$\{encodeURIComponent\(String\(state\.lastTurnEventSequence\)\)\}/u);
 });
 
+test('foreground recovery keeps the latest chat message visible after browser resume resets scroll to top', async () => {
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Question from phone' },
+                      { type: 'message', role: 'assistant', text: 'Latest answer from history' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [
+    { id: 'm1', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Question from phone' },
+    { id: 'm2', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Latest answer from history' },
+  ];
+  api.render();
+
+  const timeline = context.document.querySelector('#timeline');
+  timeline.scrollHeight = 1200;
+  timeline.clientHeight = 400;
+  timeline.scrollTop = 800;
+  api.updateTimelineFollowState();
+
+  context.document.visibilityState = 'hidden';
+  context.onVisibilityChange();
+
+  timeline.scrollTop = 0;
+  context.document.visibilityState = 'visible';
+  await context.recoverActiveTurnAfterForeground();
+
+  const restoredTimeline = context.document.querySelector('#timeline');
+  assert.equal(api.state.timelineShouldFollowLatest, true);
+  assert.equal(restoredTimeline.scrollTop, restoredTimeline.scrollHeight);
+});
+
+test('foreground recovery keeps the latest chat message visible even when hidden lifecycle was skipped', async () => {
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Question from phone' },
+                      { type: 'message', role: 'assistant', text: 'Latest answer from history' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [
+    { id: 'm1', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Question from phone' },
+    { id: 'm2', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Latest answer from history' },
+  ];
+  api.render();
+
+  const timeline = context.document.querySelector('#timeline');
+  timeline.scrollHeight = 1200;
+  timeline.clientHeight = 400;
+  timeline.scrollTop = 800;
+  api.updateTimelineFollowState();
+
+  timeline.scrollTop = 0;
+  await context.recoverActiveTurnAfterForeground();
+
+  const restoredTimeline = context.document.querySelector('#timeline');
+  assert.equal(api.state.timelineShouldFollowLatest, true);
+  assert.equal(restoredTimeline.scrollTop, restoredTimeline.scrollHeight);
+});
+
 test('PWA stream network failures keep the active turn recoverable when visibility stays visible', async () => {
   const { api } = await loadAppHarness({
     fetch: async () => {
@@ -3313,6 +3632,8 @@ async function loadAppHarness(overrides = {}) {
     requestAnimationFrame: (callback) => {
       callback();
     },
+    setTimeout: overrides.setTimeout || setTimeout,
+    clearTimeout: overrides.clearTimeout || clearTimeout,
     fetch: overrides.fetch || (async () => ({ ok: true, status: 204 })),
     TextDecoder,
     AbortController,

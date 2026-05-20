@@ -384,6 +384,20 @@ export class CodexWebRuntime {
       resolveStarted = resolve;
       rejectStarted = reject;
     });
+    const markTurnStarted = (turnId: string, raw: unknown): boolean => {
+      if (!turnId || startedTurnId) {
+        return false;
+      }
+      startedTurnId = turnId;
+      this.turnToThread.set(turnId, sessionId);
+      this.append(turnId, normalizeTurnStartedEvent({
+        turnId,
+        threadId: sessionId,
+        raw,
+      }));
+      resolveStarted?.({ turnId });
+      return true;
+    };
     const runPromise = this.client.startTurn({
       threadId: sessionId,
       inputText: input.text,
@@ -397,17 +411,7 @@ export class CodexWebRuntime {
       collaborationMode: settings.collaborationMode ?? 'default',
       onTurnStarted: async (meta) => {
         const turnId = String(meta.turnId ?? '');
-        if (!turnId) {
-          return;
-        }
-        startedTurnId = turnId;
-        this.turnToThread.set(turnId, sessionId);
-        this.append(turnId, normalizeTurnStartedEvent({
-          turnId,
-          threadId: sessionId,
-          raw: meta,
-        }));
-        resolveStarted?.({ turnId });
+        markTurnStarted(turnId, meta);
       },
       onProgress: async (progress) => {
         if (!startedTurnId) {
@@ -450,6 +454,8 @@ export class CodexWebRuntime {
         this.append(turnId, normalizeApprovalEvent({ turnId, request }));
       },
     }).then((result) => {
+      const resultTurnId = String(result.turnId ?? '');
+      markTurnStarted(resultTurnId, result);
       if (!startedTurnId) {
         throw new Error('Turn started without turn id');
       }

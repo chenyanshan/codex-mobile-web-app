@@ -38,6 +38,21 @@ docs/superpowers/specs/2026-05-19-codex-mobile-reports-design.md
 docs/assets/codex-web-reference.jpg
 ```
 
+## AI 安装入口
+
+如果你希望让 Codex 或其他 agent 直接安装这个项目，请使用仓库根目录的
+[`install.md`](install.md)。它是 GitHub blob 链接和本地项目两种场景下的
+统一 AI 安装入口。
+
+约定的 agent 行为：
+
+- 如果用户发来 GitHub 的 `README.md` 或 `install.md` blob 链接，先还原仓库
+  根目录，再执行 `install.md`。
+- 如果用户在本地 checkout 里说“帮我安装这个项目”，先定位仓库根目录，再执行
+  `install.md`。
+- macOS 自动安装流需要先询问密码，以及是否安装为 launchd 开机自启动服务。
+- Windows 直接停止自动安装，并说明当前仓库没有提供 Windows 安装器。
+
 ## 环境要求
 
 - Node.js `>=24`
@@ -57,6 +72,18 @@ npm install
 npm run typecheck
 npm test
 ```
+
+## macOS 自动安装
+
+给 AI 使用的安装入口：
+
+```text
+install.md
+scripts/install/install-codex-web-macos.sh
+```
+
+这个脚本会处理依赖安装、密码设置、服务启动，以及可选的 launchd 自启动安装。
+面向 AI 的完整流程说明写在 [`install.md`](install.md)。
 
 ## 安装报告 Skill
 
@@ -240,6 +267,26 @@ journalctl --user -u codex-web.service -f
 
 如果 Linux 防火墙阻止局域网访问，放行 TCP `43210` 端口，或在
 `~/.config/codex-web/service.env` 中修改 `CODEX_WEB_PORT`。
+
+## 作为 PWA 安装到手机
+
+服务启动后，先用手机浏览器打开 Codex Web，并在该设备上完成一次登录。
+
+iPhone / iPad：
+
+1. 用 Safari 打开应用。
+2. 点击 `分享`。
+3. 点击 `添加到主屏幕`。
+4. 从主屏幕图标启动应用。
+
+Android：
+
+1. 用 Chrome 打开应用。
+2. 打开浏览器菜单。
+3. 点击 `Install app` 或 `Add to Home screen`。
+4. 从桌面或应用启动器打开安装后的快捷方式。
+
+更完整的手机安装说明见 [`docs/pwa-setup.md`](docs/pwa-setup.md)。
 
 ## 产品方向
 

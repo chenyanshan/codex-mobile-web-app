@@ -38,6 +38,23 @@ Visual reference:
 docs/assets/codex-web-reference.jpg
 ```
 
+## AI Install
+
+If you want Codex or another agent to install this project for you, use the
+root [`install.md`](install.md). That file is the AI install entrypoint for both
+GitHub blob links and local checkouts.
+
+Expected agent behavior:
+
+- If the user shares a GitHub `README.md` or `install.md` blob link, derive the
+  repo root and follow `install.md`.
+- If the user says "help me install this project" from inside a local checkout,
+  find the repo root and follow `install.md`.
+- On macOS, the automated flow should ask for a password and whether launchd
+  autostart should be installed.
+- On Windows, the automated flow should stop and report that this repository
+  does not provide a Windows installer.
+
 ## Requirements
 
 - Node.js `>=24`
@@ -57,6 +74,19 @@ Check both workspaces:
 npm run typecheck
 npm test
 ```
+
+## Automated macOS Install
+
+For the AI-guided install flow, the repo provides:
+
+```text
+install.md
+scripts/install/install-codex-web-macos.sh
+```
+
+The installer script handles dependency install, password setup, service start,
+and optional launchd autostart. The detailed AI-oriented flow lives in
+[`install.md`](install.md).
 
 ## Install The Report Skill
 
@@ -246,6 +276,27 @@ journalctl --user -u codex-web.service -f
 
 If your Linux firewall blocks LAN access, allow TCP port `43210` or change
 `CODEX_WEB_PORT` in `~/.config/codex-web/service.env`.
+
+## Install As PWA
+
+After the server is running, open Codex Web from your phone browser and log in
+once for that device.
+
+On iPhone or iPad:
+
+1. Open the app in Safari.
+2. Tap `Share`.
+3. Tap `Add to Home Screen`.
+4. Launch the saved icon from the Home Screen.
+
+On Android:
+
+1. Open the app in Chrome.
+2. Open the browser menu.
+3. Tap `Install app` or `Add to Home screen`.
+4. Launch the saved shortcut/app from the launcher.
+
+More detailed phone install notes live in [`docs/pwa-setup.md`](docs/pwa-setup.md).
 
 ## Product Direction
 

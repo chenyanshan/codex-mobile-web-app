@@ -1,4 +1,4 @@
-const APP_BUILD_ID = '2026-05-20-chat-render-bottom-v29';
+const APP_BUILD_ID = '2026-05-20-first-turn-recovery-v30';
 const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
 const THEME_KEY = 'codexWebTheme';
@@ -24,6 +24,7 @@ const DEFAULT_MESSAGE_FONT_SIZE = 'medium';
 const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
 const PROMPT_EXPAND_LINE_THRESHOLD = 4;
 const STREAM_STALE_MS = 30_000;
+const FIRST_TURN_RECOVERY_DELAY_MS = 10_000;
 const EDGE_SWIPE_START_PX = 24;
 const EDGE_SWIPE_TRIGGER_PX = 72;
 const EDGE_SWIPE_MAX_VERTICAL_PX = 48;
@@ -109,6 +110,9 @@ let promptFocusRestoreTimer = null;
 let sessionListRestoreScrollTop = null;
 let timelineScrollTrackingAttached = false;
 let chatTimelineReturnSnapshot = null;
+let chatTimelineForegroundSnapshot = null;
+let chatTimelineViewportSnapshot = null;
+let nextTimelineRestoreSnapshot = null;
 
 bootstrap();
 applyTheme(state.theme, { persist: false });
@@ -1685,6 +1689,7 @@ function restoreTimelineViewport(snapshot) {
     const bottomOffset = snapshot.shouldFollowLatest ? 0 : snapshot.bottomOffset;
     timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight - Number(bottomOffset || 0));
     state.timelineShouldFollowLatest = snapshot.shouldFollowLatest !== false;
+    rememberCurrentTimelineViewport();
     if (snapshot.hadPromptFocus) {
       document.querySelector('#prompt-input')?.focus?.();
     }
@@ -1692,7 +1697,8 @@ function restoreTimelineViewport(snapshot) {
 }
 
 function renderChatWithTimelineRestored(callback) {
-  const snapshot = captureTimelineViewport();
+  const snapshot = nextTimelineRestoreSnapshot || captureTimelineViewport();
+  nextTimelineRestoreSnapshot = null;
   callback();
   render();
   restoreTimelineViewport(snapshot);
@@ -1826,6 +1832,7 @@ function updateTimelineFollowState() {
   }
   const bottomOffset = Math.max(0, timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop);
   state.timelineShouldFollowLatest = bottomOffset <= TIMELINE_FOLLOW_LATEST_TOLERANCE_PX;
+  rememberCurrentTimelineViewport();
 }
 
 function scrollTimelineToBottomIfFollowingLatest() {
@@ -2100,8 +2107,11 @@ async function onComposerSubmit(event) {
   state.prompt = '';
   renderChatAtLatestIfFollowing(() => {});
 
+  const wasNewSession = !state.sessionId;
+  let submittedSessionId = '';
   try {
     const sessionId = await ensureSession();
+    submittedSessionId = sessionId;
     optimisticallyUpdateSessionInput(promptToSend);
     saveCurrentTimeline();
     const settings = collectSettings();
@@ -2126,10 +2136,18 @@ async function onComposerSubmit(event) {
     renderChatAtLatestIfFollowing(() => {});
     void streamTurnEvents(turn.turnId);
   } catch (error) {
-    state.pendingTurn = false;
     if (handleMissingSession(error, promptToSend)) {
       return;
     }
+    if (scheduleFirstTurnRecovery({
+      error,
+      promptText: promptToSend,
+      sessionId: submittedSessionId || state.sessionId,
+      wasNewSession,
+    })) {
+      return;
+    }
+    state.pendingTurn = false;
     appendTimelineError(state.turnId || `request_${Date.now()}`, error?.payload?.message || error?.message || 'Request failed');
     handleApiError(error);
   }
@@ -2676,11 +2694,85 @@ function isUnavailableSessionError(error) {
   return /thread not loaded|no rollout found for thread id|rollout .* is empty/i.test(message);
 }
 
-async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
+function scheduleFirstTurnRecovery({
+  error,
+  promptText,
+  sessionId,
+  wasNewSession,
+}) {
+  if (!wasNewSession || !sessionId || !isUnavailableSessionError(error)) {
+    return false;
+  }
+  const message = error?.payload?.message || error?.message || 'Request failed';
+  state.pendingTurn = true;
+  state.status = 'Waiting for first response';
+  state.statusTone = 'warn';
+  state.error = '';
+  renderChatAtLatestIfFollowing(() => {});
+  setTimeout(() => {
+    void recoverFirstTurnAfterDelay({
+      sessionId,
+      promptText,
+      message,
+    });
+  }, FIRST_TURN_RECOVERY_DELAY_MS);
+  return true;
+}
+
+async function recoverFirstTurnAfterDelay({ sessionId, promptText, message }) {
+  if (state.sessionId !== sessionId || !state.pendingTurn) {
+    return;
+  }
+  const session = await refreshCurrentSessionMetadata({ hydrateTimeline: true });
+  if (session && hasRecoveredFirstTurn(session, promptText)) {
+    state.pendingTurn = false;
+    state.streamWasBackgrounded = false;
+    state.turnId = null;
+    state.status = 'Ready';
+    state.statusTone = 'success';
+    state.error = '';
+    renderChatWithTimelineRestored(() => {});
+    scrollTimelineToBottomIfFollowingLatest();
+    return;
+  }
+  state.pendingTurn = false;
+  state.status = 'Request failed';
+  state.statusTone = 'danger';
+  appendTimelineError(`request_${sessionId}`, message);
+  state.error = message;
+  renderChatAtLatestIfFollowing(() => {});
+}
+
+function hasRecoveredFirstTurn(session, promptText) {
+  const turns = Array.isArray(session?.thread?.turns) ? session.thread.turns : [];
+  if (turns.some((turn) => isActiveTurnStatus(turn?.status))) {
+    const activeTurn = findActiveTurn(session);
+    if (activeTurn?.id) {
+      state.turnId = activeTurn.id;
+    }
+    return true;
+  }
+  const prompt = String(promptText || '').trim();
+  for (const turn of turns) {
+    if (!isTerminalTurnStatus(turn?.status)) {
+      continue;
+    }
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    const hasPrompt = !prompt || items.some((item) => item?.role === 'user' && String(item.text || '').trim() === prompt);
+    const hasAssistantAnswer = items.some((item) => item?.role === 'assistant' && String(item.text || '').trim());
+    if (hasPrompt && hasAssistantAnswer) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function refreshCurrentSessionMetadata({ hydrateTimeline = false, viewportSnapshot = null } = {}) {
   if (!state.sessionId) {
     return null;
   }
   const sessionId = state.sessionId;
+  const snapshot = viewportSnapshot || captureTimelineViewport();
   try {
     const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
     if (payload?.session) {
@@ -2696,10 +2788,14 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
         }
       }
       if (state.sessionId === sessionId) {
+        nextTimelineRestoreSnapshot = snapshot;
+      }
+      if (state.sessionId === sessionId) {
         renderChatWithTimelineRestored(() => {});
         if (hydrateTimeline && state.view === 'chat') {
           scrollTimelineToBottomIfFollowingLatest();
         }
+        nextTimelineRestoreSnapshot = null;
       }
       return session;
     }
@@ -4297,6 +4393,9 @@ function resetEdgeSwipeNavigation() {
 
 function onVisibilityChange() {
   if (document.visibilityState === 'hidden') {
+    if (state.view === 'chat' && state.sessionId) {
+      chatTimelineForegroundSnapshot = captureTimelineViewport();
+    }
     if (state.pendingTurn) {
       state.streamWasBackgrounded = true;
     }
@@ -4357,8 +4456,12 @@ async function recoverActiveTurnAfterForeground() {
   if (!state.authSession || !state.sessionId) {
     return;
   }
+  const viewportSnapshot = rememberedTimelineViewport()
+    || chatTimelineForegroundSnapshot
+    || captureTimelineViewport();
   const shouldReconnect = state.pendingTurn && state.turnId && !isTurnStreamHealthy();
-  await refreshCurrentSessionMetadata({ hydrateTimeline: true });
+  await refreshCurrentSessionMetadata({ hydrateTimeline: true, viewportSnapshot });
+  chatTimelineForegroundSnapshot = null;
   if (shouldReconnect && state.pendingTurn && state.turnId) {
     streamTurnEvents(state.turnId, { forceReconnect: true });
   }
@@ -4465,8 +4568,28 @@ function scrollTimelineToBottom() {
     if (timeline) {
       timeline.scrollTop = timeline.scrollHeight;
       state.timelineShouldFollowLatest = true;
+      rememberCurrentTimelineViewport();
     }
   });
+}
+
+function rememberCurrentTimelineViewport() {
+  if (state.view !== 'chat' || !state.sessionId) {
+    return;
+  }
+  const snapshot = captureTimelineViewport();
+  chatTimelineViewportSnapshot = {
+    ...snapshot,
+    sessionId: state.sessionId,
+  };
+}
+
+function rememberedTimelineViewport() {
+  if (!state.sessionId || chatTimelineViewportSnapshot?.sessionId !== state.sessionId) {
+    return null;
+  }
+  const { sessionId: _sessionId, ...snapshot } = chatTimelineViewportSnapshot;
+  return { ...snapshot };
 }
 
 function startCase(value) {

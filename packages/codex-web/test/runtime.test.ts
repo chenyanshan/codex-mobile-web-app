@@ -1202,6 +1202,43 @@ test('runtime emits normalized turn and approval events and maps approval decisi
   assert.deepEqual(resolvedTypes, ['approval.resolved', 'batch.completed']);
 });
 
+test('runtime uses completed turn id when start callback is missing', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread()], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_1', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread(),
+    writeConfigValue: async () => {},
+    startTurn: async (): Promise<ProviderTurnResult> => ({
+      outputText: 'Final answer',
+      status: 'completed',
+      turnId: 'turn_late',
+      threadId: 'thread_1',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const started = await runtime.startTurn('thread_1', { text: 'hi' });
+  assert.equal(started.turnId, 'turn_late');
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const events = runtime.getTurnEvents('turn_late').map((entry) => entry.event.type);
+  assert.deepEqual(events, [
+    'turn.started',
+    'assistant.final',
+    'turn.completed',
+  ]);
+});
+
 test('runtime emits command and file work events from native work callbacks', async () => {
   const client: CodexWebRuntimeClient = {
     listModels: async () => [],
