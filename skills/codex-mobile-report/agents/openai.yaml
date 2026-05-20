@@ -1,0 +1,3 @@
+display_name: Codex Mobile Report
+short_description: Save markdown and html reports for Codex Web phone viewing.
+default_prompt: Use $codex-mobile-report to save the final report under ~/.codex-web/reports so it can be opened from the phone.

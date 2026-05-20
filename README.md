@@ -1,57 +1,51 @@
 # Codex Mobile Web App
 
+English | [中文](README.zh-CN.md)
+
 Self-hosted mobile web console for controlling a local logged-in Codex runtime.
 
-The phone is only the UI. The Mac keeps the Codex login, starts the Codex
-runtime, reads and writes local project files, executes shell commands, and
-stores app state. Remote access is expected to be provided by an external tunnel
-or reverse proxy.
+The phone is only the remote UI. The Mac or Linux host keeps the Codex login,
+starts the Codex runtime, reads and writes local project files, executes shell
+commands, and stores app state. Remote access through a tunnel or reverse proxy
+is intentionally outside this repository.
 
 ## Current State
 
-This repository has been split out from `CodexBridge-main` as a new project.
-The first imported core is:
+This repository was split out from `CodexBridge-main`.
+
+Imported reusable Codex integration:
 
 ```text
 packages/codex-native-api
 ```
 
-That package contains the reusable local Codex integration:
-
-- local Codex auth discovery
-- `codex app-server` client
-- localhost API facade
-- native runtime and continuation support
-- daemon/service-manager utilities
-
-The first mobile web app service is implemented in:
+Mobile web service:
 
 ```text
 packages/codex-web
 ```
 
-The approved direction is captured in:
+Project design docs:
 
 ```text
 docs/superpowers/specs/2026-05-17-codex-mobile-web-app-design.md
+docs/superpowers/specs/2026-05-19-codex-mobile-reports-design.md
 ```
 
-The visual reference is stored at:
+Visual reference:
 
 ```text
 docs/assets/codex-web-reference.jpg
 ```
 
-## Development
-
-Requirements:
+## Requirements
 
 - Node.js `>=24`
 - npm
 - local Codex CLI installed
 - local Codex login at `~/.codex/auth.json` or `CODEX_HOME/auth.json`
 
-Install dependencies:
+## Install Dependencies
 
 ```bash
 npm install
@@ -64,11 +58,43 @@ npm run typecheck
 npm test
 ```
 
+## Install The Report Skill
+
+This repo includes the report companion skill at:
+
+```text
+skills/codex-mobile-report
+```
+
+Install it into your local Codex skills directory:
+
+```bash
+mkdir -p ~/.codex/skills
+mkdir -p ~/.codex/skills/codex-mobile-report
+cp -R skills/codex-mobile-report/. ~/.codex/skills/codex-mobile-report/
+```
+
+For active development, use a symlink instead so local edits are picked up:
+
+```bash
+mkdir -p ~/.codex/skills
+ln -s "$(pwd)/skills/codex-mobile-report" ~/.codex/skills/codex-mobile-report
+```
+
+The skill writes phone-readable Markdown or self-contained HTML reports under:
+
+```text
+~/.codex-web/reports/
+```
+
+Codex Web exposes those reports through authenticated APIs and renders report
+links in the mobile app.
+
 ## Codex Web Setup
 
-The first web service lives in `packages/codex-web`. By default it binds to
-`0.0.0.0:43210` so phones on the same network can reach the Mac, and keeps all
-runtime state outside the repo.
+The web service lives in `packages/codex-web`. By default it binds to
+`0.0.0.0:43210` so phones on the same network can reach the host, while all
+runtime state stays outside the repo.
 
 Default paths:
 
@@ -76,10 +102,12 @@ Default paths:
 ~/.config/codex-web/service.env
 ~/.codex-web/auth.json
 ~/.codex-web/logs/
+~/.codex-web/reports/
+~/.codex-web/report-index.json
 ```
 
 `~/.codex-web/auth.json` stores only the salted password hash and hashed session
-tokens. The browser keeps only an opaque session token. Do not store
+tokens. The browser stores only an opaque session token. Do not store
 `CODEX_WEB_PASSWORD` in `service.env`.
 
 Set the password once:
@@ -88,9 +116,9 @@ Set the password once:
 npm run codex-web -- auth set-password
 ```
 
-For non-interactive automation, a one-time environment variable is also
-supported. Avoid putting real passwords in committed scripts, env files, or
-shared shell history:
+For non-interactive automation, a one-time environment variable is supported.
+Avoid putting real passwords in committed scripts, env files, or shared shell
+history:
 
 ```bash
 CODEX_WEB_PASSWORD='choose-a-strong-password' npm run codex-web -- auth set-password
@@ -123,16 +151,13 @@ CODEX_WEB_DEBUG=0
 ```
 
 Change host, port, default working directory, or Codex binary by editing
-`~/.config/codex-web/service.env`. To restrict the service to this Mac only,
-set:
+`~/.config/codex-web/service.env`. To restrict the service to this machine only:
 
 ```env
 CODEX_WEB_HOST=127.0.0.1
 ```
 
-Tunnel and reverse-proxy setup stay outside this repository.
-
-## macOS launchd
+## macOS Install
 
 Install the user LaunchAgent:
 
@@ -141,8 +166,8 @@ scripts/service/install-codex-web-launchd-user.sh
 ```
 
 This writes `~/Library/LaunchAgents/com.ganxing.codex-web.plist`, creates
-`~/.config/codex-web/service.env` if it does not exist, uses the repo root as
-the LaunchAgent working directory, and writes logs under `~/.codex-web/logs/`.
+`~/.config/codex-web/service.env` if needed, uses the repo root as the working
+directory, and writes logs under `~/.codex-web/logs/`.
 
 Service helpers:
 
@@ -152,9 +177,75 @@ scripts/service/restart-codex-web-launchd-user.sh
 scripts/service/logs-codex-web-launchd-user.sh
 ```
 
-The LaunchAgent uses `/bin/zsh -lc` to source `~/.config/codex-web/service.env`
-and run `npm run serve --workspace packages/codex-web`, because launchd does
-not source env files by itself.
+The LaunchAgent uses `/bin/zsh -lc` to source
+`~/.config/codex-web/service.env` and run:
+
+```bash
+npm run serve --workspace packages/codex-web
+```
+
+## Linux Install
+
+On Linux, run Codex Web as a user `systemd` service.
+
+Create the service environment file:
+
+```bash
+mkdir -p ~/.config/codex-web ~/.codex-web/logs
+cat > ~/.config/codex-web/service.env <<EOF
+CODEX_WEB_HOST=0.0.0.0
+CODEX_WEB_PORT=43210
+CODEX_WEB_DEFAULT_CWD=$(pwd)
+CODEX_REAL_BIN=codex
+CODEX_WEB_DEBUG=0
+EOF
+chmod 600 ~/.config/codex-web/service.env
+```
+
+Create the user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/codex-web.service <<EOF
+[Unit]
+Description=Codex Web mobile console
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$(pwd)
+EnvironmentFile=%h/.config/codex-web/service.env
+ExecStart=/usr/bin/env npm run serve --workspace packages/codex-web
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+```
+
+Enable and start the service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now codex-web.service
+systemctl --user status codex-web.service
+```
+
+Allow it to start after login sessions end if your distro supports lingering:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+Read logs:
+
+```bash
+journalctl --user -u codex-web.service -f
+```
+
+If your Linux firewall blocks LAN access, allow TCP port `43210` or change
+`CODEX_WEB_PORT` in `~/.config/codex-web/service.env`.
 
 ## Product Direction
 
@@ -163,9 +254,10 @@ The intended first product is a single-user mobile PWA:
 - password-protected access
 - persistent browser session token
 - live Codex turn stream
-- command/file-change batch cards
+- command and file-change batch cards
 - approval controls
 - model and reasoning controls
-- macOS launchd service for startup after user login
+- reports list and authenticated report viewer
+- macOS launchd and Linux systemd startup options
 
-Tunnel setup is intentionally outside this repository.
+Tunnel and reverse-proxy setup stay outside this repository.

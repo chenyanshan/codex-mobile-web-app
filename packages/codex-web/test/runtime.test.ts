@@ -1056,6 +1056,52 @@ test('runtime starts the first turn when a new thread has no rollout to resume',
   ]);
 });
 
+test('runtime treats empty rollout thread-store errors as a recoverable first-turn case', async () => {
+  const calls: string[] = [];
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [createThread('empty_rollout_thread')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'empty_rollout_thread', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('empty_rollout_thread'),
+    resumeThread: async ({ threadId }) => {
+      calls.push(`resume:${threadId}`);
+      throw new Error(
+        'failed to read thread: thread-store internal error: failed to read thread '
+        + '/Users/test/.codex/sessions/2026/05/20/rollout-2026-05-20T14-51-03.jsonl: '
+        + 'rollout at /Users/test/.codex/sessions/2026/05/20/rollout-2026-05-20T14-51-03.jsonl is empty',
+      );
+    },
+    writeConfigValue: async () => {},
+    startTurn: async ({ threadId, onTurnStarted }) => {
+      calls.push(`turn:${threadId}`);
+      await onTurnStarted?.({ turnId: 'turn_empty_rollout_thread', threadId });
+      return {
+        outputText: 'done',
+        status: 'completed',
+        turnId: 'turn_empty_rollout_thread',
+        threadId,
+      };
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  await runtime.startTurn('empty_rollout_thread', { text: 'first message' });
+
+  assert.deepEqual(calls, [
+    'resume:empty_rollout_thread',
+    'turn:empty_rollout_thread',
+  ]);
+});
+
 test('runtime treats missing native threads as absent when opened or used', async () => {
   const client: CodexWebRuntimeClient = {
     listModels: async () => [],

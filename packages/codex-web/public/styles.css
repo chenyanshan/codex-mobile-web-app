@@ -193,6 +193,8 @@ button:disabled {
   min-height: 38px;
   padding: 0 8px;
   font-size: 12px;
+  justify-self: end;
+  align-self: center;
 }
 
 .topbar-main,
@@ -1005,7 +1007,7 @@ button:disabled {
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 10px 12px calc(env(safe-area-inset-bottom, 0px) + 12px);
+  padding: 6px 10px calc(env(safe-area-inset-bottom, 0px) + 4px);
   background: linear-gradient(180deg, color-mix(in srgb, var(--bg) 0%, transparent), color-mix(in srgb, var(--bg) 88%, transparent) 20%, color-mix(in srgb, var(--bg) 98%, transparent));
 }
 
@@ -1020,11 +1022,34 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
+.composer.is-expanded {
+  min-height: min(84dvh, 640px);
+}
+
+.composer-wrap.is-expanded {
+  padding-top: calc(env(safe-area-inset-top, 0px) + 10px);
+}
+
+.composer.is-expanded {
+  padding: 0;
+  border-color: transparent;
+  background: var(--panel);
+}
+
 .compact-composer-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 6px;
+  display: flex;
+  gap: 8px;
   align-items: end;
+}
+
+.composer.is-expanded .compact-composer-row {
+  display: block;
+}
+
+.composer-leading-controls {
+  display: grid;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
 .composer-status {
@@ -1120,7 +1145,48 @@ button:disabled {
   resize: none;
 }
 
+.message-editor-shell {
+  position: relative;
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: end;
+}
+
+.message-editor-shell textarea {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.message-editor-shell .compact-send {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.message-editor-shell.is-expanded {
+  position: relative;
+  min-height: min(84dvh, 640px);
+  display: block;
+}
+
+.message-editor-shell.is-expanded textarea {
+  height: 100%;
+  min-height: min(84dvh, 640px);
+  border-color: transparent;
+  background: transparent;
+  padding: 54px 12px 58px;
+}
+
+.message-editor-shell.is-expanded .compact-send {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+}
+
 .compact-composer-row textarea {
+  width: 100%;
   min-height: 38px;
   max-height: 116px;
   padding: 8px 10px;
@@ -1134,6 +1200,27 @@ button:disabled {
   padding: 0 8px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.composer.is-expanded .composer-leading-controls {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+}
+
+.composer.is-expanded .composer-leading-controls #composer-expand-button {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+}
+
+.icon-button[hidden] {
+  display: none;
 }
 
 .settings-drawer {
@@ -1180,22 +1267,6 @@ button:disabled {
 .settings-action-row .meta {
   min-width: 0;
   font-size: 12px;
-}
-
-.settings-toggle-row {
-  margin-bottom: 8px;
-  padding: 2px 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.settings-toggle-row input {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  accent-color: var(--accent-2);
 }
 
 .composer-error {

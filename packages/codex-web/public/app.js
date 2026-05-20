@@ -1,9 +1,8 @@
-const APP_BUILD_ID = '2026-05-20-message-size-settings-v18';
+const APP_BUILD_ID = '2026-05-20-chat-render-bottom-v29';
 const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
 const THEME_KEY = 'codexWebTheme';
 const DEFAULT_THREAD_SETTINGS_KEY = 'codexWebDefaultThreadSettings';
-const ACTIVITY_DETAILS_KEY = 'codexWebActivityDetails';
 const MESSAGE_FONT_SIZE_KEY = 'codexWebMessageFontSize';
 const MAX_TIMELINE_CACHE_SESSIONS = 16;
 const MAX_TIMELINE_CACHE_ITEMS = 80;
@@ -23,10 +22,12 @@ const DEFAULT_SANDBOX_MODE = 'danger-full-access';
 const DEFAULT_THEME = 'dark';
 const DEFAULT_MESSAGE_FONT_SIZE = 'medium';
 const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
+const PROMPT_EXPAND_LINE_THRESHOLD = 4;
 const STREAM_STALE_MS = 30_000;
 const EDGE_SWIPE_START_PX = 24;
 const EDGE_SWIPE_TRIGGER_PX = 72;
 const EDGE_SWIPE_MAX_VERTICAL_PX = 48;
+const TIMELINE_FOLLOW_LATEST_TOLERANCE_PX = 24;
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
@@ -51,6 +52,7 @@ const state = {
   reportProject: '',
   currentReport: null,
   currentReportContent: '',
+  currentReportLoading: false,
   reportReturnView: 'reports',
   reportsReturnView: 'sessions',
   currentSession: null,
@@ -75,6 +77,9 @@ const state = {
   status: 'Checking auth',
   statusTone: 'warn',
   prompt: '',
+  composerCanExpand: false,
+  composerExpanded: false,
+  timelineShouldFollowLatest: true,
   model: DEFAULT_MODEL,
   reasoningEffort: DEFAULT_REASONING_EFFORT,
   collaborationMode: DEFAULT_COLLABORATION_MODE,
@@ -82,7 +87,6 @@ const state = {
   permissionPreset: DEFAULT_PERMISSION_PRESET,
   approvalPolicy: DEFAULT_APPROVAL_POLICY,
   sandboxMode: DEFAULT_SANDBOX_MODE,
-  activityDetails: localStorage.getItem(ACTIVITY_DETAILS_KEY) === 'true',
   timeline: [],
   sessionHistoryItems: [],
   sessionHistoryStartIndex: 0,
@@ -102,6 +106,9 @@ let pullToRefreshCleanup = null;
 let edgeSwipeStart = null;
 let allSessionsPreloadPromise = null;
 let promptFocusRestoreTimer = null;
+let sessionListRestoreScrollTop = null;
+let timelineScrollTrackingAttached = false;
+let chatTimelineReturnSnapshot = null;
 
 bootstrap();
 applyTheme(state.theme, { persist: false });
@@ -188,6 +195,7 @@ function setLoggedOut(message = '') {
   state.reportProject = '';
   state.currentReport = null;
   state.currentReportContent = '';
+  state.currentReportLoading = false;
   state.reportReturnView = 'reports';
   state.reportsReturnView = 'sessions';
   state.sessionId = null;
@@ -220,6 +228,7 @@ function setLoggedOut(message = '') {
 }
 
 function render() {
+  const shouldRestoreLatestTimeline = state.view === 'chat' && state.timelineShouldFollowLatest;
   app.innerHTML = '';
   if (state.setupRequired) {
     app.appendChild(renderSetup());
@@ -237,14 +246,24 @@ function render() {
   bindGlobalEvents();
   if (state.view === 'chat') {
     syncComposerOffset();
+    timelineScrollTrackingAttached = false;
+    attachTimelineScrollTracking({ updateInitial: !shouldRestoreLatestTimeline });
+    if (shouldRestoreLatestTimeline) {
+      scrollTimelineToBottom();
+    }
   } else {
     resetComposerOffset();
+    timelineScrollTrackingAttached = false;
+  }
+  if (state.view === 'sessions') {
+    restoreSessionListScroll();
   }
 }
 
 function resetSessionHistoryWindow() {
   state.sessionHistoryItems = [];
   state.sessionHistoryStartIndex = 0;
+  state.timelineShouldFollowLatest = true;
 }
 
 function renderSetup() {
@@ -433,10 +452,14 @@ function renderReportViewer() {
   shell.innerHTML = `
     <div class="screen page-screen">
       ${renderPageNav(report.title || 'Report', { backId: 'back-to-reports-button' })}
-      <main class="report-viewer">${renderReportDocument(report, state.currentReportContent)}</main>
+      <main class="report-viewer">${state.currentReportLoading ? renderReportLoading() : renderReportDocument(report, state.currentReportContent)}</main>
     </div>
   `;
   return shell;
+}
+
+function renderReportLoading() {
+  return '<div class="empty-state report-loading">Loading report...</div>';
 }
 
 function renderReportDocument(report, content) {
@@ -544,6 +567,7 @@ function renderNewSession() {
 
 function renderChat() {
   const sessionReportsProject = reportProjectForSession(state.currentSession);
+  const composerClassName = composerStateClassName();
   const shell = document.createElement('div');
   shell.className = 'shell';
   shell.innerHTML = `
@@ -558,15 +582,14 @@ function renderChat() {
         </div>
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
-      <div class="composer-wrap">
-        ${renderComposerStatus()}
-        <form class="composer" id="composer-form">
-          ${state.settingsOpen ? renderSettingsDrawer() : ''}
-          ${state.error ? `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>` : ''}
+      <div class="composer-wrap ${composerClassName}">
+        ${state.composerExpanded ? '' : renderComposerStatus()}
+        <form class="composer ${composerClassName}" id="composer-form">
+          ${state.settingsOpen && !state.composerExpanded ? renderSettingsDrawer() : ''}
+          ${state.error && !state.composerExpanded ? `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>` : ''}
           <div class="compact-composer-row">
-            <button class="ghost icon-button" type="button" id="settings-toggle" aria-expanded="${String(state.settingsOpen)}">Set</button>
-            <textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">${escapeHtml(state.prompt)}</textarea>
-            <button class="primary compact-send" type="submit" id="send-button">Send</button>
+            ${renderComposerLeadingControls()}
+            ${renderMessageEditor()}
           </div>
         </form>
       </div>
@@ -588,6 +611,38 @@ function renderPageNav(title, options = {}) {
   `;
 }
 
+function composerStateClassName() {
+  if (state.composerExpanded) {
+    return 'is-expanded';
+  }
+  if (state.composerCanExpand) {
+    return 'is-expandable';
+  }
+  return '';
+}
+
+function renderComposerLeadingControls() {
+  const showExpandButton = state.composerCanExpand || state.composerExpanded;
+  const expandLabel = state.composerExpanded ? 'Collapse message editor' : 'Expand message editor';
+  const expandIcon = state.composerExpanded ? 'v' : '^';
+  return `
+    <div class="composer-leading-controls">
+      <button class="ghost icon-button" type="button" id="composer-expand-button" aria-label="${expandLabel}" aria-expanded="${String(state.composerExpanded)}"${showExpandButton ? '' : ' hidden'}>${expandIcon}</button>
+      <button class="ghost icon-button" type="button" id="settings-toggle" aria-expanded="${String(state.settingsOpen)}"${state.composerExpanded ? ' hidden' : ''}>Set</button>
+    </div>
+  `;
+}
+
+function renderMessageEditor() {
+  const composerClassName = composerStateClassName();
+  return `
+    <div class="message-editor-shell ${composerClassName}">
+      <textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">${escapeHtml(state.prompt)}</textarea>
+      <button class="primary compact-send" type="submit" id="send-button">Send</button>
+    </div>
+  `;
+}
+
 function renderSessionCards() {
   const sessions = sortedSessions();
   const isSortingFavorites = state.sortMode === 'favorites' && state.favoriteSortMode;
@@ -606,7 +661,7 @@ function renderSessionCards() {
           <span class="session-preview">${escapeHtml(shorten(previewInputForSession(session), 96) || 'No prompt preview')}</span>
         </span>
         <span class="session-card-meta">
-          <span>${escapeHtml(shorten(session.cwd || 'No cwd', 54))}</span>
+          <span>${escapeHtml(cwdLeafName(session.cwd || '') || 'No cwd')}</span>
           <span>${escapeHtml(formatShortDateTime(lastInputAtForSession(session)))}</span>
         </span>
       </button>
@@ -681,10 +736,6 @@ function renderSettingsDrawer() {
         <span class="meta">Runtime</span>
         <button class="ghost compact-button" type="button" id="runtime-reload-button">Reload</button>
       </div>
-      <label class="settings-toggle-row" for="activity-detail-toggle">
-        <span class="meta">Activity details</span>
-        <input id="activity-detail-toggle" type="checkbox" ${state.activityDetails ? 'checked' : ''}>
-      </label>
       <div class="controls">
         <div class="control-group">
           <label for="model-select">Model</label>
@@ -767,9 +818,6 @@ function renderTimelineItem(item) {
         ${body}
       </article>
     `;
-  }
-  if (item.kind === 'work') {
-    return renderWorkItem(item);
   }
   if (item.kind === 'batch') {
     return `
@@ -903,9 +951,8 @@ function workDetailsForItem(item) {
 
 function renderWorkDetail(detail) {
   const body = renderWorkDetailBody(detail);
-  const openAttribute = state.activityDetails ? ' open' : '';
   return `
-    <details class="work-detail"${openAttribute} data-work-kind="${escapeAttribute(detail.kind)}">
+    <details class="work-detail" data-work-kind="${escapeAttribute(detail.kind)}">
       <summary>
         <span class="work-event-kind">${escapeHtml(workKindLabel(detail.kind))}</span>
         <span class="work-event-title">${escapeHtml(detail.title)}</span>
@@ -920,19 +967,15 @@ function renderWorkDetail(detail) {
 
 function renderWorkDetailBody(detail) {
   const summary = detail.summary || {};
-  const rows = renderWorkSummaryRows(summary, { includeRaw: state.activityDetails });
+  const rows = renderWorkSummaryRows(summary);
   const files = renderWorkFileChanges(detail.fileChanges || []);
   const output = renderWorkTextBlock('Output', summary.output);
   const diff = renderWorkTextBlock('Diff', summary.diff || summary.patch);
-  const raw = state.activityDetails ? renderWorkTextBlock('Raw Event', summary.raw) : '';
-  return [rows, files, output, diff, raw].filter(Boolean).join('');
+  return [rows, files, output, diff].filter(Boolean).join('');
 }
 
-function renderWorkSummaryRows(summary, options = {}) {
-  const excludedKeys = ['fileChanges', 'output', 'diff', 'patch'];
-  if (!options.includeRaw) {
-    excludedKeys.push('raw');
-  }
+function renderWorkSummaryRows(summary) {
+  const excludedKeys = ['fileChanges', 'output', 'diff', 'patch', 'raw'];
   const entries = Object.entries(summary || {})
     .filter(([key, value]) => !excludedKeys.includes(key) && hasSummaryValue(value));
   if (!entries.length) {
@@ -1210,12 +1253,7 @@ function bindGlobalEvents() {
   if (backToListButton) {
     backToListButton.addEventListener('click', () => {
       if (state.view === 'reports') {
-        if (state.reportProject) {
-          state.reportProject = '';
-          render();
-        } else {
-          closeReportsPage();
-        }
+        handleReportsBackNavigation();
       } else {
         showSessionList();
       }
@@ -1224,6 +1262,7 @@ function bindGlobalEvents() {
 
   for (const button of document.querySelectorAll('[data-session-id]')) {
     button.addEventListener('click', () => {
+      rememberSessionListScroll();
       void selectSession(button.getAttribute('data-session-id') || '');
     });
   }
@@ -1293,9 +1332,11 @@ function bindGlobalEvents() {
     promptInput.addEventListener('focus', protectPromptFocusScroll);
     promptInput.addEventListener('input', (event) => {
       state.prompt = event.target.value;
+      updateComposerExpansionState(event.target);
       autoGrowPromptInput(event.target);
       syncComposerOffset();
     });
+    updateComposerExpansionState(promptInput);
     autoGrowPromptInput(promptInput);
   }
 
@@ -1304,16 +1345,14 @@ function bindGlobalEvents() {
     settingsToggle.addEventListener('click', toggleSettingsDrawer);
   }
 
+  const composerExpandButton = document.querySelector('#composer-expand-button');
+  if (composerExpandButton) {
+    composerExpandButton.addEventListener('click', toggleComposerExpanded);
+  }
+
   for (const button of document.querySelectorAll('[data-message-font-size]')) {
     button.addEventListener('click', () => {
       setMessageFontSize(button.getAttribute('data-message-font-size') || DEFAULT_MESSAGE_FONT_SIZE);
-    });
-  }
-
-  const activityDetailToggle = document.querySelector('#activity-detail-toggle');
-  if (activityDetailToggle) {
-    activityDetailToggle.addEventListener('change', (event) => {
-      setActivityDetailsEnabled(event.target.checked);
     });
   }
 
@@ -1439,10 +1478,263 @@ function toggleSettingsDrawer() {
   withTimelineScrollPreserved(() => render());
 }
 
-function setActivityDetailsEnabled(enabled) {
-  state.activityDetails = Boolean(enabled);
-  localStorage.setItem(ACTIVITY_DETAILS_KEY, String(state.activityDetails));
-  withTimelineScrollPreserved(() => render());
+function toggleComposerExpanded() {
+  if (!state.composerCanExpand && !state.composerExpanded) {
+    return;
+  }
+  state.composerExpanded = !state.composerExpanded;
+  state.settingsOpen = false;
+  withTimelineBottomOffsetPreserved(() => {
+    syncComposerPresentation();
+    const promptInput = document.querySelector('#prompt-input');
+    if (promptInput) {
+      autoGrowPromptInput(promptInput);
+    }
+    syncComposerOffset();
+  });
+}
+
+function updateComposerExpansionState(textarea) {
+  if (!textarea) {
+    return;
+  }
+  const styles = window.getComputedStyle?.(textarea);
+  const lineHeight = Number.parseFloat(styles?.lineHeight || textarea.style?.lineHeight || '') || 22;
+  const paddingTop = Number.parseFloat(styles?.paddingTop || '0') || 0;
+  const paddingBottom = Number.parseFloat(styles?.paddingBottom || '0') || 0;
+  const contentHeight = Math.max(0, textarea.scrollHeight - paddingTop - paddingBottom);
+  const visibleLineCount = Math.ceil(contentHeight / Math.max(1, lineHeight));
+  const canExpand = visibleLineCount >= PROMPT_EXPAND_LINE_THRESHOLD;
+  if (canExpand === state.composerCanExpand) {
+    return;
+  }
+  state.composerCanExpand = canExpand;
+  if (!canExpand) {
+    state.composerExpanded = false;
+  }
+  withTimelineBottomOffsetPreserved(() => {
+    syncComposerPresentation();
+    autoGrowPromptInput(textarea);
+    syncComposerOffset();
+  });
+}
+
+function syncComposerPresentation() {
+  const composerForm = document.querySelector('#composer-form');
+  const composerWrap = document.querySelector('.composer-wrap');
+  const messageEditor = document.querySelector('.message-editor-shell');
+  const composerClassName = composerStateClassName();
+  const classTargets = [composerWrap, composerForm, messageEditor];
+  for (const target of classTargets) {
+    if (!target?.classList) {
+      continue;
+    }
+    target.classList.remove('is-expandable', 'is-expanded');
+    if (composerClassName) {
+      target.classList.add(composerClassName);
+    }
+  }
+  const settingsToggle = document.querySelector('#settings-toggle');
+  if (settingsToggle) {
+    settingsToggle.hidden = state.composerExpanded;
+    settingsToggle.setAttribute('aria-expanded', String(state.settingsOpen));
+  }
+  const composerExpandButton = document.querySelector('#composer-expand-button');
+  if (composerExpandButton) {
+    const showExpandButton = state.composerCanExpand || state.composerExpanded;
+    composerExpandButton.hidden = !showExpandButton;
+    composerExpandButton.setAttribute('aria-expanded', String(state.composerExpanded));
+    composerExpandButton.setAttribute('aria-label', state.composerExpanded ? 'Collapse message editor' : 'Expand message editor');
+    composerExpandButton.textContent = state.composerExpanded ? 'v' : '^';
+  }
+}
+
+function refreshChatDynamicUi() {
+  if (state.view !== 'chat') {
+    return false;
+  }
+  const timeline = document.querySelector('#timeline');
+  if (!timeline) {
+    render();
+    return false;
+  }
+  timeline.innerHTML = renderTimeline();
+  bindTimelineActionEvents();
+  syncComposerStatusDisplay();
+  syncComposerErrorDisplay();
+  syncComposerOffset();
+  return true;
+}
+
+function syncComposerStatusDisplay() {
+  const composerWrap = document.querySelector('.composer-wrap');
+  if (!composerWrap) {
+    return;
+  }
+  const current = composerWrap.querySelector?.('.composer-status');
+  if (state.composerExpanded) {
+    current?.remove?.();
+    return;
+  }
+  const statusHtml = renderComposerStatus();
+  if (current) {
+    current.outerHTML = statusHtml;
+    return;
+  }
+  const composerForm = document.querySelector('#composer-form');
+  if (composerForm && composerWrap.insertBefore) {
+    composerWrap.insertBefore(htmlToElement(statusHtml), composerForm);
+  }
+}
+
+function syncComposerErrorDisplay() {
+  const composerForm = document.querySelector('#composer-form');
+  if (!composerForm) {
+    return;
+  }
+  const current = composerForm.querySelector?.('.composer-error');
+  if (!state.error || state.composerExpanded) {
+    current?.remove?.();
+    return;
+  }
+  const errorHtml = `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>`;
+  if (current) {
+    current.outerHTML = errorHtml;
+    return;
+  }
+  const row = composerForm.querySelector?.('.compact-composer-row');
+  if (row && composerForm.insertBefore) {
+    composerForm.insertBefore(htmlToElement(errorHtml), row);
+  }
+}
+
+function htmlToElement(html) {
+  const template = document.createElement('template');
+  template.innerHTML = String(html || '').trim();
+  return template.content.firstElementChild;
+}
+
+function bindTimelineActionEvents() {
+  for (const button of document.querySelectorAll('[data-approval-action]')) {
+    button.addEventListener('click', () => {
+      void resolveApproval(
+        button.getAttribute('data-approval-id'),
+        button.getAttribute('data-approval-action'),
+      );
+    });
+  }
+
+  for (const link of document.querySelectorAll('[data-report-path]')) {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      void openReportByPath(link.getAttribute('data-report-path') || '', { returnView: 'chat' });
+    });
+  }
+}
+
+function rememberSessionListScroll() {
+  const sessionList = document.querySelector('.session-list');
+  if (!sessionList) {
+    return;
+  }
+  sessionListRestoreScrollTop = sessionList.scrollTop || 0;
+}
+
+function restoreSessionListScroll() {
+  if (sessionListRestoreScrollTop === null) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    const sessionList = document.querySelector('.session-list');
+    if (!sessionList) {
+      return;
+    }
+    sessionList.scrollTop = sessionListRestoreScrollTop;
+    sessionListRestoreScrollTop = null;
+  });
+}
+
+function captureTimelineViewport() {
+  const timeline = document.querySelector('#timeline');
+  if (!timeline) {
+    return {
+      bottomOffset: 0,
+      shouldFollowLatest: state.timelineShouldFollowLatest,
+      hadPromptFocus: false,
+    };
+  }
+  const bottomOffset = Math.max(0, timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop);
+  const shouldFollowLatest = bottomOffset <= TIMELINE_FOLLOW_LATEST_TOLERANCE_PX;
+  state.timelineShouldFollowLatest = shouldFollowLatest;
+  return {
+    bottomOffset,
+    shouldFollowLatest,
+    hadPromptFocus: document.activeElement === document.querySelector('#prompt-input'),
+  };
+}
+
+function restoreTimelineViewport(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    const timeline = document.querySelector('#timeline');
+    if (!timeline) {
+      return;
+    }
+    const bottomOffset = snapshot.shouldFollowLatest ? 0 : snapshot.bottomOffset;
+    timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight - Number(bottomOffset || 0));
+    state.timelineShouldFollowLatest = snapshot.shouldFollowLatest !== false;
+    if (snapshot.hadPromptFocus) {
+      document.querySelector('#prompt-input')?.focus?.();
+    }
+  });
+}
+
+function renderChatWithTimelineRestored(callback) {
+  const snapshot = captureTimelineViewport();
+  callback();
+  render();
+  restoreTimelineViewport(snapshot);
+}
+
+function renderChatAtLatestIfFollowing(callback) {
+  const snapshot = captureTimelineViewport();
+  callback();
+  render();
+  restoreTimelineViewport({
+    ...snapshot,
+    bottomOffset: snapshot.shouldFollowLatest ? 0 : snapshot.bottomOffset,
+  });
+}
+
+function captureReportViewerViewport() {
+  const reportViewer = document.querySelector('.report-viewer');
+  if (!reportViewer) {
+    return null;
+  }
+  return {
+    scrollTop: reportViewer.scrollTop || 0,
+  };
+}
+
+function restoreReportViewerViewport(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    const reportViewer = document.querySelector('.report-viewer');
+    if (reportViewer) {
+      reportViewer.scrollTop = Math.max(0, Number(snapshot.scrollTop || 0));
+    }
+  });
+}
+
+function renderReportWithScrollPreserved(callback) {
+  const snapshot = captureReportViewerViewport();
+  callback();
+  render();
+  restoreReportViewerViewport(snapshot);
 }
 
 function withTimelineScrollPreserved(callback) {
@@ -1505,9 +1797,42 @@ function autoGrowPromptInput(textarea) {
   if (!textarea?.style) {
     return;
   }
+  if (state.composerExpanded) {
+    textarea.style.height = '';
+    return;
+  }
   textarea.style.height = 'auto';
-  const nextHeight = Math.min(textarea.scrollHeight, 116);
+  const maxHeight = PROMPT_TEXTAREA_MAX_HEIGHT;
+  const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
   textarea.style.height = `${Math.max(38, nextHeight)}px`;
+}
+
+function attachTimelineScrollTracking({ updateInitial = true } = {}) {
+  const timeline = document.querySelector('#timeline');
+  if (!timeline || timelineScrollTrackingAttached) {
+    return;
+  }
+  timeline.addEventListener('scroll', updateTimelineFollowState, { passive: true });
+  timelineScrollTrackingAttached = true;
+  if (updateInitial) {
+    updateTimelineFollowState();
+  }
+}
+
+function updateTimelineFollowState() {
+  const timeline = document.querySelector('#timeline');
+  if (!timeline) {
+    return;
+  }
+  const bottomOffset = Math.max(0, timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop);
+  state.timelineShouldFollowLatest = bottomOffset <= TIMELINE_FOLLOW_LATEST_TOLERANCE_PX;
+}
+
+function scrollTimelineToBottomIfFollowingLatest() {
+  if (!state.timelineShouldFollowLatest) {
+    return;
+  }
+  scrollTimelineToBottom();
 }
 
 async function onLoginSubmit(event) {
@@ -1553,9 +1878,11 @@ async function onLogout() {
 function showSessionList() {
   saveCurrentTimeline();
   stopStream();
+  rememberSessionListScroll();
   state.view = 'sessions';
   state.currentReport = null;
   state.currentReportContent = '';
+  state.currentReportLoading = false;
   state.reportReturnView = 'reports';
   state.favoriteSortMode = false;
   state.favoriteSortDraft = [];
@@ -1564,7 +1891,7 @@ function showSessionList() {
   state.currentSession = null;
   state.turnId = null;
   state.pendingTurn = false;
-  state.prompt = '';
+  state.composerExpanded = false;
   state.error = '';
   resetSessionHistoryWindow();
   render();
@@ -1573,6 +1900,9 @@ function showSessionList() {
 async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
   const normalizedProject = String(project || '').trim();
   const normalizedReturnView = returnView === 'chat' && state.sessionId ? 'chat' : 'sessions';
+  if (normalizedReturnView === 'chat') {
+    chatTimelineReturnSnapshot = captureTimelineViewport();
+  }
   if (normalizedReturnView !== 'chat') {
     saveCurrentTimeline();
     stopStream();
@@ -1588,6 +1918,7 @@ async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
   }
   state.currentReport = null;
   state.currentReportContent = '';
+  state.currentReportLoading = false;
   state.reportReturnView = 'reports';
   state.reportsReturnView = normalizedReturnView;
   state.reportProject = normalizedProject;
@@ -1600,15 +1931,32 @@ async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
 }
 
 function closeReportsPage() {
-  state.currentReport = null;
-  state.currentReportContent = '';
   if (state.reportsReturnView === 'chat' && state.sessionId) {
+    const snapshot = chatTimelineReturnSnapshot || captureTimelineViewport();
+    state.currentReport = null;
+    state.currentReportContent = '';
+    state.currentReportLoading = false;
+    state.reportProject = '';
     state.view = 'chat';
     render();
-    scrollTimelineToBottom();
+    restoreTimelineViewport(snapshot);
+    chatTimelineReturnSnapshot = null;
     return;
   }
+  state.currentReport = null;
+  state.currentReportContent = '';
+  state.currentReportLoading = false;
+  state.reportProject = '';
   showSessionList();
+}
+
+function handleReportsBackNavigation() {
+  if (state.reportProject && state.reportsReturnView !== 'chat') {
+    state.reportProject = '';
+    render();
+    return;
+  }
+  closeReportsPage();
 }
 
 function openAppSettingsPage() {
@@ -1622,6 +1970,7 @@ function openAppSettingsPage() {
   state.currentSession = null;
   state.currentReport = null;
   state.currentReportContent = '';
+  state.currentReportLoading = false;
   resetTurnState();
   state.error = '';
   render();
@@ -1639,6 +1988,7 @@ function openNewSessionPage() {
   state.currentSession = null;
   state.currentReport = null;
   state.currentReportContent = '';
+  state.currentReportLoading = false;
   state.newCwd = state.cwd || '';
   resetTurnState();
   state.error = '';
@@ -1656,6 +2006,7 @@ function onNewSessionSubmit(event) {
   state.currentSession = null;
   state.cwd = state.newCwd.trim();
   state.prompt = '';
+  state.composerExpanded = false;
   state.settingsOpen = false;
   resetTurnState();
   state.status = 'Ready';
@@ -1684,10 +2035,12 @@ async function selectSession(sessionId) {
   restoreTimelineForSession(nextSession);
   const restoredActiveTurn = restoreActiveTurnFromSession(nextSession);
   state.view = 'chat';
+  state.composerExpanded = false;
   state.settingsOpen = false;
   state.error = '';
   state.status = restoredActiveTurn ? 'Turn running' : 'Loading session';
   state.statusTone = 'warn';
+  state.timelineShouldFollowLatest = true;
   render();
   scrollTimelineToBottom();
   try {
@@ -1714,6 +2067,7 @@ async function selectSession(sessionId) {
     state.status = 'Ready';
     state.statusTone = 'success';
   }
+  state.timelineShouldFollowLatest = true;
   render();
   scrollTimelineToBottom();
   if (refreshedActiveTurn && state.turnId) {
@@ -1744,7 +2098,7 @@ async function onComposerSubmit(event) {
   });
   const promptToSend = text;
   state.prompt = '';
-  render();
+  renderChatAtLatestIfFollowing(() => {});
 
   try {
     const sessionId = await ensureSession();
@@ -1769,7 +2123,7 @@ async function onComposerSubmit(event) {
     state.turnId = turn.turnId;
     state.status = 'Turn running';
     state.statusTone = 'warn';
-    render();
+    renderChatAtLatestIfFollowing(() => {});
     void streamTurnEvents(turn.turnId);
   } catch (error) {
     state.pendingTurn = false;
@@ -2025,7 +2379,7 @@ async function streamTurnEvents(turnId, options = {}) {
     if (state.streamAbortController === controller) {
       state.streamAbortController = null;
     }
-    render();
+    refreshChatDynamicUi();
   }
 
   function processSseFrame(frame) {
@@ -2133,7 +2487,6 @@ function applyTurnEvent(event, assistantEntry) {
     case 'turn.started':
       state.status = 'Turn running';
       state.statusTone = 'warn';
-      ensureWorkItem(event.turnId);
       break;
     case 'assistant.delta':
       if (!assistantEntry || assistantEntry.id !== `assistant_${event.turnId}`) {
@@ -2195,7 +2548,7 @@ function applyTurnEvent(event, assistantEntry) {
         resolved: false,
       };
       state.approvals.set(event.approvalId, approval);
-      upsertWorkApproval(event.turnId, approval);
+      appendOrReplace(approval, (item) => item.id === approval.id);
       break;
     }
     case 'approval.resolved': {
@@ -2206,7 +2559,7 @@ function applyTurnEvent(event, assistantEntry) {
           ...approval.summary,
           decision: event.decision,
         };
-        upsertWorkApproval(event.turnId, approval);
+        appendOrReplace(approval, (item) => item.id === approval.id);
       }
       state.status = 'Approval resolved';
       state.statusTone = 'warn';
@@ -2217,7 +2570,6 @@ function applyTurnEvent(event, assistantEntry) {
       state.streamWasBackgrounded = false;
       state.status = event.status === 'completed' ? 'Ready' : `Turn ${event.status}`;
       state.statusTone = event.status === 'completed' ? 'success' : 'warn';
-      setWorkStatus(event.turnId, event.status || 'completed');
       state.turnId = null;
       stopStream();
       void refreshCurrentSessionMetadata();
@@ -2231,92 +2583,46 @@ function applyTurnEvent(event, assistantEntry) {
       stopStream();
       state.error = event.message || 'Turn failed';
       appendTimelineError(event.turnId, state.error);
-      setWorkStatus(event.turnId, 'failed');
       break;
   }
   saveCurrentTimeline();
-  render();
-  scrollTimelineToBottom();
+  refreshChatDynamicUi();
+  scrollTimelineToBottomIfFollowingLatest();
   return assistantEntry;
 }
 
-function upsertBatch(batchId, patch) {
-  const current = state.batches.get(batchId) || {
-    id: `batch_${batchId}`,
-    kind: 'batch',
-    batchId,
-    batchKind: 'unknown',
-    title: 'Batch',
-    status: '',
-    summary: {},
-  };
-  const next = { ...current, ...patch, summary: { ...current.summary, ...(patch.summary || {}) } };
-  state.batches.set(batchId, next);
-  appendOrReplace(next, (item) => item.id === next.id);
-}
-
-function ensureWorkItem(turnId) {
-  const id = `work_${turnId || 'unknown'}`;
-  let item = state.timeline.find((entry) => entry.id === id);
-  if (!item) {
-    item = {
-      id,
-      kind: 'work',
-      turnId,
-      status: 'running',
-      batches: [],
-      approvals: [],
-    };
-    state.timeline.push(item);
-  }
-  return item;
-}
-
 function upsertWorkBatch(turnId, batchId, patch) {
-  const work = ensureWorkItem(turnId);
-  const batches = Array.isArray(work.batches) ? work.batches : [];
-  const index = batches.findIndex((item) => item.batchId === batchId);
-  const current = index >= 0
-    ? batches[index]
-    : {
+  const current = state.batches.get(batchId)
+    || {
       id: `batch_${batchId}`,
+      kind: 'batch',
+      turnId,
       batchId,
       batchKind: 'unknown',
       title: 'Batch',
       status: '',
       summary: {},
     };
-  const next = { ...current, ...patch, summary: { ...current.summary, ...(patch.summary || {}) } };
-  if (index >= 0) {
-    batches[index] = next;
-  } else {
-    batches.push(next);
-  }
-  work.batches = batches;
-  if (workBatchHasError(next)) {
-    work.status = 'error';
-  }
+  const next = {
+    ...current,
+    ...patch,
+    turnId: current.turnId || turnId,
+    summary: { ...current.summary, ...(patch.summary || {}) },
+  };
   state.batches.set(batchId, next);
-  appendOrReplace(work, (item) => item.id === work.id, { moveToEnd: true });
 }
 
-function upsertWorkApproval(turnId, approval) {
-  const work = ensureWorkItem(turnId);
-  const approvals = Array.isArray(work.approvals) ? work.approvals : [];
-  const index = approvals.findIndex((item) => item.approvalId === approval.approvalId);
-  if (index >= 0) {
-    approvals[index] = approval;
-  } else {
-    approvals.push(approval);
-  }
-  work.approvals = approvals;
-  appendOrReplace(work, (item) => item.id === work.id);
+function upsertWorkApproval(_turnId, approval) {
+  appendOrReplace(approval, (item) => item.id === approval.id);
 }
 
 function setWorkStatus(turnId, status) {
-  const work = ensureWorkItem(turnId);
-  work.status = status;
-  appendOrReplace(work, (item) => item.id === work.id, { moveToEnd: true });
+  for (const batch of state.batches.values()) {
+    if (batch?.turnId === turnId) {
+      batch.status = status;
+      state.batches.set(batch.batchId, batch);
+    }
+  }
 }
 
 function resetTurnState() {
@@ -2367,7 +2673,7 @@ function isMissingSessionError(error) {
 
 function isUnavailableSessionError(error) {
   const message = error?.payload?.message || error?.message || '';
-  return /thread not loaded|no rollout found for thread id/i.test(message);
+  return /thread not loaded|no rollout found for thread id|rollout .* is empty/i.test(message);
 }
 
 async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
@@ -2389,9 +2695,11 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false } = {}) {
           reconcileActiveTurnFromSession(session);
         }
       }
-      if (state.view === 'sessions' || hydrateTimeline) {
-        render();
-        scrollTimelineToBottom();
+      if (state.sessionId === sessionId) {
+        renderChatWithTimelineRestored(() => {});
+        if (hydrateTimeline && state.view === 'chat') {
+          scrollTimelineToBottomIfFollowingLatest();
+        }
       }
       return session;
     }
@@ -2492,7 +2800,12 @@ async function openReportById(reportId, { returnView = state.view } = {}) {
   if (!reportId) {
     return;
   }
-  state.reportReturnView = returnView === 'chat' ? 'chat' : 'reports';
+  const normalizedReturnView = normalizeReportReturnView(returnView);
+  const reportReturnSnapshot = normalizedReturnView === 'chat' ? captureTimelineViewport() : null;
+  if (reportReturnSnapshot && !chatTimelineReturnSnapshot) {
+    chatTimelineReturnSnapshot = reportReturnSnapshot;
+  }
+  state.reportReturnView = normalizedReturnView;
   state.view = 'report';
   state.currentReport = state.reports.find((report) => report.id === reportId) || {
     id: reportId,
@@ -2501,23 +2814,47 @@ async function openReportById(reportId, { returnView = state.view } = {}) {
     project: reportProjectFromId(reportId),
   };
   state.currentReportContent = '';
+  state.currentReportLoading = true;
   state.error = '';
   render();
   try {
     const payload = await apiFetch(`/api/reports/${encodeURIComponent(reportId)}/content`);
     state.currentReport = payload.report;
     state.currentReportContent = payload.content || '';
+    state.currentReportLoading = false;
     upsertReport(payload.report);
-    render();
+    renderReportWithScrollPreserved(() => {});
   } catch (error) {
+    state.currentReportLoading = false;
     handleApiError(error);
   }
+}
+
+function normalizeReportReturnView(returnView) {
+  if (returnView === 'chat' && state.sessionId) {
+    return 'chat';
+  }
+  if (returnView === 'reports' && state.reportsReturnView === 'chat' && state.sessionId) {
+    return 'chat';
+  }
+  return 'reports';
 }
 
 async function openReportByPath(reportPath, { returnView = 'chat' } = {}) {
   if (!reportPath) {
     return;
   }
+  const normalizedReturnView = normalizeReportReturnView(returnView);
+  if (normalizedReturnView === 'chat' && !chatTimelineReturnSnapshot) {
+    chatTimelineReturnSnapshot = captureTimelineViewport();
+  }
+  state.reportReturnView = normalizedReturnView;
+  state.view = 'report';
+  state.currentReport = reportFromPath(reportPath);
+  state.currentReportContent = '';
+  state.currentReportLoading = true;
+  state.error = '';
+  render();
   try {
     const payload = await apiFetch('/api/reports/resolve', {
       method: 'POST',
@@ -2525,9 +2862,10 @@ async function openReportByPath(reportPath, { returnView = 'chat' } = {}) {
     });
     if (payload?.report) {
       upsertReport(payload.report);
-      await openReportById(payload.report.id, { returnView });
+      await openReportById(payload.report.id, { returnView: normalizedReturnView });
     }
   } catch (error) {
+    state.currentReportLoading = false;
     handleApiError(error);
   }
 }
@@ -2552,7 +2890,7 @@ async function toggleReportFavorite(reportId) {
     state.status = favorite ? 'Report favorited' : 'Favorite removed';
     state.statusTone = 'success';
     state.error = '';
-    render();
+    renderReportWithScrollPreserved(() => {});
   } catch (error) {
     handleApiError(error);
   }
@@ -2562,8 +2900,16 @@ function closeReportViewer() {
   const returnView = state.reportReturnView;
   state.currentReport = null;
   state.currentReportContent = '';
+  state.currentReportLoading = false;
   state.view = returnView === 'chat' && state.sessionId ? 'chat' : 'reports';
+  if (state.view !== 'reports') {
+    state.reportProject = '';
+  }
   render();
+  if (state.view === 'chat') {
+    restoreTimelineViewport(chatTimelineReturnSnapshot);
+    chatTimelineReturnSnapshot = null;
+  }
 }
 
 async function setSessionSortMode(mode) {
@@ -2621,6 +2967,7 @@ async function refreshCurrentView() {
         streamTurnEvents(state.turnId, { forceReconnect: true });
       }
     } else {
+      rememberSessionListScroll();
       await refreshSessionsList({
         renderAfter: false,
         scope: state.sortMode === 'favorites' ? 'favorites' : 'all',
@@ -3321,7 +3668,7 @@ function uniqueSessionPaths() {
 }
 
 function projectNameForSession(session, fallbackCwd = '') {
-  return session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || session?.title || 'New Session';
+  return cwdLeafName(session?.cwd || fallbackCwd) || session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || session?.title || 'New Session';
 }
 
 function isFavoriteSession(session) {
@@ -3428,35 +3775,82 @@ function reportKindFromId(reportId) {
   return /\.html?$/iu.test(String(reportId || '')) ? 'html' : 'markdown';
 }
 
-function reportProjectForSession(session) {
-  const slugs = sessionReportProjectSlugs(session);
-  if (!slugs.size) {
-    return '';
-  }
-  const report = [...state.reports]
-    .sort(compareReports)
-    .find((item) => slugs.has(slugifyReportKey(item.project)) || slugs.has(slugifyReportKey(reportProjectFromId(item.id))))
-    || null;
-  if (report) {
-    return report.project || reportProjectFromId(report.id);
-  }
-  return [...slugs][0] || '';
+function reportFromPath(reportPath) {
+  const value = String(reportPath || '');
+  const reportRootMarker = '/.codex-web/reports/';
+  const markerIndex = value.indexOf(reportRootMarker);
+  const reportId = markerIndex >= 0
+    ? value.slice(markerIndex + reportRootMarker.length)
+    : value.split('/').filter(Boolean).slice(-3).join('/');
+  return {
+    id: reportId || value,
+    title: reportTitleFromId(reportId || value),
+    kind: reportKindFromId(reportId || value),
+    project: reportProjectFromId(reportId || value),
+  };
 }
 
-function sessionReportProjectSlugs(session) {
+function reportProjectForSession(session) {
+  const keys = sessionReportProjectKeys(session);
+  if (!keys.slugSet.size) {
+    return '';
+  }
+
+  const nestedProject = [...state.reports]
+    .sort(compareReports)
+    .find((item) => {
+      const project = String(item.project || '').trim();
+      return project && keys.fullProjectSlugSet.has(slugifyReportKey(project));
+    })
+    || null;
+  if (nestedProject) {
+    return nestedProject.project;
+  }
+
+  const topLevelProject = [...state.reports]
+    .sort(compareReports)
+    .find((item) => {
+      const projectRoot = String(reportProjectFromId(item.id) || '').trim();
+      return projectRoot && keys.slugSet.has(slugifyReportKey(projectRoot));
+    })
+    || null;
+  if (topLevelProject) {
+    return reportProjectFromId(topLevelProject.id);
+  }
+
+  const report = [...state.reports]
+    .sort(compareReports)
+    .find((item) => keys.slugSet.has(slugifyReportKey(item.project)) || keys.slugSet.has(slugifyReportKey(reportProjectFromId(item.id))))
+    || null;
+  if (report) {
+    return reportProjectFromId(report.id);
+  }
+  return keys.fallbackProject || '';
+}
+
+function sessionReportProjectKeys(session) {
   const values = [
+    cwdLeafName(session?.cwd || ''),
     session?.projectName,
     session?.title,
-    projectNameFromCwd(session?.cwd || ''),
   ];
-  const slugs = new Set();
+  const slugSet = new Set();
+  const fullProjectSlugSet = new Set();
+  let fallbackProject = '';
   for (const value of values) {
-    const slug = slugifyReportKey(value);
+    const normalized = String(value || '').trim();
+    const slug = slugifyReportKey(normalized);
     if (slug) {
-      slugs.add(slug);
+      slugSet.add(slug);
+      if (!fallbackProject) {
+        fallbackProject = normalized;
+      }
+      if (/[\\/]/u.test(normalized)) {
+        fullProjectSlugSet.add(slug);
+      }
     }
   }
-  return slugs;
+  return { slugSet, fullProjectSlugSet, fallbackProject };
 }
 
 function slugifyReportKey(value) {
@@ -3475,6 +3869,11 @@ function projectNameFromCwd(cwd) {
     return '';
   }
   return parts.slice(-2).join('/');
+}
+
+function cwdLeafName(cwd) {
+  const parts = String(cwd || '').split(/[\\/]+/u).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
 }
 
 function firstInputForSession(session) {
@@ -3838,6 +4237,8 @@ function getActiveScrollContainer(pull = {}) {
     return null;
   }
   return document.querySelector('.timeline')
+    || document.querySelector('.report-viewer')
+    || document.querySelector('.report-list')
     || document.querySelector('.session-list')
     || document.querySelector('.new-session-page')
     || document.scrollingElement;
@@ -4063,6 +4464,7 @@ function scrollTimelineToBottom() {
     const timeline = document.querySelector('#timeline');
     if (timeline) {
       timeline.scrollTop = timeline.scrollHeight;
+      state.timelineShouldFollowLatest = true;
     }
   });
 }
@@ -4213,20 +4615,36 @@ function renderInlineMarkdown(value) {
     .replace(/`([^`]+)`/gu, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/gu, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/gu, '<em>$1</em>')
-    .replace(/\[([^\]]+)\]\(((?:\/|~\/|\.\.?\/)[^)\s]+\.(?:md|markdown|html?|htm))\)/giu, (_match, label, href) => renderReportLink(label, href))
+    .replace(/\[([^\]]+)\]\(((?:\/|~\/|\.\.?\/)[^)\s]+\.(?:md|markdown|html?|htm))\)/giu, (_match, label, href) => {
+      const decodedHref = decodeHtmlEntityText(href);
+      if (!isStrictReportPath(decodedHref)) {
+        return `[${label}](${href})`;
+      }
+      return renderReportLink(label, decodedHref);
+    })
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/gu, '<a href="$2" target="_blank" rel="noreferrer">$1</a>'));
 }
 
 function linkPlainReportPaths(html) {
   return String(html || '').replace(
     /(^|[\s:：>])((?:\/|~\/|\.\.?\/)[^\s<>"']*?\.codex-web\/reports\/[^\s<>"']+?\.(?:md|markdown|html?|htm))(?=$|[\s<),，。！？!?])/giu,
-    (_match, prefix, reportPath) => `${prefix}${renderReportLink(shortReportPathLabel(reportPath), reportPath)}`,
+    (_match, prefix, reportPath) => {
+      if (!isStrictReportPath(reportPath)) {
+        return `${prefix}${reportPath}`;
+      }
+      return `${prefix}${renderReportLink(shortReportPathLabel(reportPath), reportPath)}`;
+    },
   );
 }
 
 function renderReportLink(label, href) {
   const reportPath = decodeHtmlEntityText(href);
   return `<a href="#" class="report-link" data-report-path="${escapeAttribute(reportPath)}">${label}</a>`;
+}
+
+function isStrictReportPath(value) {
+  const reportPath = decodeHtmlEntityText(value);
+  return /(?:^|[\\/])\.codex-web[\\/]reports[\\/].+\.(?:md|markdown|html?|htm)$/iu.test(reportPath);
 }
 
 function shortReportPathLabel(reportPath) {

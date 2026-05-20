@@ -861,7 +861,8 @@ function isIncludeTurnsRetryableError(error: unknown): boolean {
   return /includeTurns is unavailable before first user message/i.test(message)
     || /ephemeral threads do not support includeTurns/i.test(message)
     || /not materialized yet/i.test(message)
-    || /empty session file/i.test(message);
+    || /empty session file/i.test(message)
+    || /rollout .* is empty/i.test(message);
 }
 
 export function isMissingThreadError(error: unknown): boolean {
@@ -878,5 +879,6 @@ function isUnavailableThreadError(error: unknown): boolean {
 
 function isMissingRolloutError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /no rollout found for thread id/i.test(message);
+  return /no rollout found for thread id/i.test(message)
+    || /rollout .* is empty/i.test(message);
 }

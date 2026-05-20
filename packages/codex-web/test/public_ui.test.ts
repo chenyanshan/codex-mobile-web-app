@@ -35,7 +35,7 @@ test('mobile UI exposes iOS PWA install metadata and registers a service worker'
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.type), ['image/png', 'image/png']);
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.sizes), ['192x192', '512x512']);
   assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
-  assert.match(serviceWorker, /codex-web-static-2026-05-20-message-size-settings-v18/u);
+  assert.match(serviceWorker, /codex-web-static-2026-05-20-chat-render-bottom-v29/u);
   assert.match(serviceWorker, /'\/icon-192\.png'/u);
   assert.match(serviceWorker, /'\/icon-512\.png'/u);
   assert.match(serviceWorker, /'\/apple-touch-icon\.png'/u);
@@ -273,16 +273,95 @@ test('message input starts one line and auto-grows to a compact capped height', 
   ]);
 
   assert.match(app, /<textarea id="prompt-input"[^>]*rows="1"/u);
+  assert.match(app, /id="composer-expand-button"/u);
+  assert.match(app, /function updateComposerExpansionState\(textarea\)/u);
+  assert.match(app, /function toggleComposerExpanded\(\)/u);
+  assert.match(app, /class="composer-wrap \$\{composerClassName\}"/u);
+  assert.match(app, /class="composer \$\{composerClassName\}"/u);
+  assert.match(app, /class="message-editor-shell \$\{composerClassName\}"/u);
   assert.match(styles, /\.compact-composer-row textarea\s*\{[^}]*min-height:\s*38px;/su);
   assert.match(styles, /\.compact-composer-row textarea\s*\{[^}]*max-height:\s*116px;/su);
   assert.match(styles, /\.compact-composer-row textarea\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.match(styles, /\.composer\.is-expanded\s*\{/su);
+  assert.match(styles, /\.message-editor-shell\s*\{[^}]*position:\s*relative;/su);
+  assert.doesNotMatch(styles, /\.message-editor-shell\[data-editor-toggle-visible=/u);
+  assert.doesNotMatch(styles, /\.message-editor-shell\.is-expanded textarea\s*\{[^}]*padding-left:/su);
+  assert.doesNotMatch(styles, /\.composer-editor-toggle/u);
+  assert.match(styles, /\.composer-leading-controls\s*\{[^}]*gap:\s*6px;/su);
+  assert.match(styles, /\.icon-button\[hidden\]\s*\{[^}]*display:\s*none;/su);
   assert.match(styles, /\.icon-button,\s*\.compact-send\s*\{[^}]*min-height:\s*38px;/su);
   assert.match(styles, /\.icon-button,\s*\.compact-send\s*\{[^}]*padding:\s*0 8px;/su);
   assert.match(app, /function autoGrowPromptInput\(textarea\)/u);
   assert.match(app, /textarea\.style\.height = 'auto';/u);
-  assert.match(app, /Math\.min\(textarea\.scrollHeight, 116\)/u);
+  assert.match(app, /if \(state\.composerExpanded\) \{\s*textarea\.style\.height = '';\s*return;\s*\}/u);
+  assert.match(app, /PROMPT_TEXTAREA_MAX_HEIGHT/u);
+  assert.match(app, /PROMPT_EXPAND_LINE_THRESHOLD/u);
+  assert.match(app, /Math\.min\(textarea\.scrollHeight, maxHeight\)/u);
   assert.match(app, /Math\.max\(38, nextHeight\)/u);
   assert.match(app, /autoGrowPromptInput\(promptInput\)/u);
+  assert.match(styles, /\.composer\.is-expanded\s*\{[^}]*min-height:\s*min\(84dvh,\s*640px\);/su);
+  assert.doesNotMatch(styles, /\.composer\.is-expanded \.compact-composer-row textarea\s*\{[^}]*min-height:\s*min\(72dvh,\s*560px\);/su);
+  assert.doesNotMatch(styles, /\.composer\.is-expanded \.compact-composer-row textarea\s*\{[^}]*max-height:\s*min\(72dvh,\s*560px\);/su);
+});
+
+test('composer shows external expand above Set and expanded editor wraps collapse textarea and Send', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.view = 'chat';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.composerCanExpand = false;
+  api.state.composerExpanded = false;
+
+  const shortHtml = api.renderChat().innerHTML;
+  assert.match(shortHtml, /id="settings-toggle"[^>]*>Set<\/button>/u);
+  assert.doesNotMatch(shortHtml, /id="settings-toggle"[^>]*hidden/u);
+  assert.match(shortHtml, /id="composer-expand-button"[^>]*hidden/u);
+  assert.match(shortHtml, /id="settings-toggle"[^>]*>Set<\/button>/u);
+  assert.match(shortHtml, /class="message-editor-shell [^"]*"/u);
+  assert.match(shortHtml, /<textarea id="prompt-input"[\s\S]*<button class="primary compact-send" type="submit" id="send-button">Send<\/button>/u);
+  assert.match(shortHtml, /class="composer-wrap "/u);
+
+  api.state.composerCanExpand = true;
+  const compactHtml = api.renderChat().innerHTML;
+  assert.match(compactHtml, /class="composer-wrap is-expandable"/u);
+  assert.match(compactHtml, /class="composer is-expandable"/u);
+  assert.match(compactHtml, /class="message-editor-shell is-expandable"/u);
+  assert.match(compactHtml, /<div class="composer-leading-controls">[\s\S]*id="composer-expand-button"[\s\S]*\^<\/button>[\s\S]*id="settings-toggle"[^>]*>Set<\/button>[\s\S]*<\/div>/u);
+  assert.doesNotMatch(compactHtml, /id="settings-toggle"[^>]*hidden/u);
+
+  api.state.composerExpanded = true;
+  api.state.settingsOpen = true;
+  api.state.error = 'Failure stays available after collapsing';
+  const expandedHtml = api.renderChat().innerHTML;
+
+  assert.match(expandedHtml, /id="settings-toggle"[^>]*hidden/u);
+  assert.doesNotMatch(expandedHtml, /settings-drawer/u);
+  assert.doesNotMatch(expandedHtml, /composer-status/u);
+  assert.doesNotMatch(expandedHtml, /composer-error/u);
+  assert.match(expandedHtml, /class="composer-wrap is-expanded"/u);
+  assert.match(expandedHtml, /class="composer is-expanded"/u);
+  assert.match(expandedHtml, /<div class="composer-leading-controls">[\s\S]*id="composer-expand-button"[\s\S]*v<\/button>[\s\S]*id="settings-toggle"[^>]*hidden/u);
+  assert.match(expandedHtml, /<div class="message-editor-shell is-expanded"[\s\S]*<textarea id="prompt-input"[\s\S]*<button class="primary compact-send" type="submit" id="send-button">Send<\/button>[\s\S]*<\/div>/u);
+  assert.match(expandedHtml, /<textarea id="prompt-input"[\s\S]*id="send-button"/u);
+});
+
+test('expanded composer positions collapse and Send inside a single editor surface', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.composer\.is-expanded\s*\{[^}]*padding:\s*0;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded\s*\{[^}]*position:\s*relative;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded\s*\{[^}]*min-height:\s*min\(84dvh,\s*640px\);/su);
+  assert.match(styles, /\.composer\.is-expanded \.composer-leading-controls #composer-expand-button\s*\{[^}]*position:\s*absolute;/su);
+  assert.match(styles, /\.composer\.is-expanded \.composer-leading-controls #composer-expand-button\s*\{[^}]*top:\s*0;/su);
+  assert.match(styles, /\.composer\.is-expanded \.composer-leading-controls #composer-expand-button\s*\{[^}]*left:\s*0;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded textarea\s*\{[^}]*height:\s*100%;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded textarea\s*\{[^}]*border-color:\s*transparent;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded textarea\s*\{[^}]*background:\s*transparent;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded textarea\s*\{[^}]*padding:\s*54px 12px 58px;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded \.compact-send\s*\{[^}]*position:\s*absolute;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded \.compact-send\s*\{[^}]*right:\s*8px;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded \.compact-send\s*\{[^}]*bottom:\s*8px;/su);
+  assert.doesNotMatch(styles, /\.composer\.is-expanded \.compact-composer-row textarea\s*\{[^}]*max-height:\s*min\(72dvh,\s*560px\);/su);
 });
 
 test('running turns keep message sending available and move stop into settings', async () => {
@@ -393,6 +472,18 @@ test('settings drawer opens without changing chat scroll geometry', async () => 
   assert.doesNotMatch(styles, /\.settings-drawer\s*\{[^}]*margin-bottom:/su);
 });
 
+test('chat settings drawer no longer exposes activity detail controls', async () => {
+  const [app, styles] = await Promise.all([
+    readFile(appUrl, 'utf8'),
+    readFile(stylesUrl, 'utf8'),
+  ]);
+
+  assert.doesNotMatch(app, /activity-detail-toggle/u);
+  assert.doesNotMatch(app, /Activity details/u);
+  assert.doesNotMatch(app, /function setActivityDetailsEnabled\(/u);
+  assert.doesNotMatch(styles, /\.settings-toggle-row/u);
+});
+
 test('app settings page exposes message font size controls scoped to chat messages', async () => {
   const [app, styles] = await Promise.all([
     readFile(appUrl, 'utf8'),
@@ -490,6 +581,179 @@ test('chat and session list use separate scroll containers', async () => {
   assert.match(styles, /\.timeline\s*\{[^}]*overscroll-behavior:\s*contain;/su);
   assert.match(styles, /\.session-list,\s*\.new-session-page,\s*\.app-settings-page\s*\{[^}]*overflow-y:\s*auto;/su);
   assert.match(styles, /\.session-list,\s*\.new-session-page,\s*\.app-settings-page\s*\{[^}]*overscroll-behavior:\s*contain;/su);
+});
+
+test('report viewer uses its own scroll container instead of the outer document', async () => {
+  const { api, context } = await loadAppHarness();
+  const appRoot = { innerHTML: '', appendChild() {} };
+  const reportViewer = { id: 'report-viewer' };
+  const documentScroll = { id: 'document-scroll' };
+
+  api.state.view = 'report';
+  context.document.scrollingElement = documentScroll;
+  context.document.querySelector = (selector) => {
+    if (selector === '.report-viewer') {
+      return reportViewer;
+    }
+    if (selector === '#app') {
+      return appRoot;
+    }
+    return null;
+  };
+
+  assert.equal(api.getActiveScrollContainer({}), reportViewer);
+});
+
+test('composer bottom gap stays tight above the keyboard safe area', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.composer-wrap\s*\{[^}]*padding:\s*6px 10px calc\(env\(safe-area-inset-bottom,\s*0px\) \+ 4px\);/su);
+});
+
+test('timeline follows the latest messages until the user scrolls upward', async () => {
+  const { api, context } = await loadAppHarness();
+  const timeline = {
+    _scrollTop: 800,
+    clientHeight: 200,
+    scrollHeight: 1000,
+    get scrollTop() {
+      return this._scrollTop;
+    },
+    set scrollTop(value) {
+      this._scrollTop = value;
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const appElement = context.document.querySelector('#app');
+  context.document.querySelector = (selector) => {
+    if (selector === '#timeline') {
+      return timeline;
+    }
+    if (selector === '#app') {
+      return appElement;
+    }
+    return null;
+  };
+
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', text: 'latest' }];
+
+  api.attachTimelineScrollTracking();
+  api.state.timeline.push({ id: 'm2', kind: 'message', role: 'assistant', text: 'new latest' });
+  api.scrollTimelineToBottomIfFollowingLatest();
+  assert.equal(timeline.scrollTop, 1000);
+
+  timeline.scrollHeight = 1200;
+  timeline._scrollTop = 700;
+  api.updateTimelineFollowState();
+  api.state.timeline.push({ id: 'm3', kind: 'message', role: 'assistant', text: 'should not snap' });
+  api.scrollTimelineToBottomIfFollowingLatest();
+  assert.equal(timeline.scrollTop, 700);
+});
+
+test('composer expand toggle stays hidden at two lines and appears at four lines', async () => {
+  const { api, context } = await loadAppHarness();
+  let expandButtonHidden = true;
+  const textarea = {
+    scrollHeight: 62,
+    style: {},
+  };
+  const expandButton = {
+    textContent: '',
+    hidden: true,
+    setAttribute() {},
+    get hidden() {
+      return expandButtonHidden;
+    },
+    set hidden(value) {
+      expandButtonHidden = Boolean(value);
+    },
+  };
+
+  context.window.getComputedStyle = () => ({
+    lineHeight: '23px',
+    paddingTop: '8px',
+    paddingBottom: '8px',
+  });
+  const originalQuerySelector = context.document.querySelector;
+  context.document.querySelector = (selector) => {
+    if (selector === '#composer-expand-button') {
+      return expandButton;
+    }
+    return originalQuerySelector(selector);
+  };
+
+  api.updateComposerExpansionState(textarea);
+  assert.equal(api.state.composerCanExpand, false);
+  assert.equal(expandButton.hidden, true);
+
+  textarea.scrollHeight = 108;
+  api.updateComposerExpansionState(textarea);
+  assert.equal(api.state.composerCanExpand, true);
+  assert.equal(expandButton.hidden, false);
+});
+
+test('composer expansion threshold ignores textarea padding when counting lines', async () => {
+  const { api, context } = await loadAppHarness();
+  const textarea = {
+    scrollHeight: 56,
+    style: {},
+  };
+
+  context.window.getComputedStyle = () => ({
+    lineHeight: '16px',
+    paddingTop: '12px',
+    paddingBottom: '12px',
+  });
+
+  api.updateComposerExpansionState(textarea);
+  assert.equal(api.state.composerCanExpand, false);
+
+  textarea.scrollHeight = 88;
+  api.updateComposerExpansionState(textarea);
+  assert.equal(api.state.composerCanExpand, true);
+});
+
+test('composer expansion state changes do not re-render the whole chat while typing', async () => {
+  const app = await readFile(appUrl, 'utf8');
+  const updateComposerExpansionState = app.match(/function updateComposerExpansionState\(textarea\)\s*\{[\s\S]*?\n\}/u)?.[0] || '';
+
+  assert.ok(updateComposerExpansionState.length > 0);
+  assert.doesNotMatch(updateComposerExpansionState, /render\(\)/u);
+});
+
+test('session list scroll position is restored when returning from chat or refresh', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /let sessionListRestoreScrollTop = null;/u);
+  assert.match(app, /function restoreSessionListScroll\(\)/u);
+  assert.match(app, /function rememberSessionListScroll\(\)/u);
+  assert.match(app, /if \(state\.view === 'sessions'\) \{\s*restoreSessionListScroll\(\);/u);
+  assert.match(app, /showSessionList\(\) \{\s*saveCurrentTimeline\(\);[\s\S]*rememberSessionListScroll\(\);/u);
+  assert.match(app, /for \(const button of document\.querySelectorAll\('\[data-session-id\]'\)\) \{\s*button\.addEventListener\('click', \(\) => \{\s*rememberSessionListScroll\(\);/u);
+  assert.match(app, /function refreshCurrentView\(\)[\s\S]*rememberSessionListScroll\(\);[\s\S]*await refreshSessionsList/u);
+});
+
+test('chat render keeps the timeline at the latest content by default', async () => {
+  const { api, context } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.timelineShouldFollowLatest = true;
+  api.state.timeline = [
+    { id: 'm1', kind: 'message', role: 'user', label: 'You', text: 'Question' },
+    { id: 'm2', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Latest answer' },
+  ];
+
+  api.render();
+  const timeline = context.document.querySelector('#timeline');
+
+  assert.equal(timeline.scrollTop, timeline.scrollHeight);
+  assert.equal(api.state.timelineShouldFollowLatest, true);
 });
 
 test('mobile timeline reserves the measured composer height', async () => {
@@ -608,7 +872,7 @@ test('mobile UI uses session list, compact composer, settings drawer, and histor
   assert.match(app, /settingsOpen/u);
   assert.match(app, /function renderComposerStatus\(\)/u);
   assert.match(app, /composer-status/u);
-  assert.match(app, /<div class="composer-wrap">\s*\$\{renderComposerStatus\(\)\}\s*<form class="composer"/u);
+  assert.match(app, /<div class="composer-wrap \$\{composerClassName\}">\s*\$\{state\.composerExpanded \? '' : renderComposerStatus\(\)\}\s*<form class="composer \$\{composerClassName\}"/u);
   assert.doesNotMatch(app, /----- \$\{escapeHtml\(composerStatusLabel\(\)\)\} -----/u);
   assert.doesNotMatch(app, /Turn started/u);
   assert.doesNotMatch(app, /Turn completed/u);
@@ -674,169 +938,9 @@ test('assistant messages render markdown while user messages stay plain text', a
   assert.match(userHtml, /<p class="message-text">\*\*do not render\*\*<\/p>/u);
 });
 
-test('work items summarize commands edits reads and approvals in a collapsible block', async () => {
+test('work batches are cached for recovery without rendering timeline cards', async () => {
   const { api } = await loadAppHarness();
 
-  const work = {
-    id: 'work_turn_1',
-    kind: 'work',
-    turnId: 'turn_1',
-    status: 'running',
-    batches: [
-      {
-        batchId: 'batch_read',
-        batchKind: 'command',
-        title: 'rg -n "hydrateTimeline" packages/codex-web/public/app.js',
-        status: 'completed',
-        summary: { cwd: '/repo' },
-      },
-      {
-        batchId: 'batch_test',
-        batchKind: 'command',
-        title: 'npm run test --workspace packages/codex-web -- public_ui.test.ts',
-        status: 'completed',
-        summary: { exitCode: 0 },
-      },
-      {
-        batchId: 'batch_edit',
-        batchKind: 'file_change',
-        title: '2 file changes',
-        status: 'completed',
-        summary: {
-          fileChanges: [
-            { path: 'packages/codex-web/public/app.js' },
-            { path: 'packages/codex-web/public/styles.css' },
-          ],
-        },
-      },
-    ],
-    approvals: [
-      {
-        approvalId: 'approval_1',
-        approvalKind: 'permission',
-        resolved: true,
-        summary: { command: 'npm install', decision: 'accepted' },
-      },
-    ],
-  };
-
-  const html = api.renderTimelineItem(work);
-
-  assert.match(html, /<details class="card work-card" open/u);
-  assert.match(html, /Work/u);
-  assert.match(html, /Read 1/u);
-  assert.match(html, /Ran 1/u);
-  assert.match(html, /Edited 2/u);
-  assert.match(html, /Approval 1/u);
-  assert.match(html, /data-work-kind="read"/u);
-  assert.match(html, /data-work-kind="command"/u);
-  assert.match(html, /data-work-kind="edit"/u);
-  assert.match(html, /packages\/codex-web\/public\/app\.js/u);
-  assert.match(html, /npm run test --workspace packages\/codex-web -- public_ui\.test\.ts/u);
-  assert.doesNotMatch(html, /<article class="card">\s*<div class="card-header">\s*<span class="card-title">npm run test/su);
-});
-
-test('work items expose detailed command output and file change metadata', async () => {
-  const { api } = await loadAppHarness();
-
-  const html = api.renderTimelineItem({
-    id: 'work_turn_detail',
-    kind: 'work',
-    turnId: 'turn_detail',
-    status: 'completed',
-    batches: [
-      {
-        batchId: 'cmd_detail',
-        batchKind: 'command',
-        title: 'npm test',
-        status: 'completed',
-        summary: {
-          command: 'npm test',
-          cwd: '/workspace',
-          output: '42 passing\n0 failing',
-          exitCode: 0,
-        },
-      },
-      {
-        batchId: 'edit_detail',
-        batchKind: 'file_change',
-        title: 'Edited packages/codex-web/public/app.js',
-        status: 'completed',
-        summary: {
-          fileChanges: [
-            {
-              path: 'packages/codex-web/public/app.js',
-              action: 'modified',
-              additions: 12,
-              deletions: 3,
-            },
-          ],
-        },
-      },
-    ],
-    approvals: [],
-  });
-
-  assert.match(html, /<details class="work-detail" data-work-kind="command">/u);
-  assert.doesNotMatch(html, /<details class="work-detail" open data-work-kind="command">/u);
-  assert.match(html, /Command/u);
-  assert.match(html, /npm test/u);
-  assert.match(html, /42 passing/u);
-  assert.match(html, /Exit Code/u);
-  assert.match(html, /packages\/codex-web\/public\/app\.js/u);
-  assert.match(html, /modified/u);
-  assert.match(html, /\+12 \/ -3/u);
-  assert.doesNotMatch(html, /No additional details/u);
-});
-
-test('work details stay collapsed until detailed activity is enabled in settings', async () => {
-  const { api, storage } = await loadAppHarness();
-
-  const work = {
-    id: 'work_turn_detail_toggle',
-    kind: 'work',
-    turnId: 'turn_detail_toggle',
-    status: 'running',
-    batches: [
-      {
-        batchId: 'cmd_detail_toggle',
-        batchKind: 'command',
-        title: 'npm test',
-        status: 'completed',
-        summary: {
-          command: 'npm test',
-          cwd: '/workspace',
-          output: '42 passing',
-          raw: { method: 'item/completed' },
-        },
-      },
-    ],
-    approvals: [],
-  };
-
-  api.state.view = 'chat';
-  api.state.settingsOpen = true;
-
-  const collapsedHtml = api.renderTimelineItem(work);
-  assert.match(collapsedHtml, /<details class="card work-card" open/u);
-  assert.match(collapsedHtml, /<details class="work-detail" data-work-kind="command">/u);
-  assert.doesNotMatch(collapsedHtml, /<details class="work-detail" open data-work-kind="command">/u);
-  assert.doesNotMatch(collapsedHtml, /Raw Event/u);
-  assert.match(api.renderSettingsDrawer(), /id="activity-detail-toggle"/u);
-
-  api.setActivityDetailsEnabled(true);
-
-  assert.equal(storage.get('codexWebActivityDetails'), 'true');
-  const expandedHtml = api.renderTimelineItem(work);
-  assert.match(expandedHtml, /<details class="work-detail" open data-work-kind="command">/u);
-  assert.match(expandedHtml, /Raw Event/u);
-  assert.match(expandedHtml, /item\/completed/u);
-});
-
-test('detailed activity renders raw SSE event payloads when enabled', async () => {
-  const { api } = await loadAppHarness();
-
-  api.setActivityDetailsEnabled(true);
   let assistantEntry = null;
   assistantEntry = api.applyTurnEvent({
     type: 'turn.started',
@@ -852,12 +956,559 @@ test('detailed activity renders raw SSE event payloads when enabled', async () =
     raw: { method: 'item/started', params: { item: { id: 'raw_batch' } } },
   }, assistantEntry);
 
-  const work = api.state.timeline.find((item) => item.id === 'work_turn_raw');
-  const html = api.renderTimelineItem(work);
+  assert.equal(api.state.timeline.some((item) => item.kind === 'work'), false);
+  assert.equal(api.state.batches.get('raw_batch')?.batchId, 'raw_batch');
+  assert.equal(api.state.batches.get('raw_batch')?.summary?.raw?.method, 'item/started');
+});
 
-  assert.match(html, /Raw Event/u);
-  assert.match(html, /item\/started/u);
-  assert.match(html, /raw_batch/u);
+test('returning to sessions and back keeps the unsent prompt draft', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.sessions = [{ id: 'session_1', cwd: '/repo', settings: { metadata: {} } }];
+  api.state.prompt = 'unfinished draft';
+
+  api.showSessionList();
+  assert.equal(api.state.prompt, 'unfinished draft');
+
+  await api.selectSession('session_1');
+  assert.equal(api.state.prompt, 'unfinished draft');
+});
+
+test('session refresh while chat is open keeps the latest timeline position', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.doesNotMatch(app, /if \(state\.view === 'sessions' \|\| hydrateTimeline\)[\s\S]*scrollTimelineToBottom\(\);/u);
+  assert.match(app, /if \(state\.sessionId === sessionId\) \{\s*renderChatWithTimelineRestored\(\(\) => \{\}\);\s*if \(hydrateTimeline && state\.view === 'chat'\) \{\s*scrollTimelineToBottomIfFollowingLatest\(\);/u);
+});
+
+test('turn events update the chat timeline without replacing the focused composer', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.prompt = 'draft in progress';
+  api.render();
+
+  const promptInput = api.context.document.querySelector('#prompt-input');
+  promptInput.focus();
+  const originalAppRenderCount = api.context.__appRenderCount;
+  const originalTimeline = api.context.document.querySelector('#timeline');
+
+  api.applyTurnEvent({
+    type: 'assistant.delta',
+    turnId: 'turn_1',
+    text: 'hello',
+    phase: 'streaming',
+  }, null);
+
+  assert.equal(api.context.__appRenderCount, originalAppRenderCount);
+  assert.equal(api.context.document.activeElement, promptInput);
+  assert.equal(api.context.document.querySelector('#prompt-input'), promptInput);
+  assert.equal(api.context.document.querySelector('#timeline'), originalTimeline);
+  assert.match(originalTimeline.innerHTML, /hello/u);
+});
+
+test('stream completion refreshes chat chrome without replacing the focused composer', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      assert.equal(path, '/api/turns/turn_1/events');
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => ({ done: true }),
+          }),
+        },
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.render();
+
+  const promptInput = api.context.document.querySelector('#prompt-input');
+  promptInput.focus();
+  const originalAppRenderCount = api.context.__appRenderCount;
+  const originalTimeline = api.context.document.querySelector('#timeline');
+
+  await api.streamTurnEvents('turn_1');
+
+  assert.equal(api.context.__appRenderCount, originalAppRenderCount);
+  assert.equal(api.context.document.activeElement, promptInput);
+  assert.equal(api.context.document.querySelector('#prompt-input'), promptInput);
+  assert.equal(api.context.document.querySelector('#timeline'), originalTimeline);
+});
+
+test('chat metadata refresh keeps the focused composer input', async () => {
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      assert.equal(path, '/api/sessions/session_1');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: 'session_1',
+            cwd: '/repo',
+            settings: { metadata: {} },
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.sessions = [api.state.currentSession];
+  api.render();
+
+  const promptInput = context.document.querySelector('#prompt-input');
+  promptInput.focus();
+
+  await api.refreshCurrentSessionMetadata();
+
+  const nextPromptInput = context.document.querySelector('#prompt-input');
+  assert.equal(context.document.activeElement, nextPromptInput);
+});
+
+test('sending a message keeps a following chat timeline at the latest content', async () => {
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1/turns') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ turnId: 'turn_1' }),
+        };
+      }
+      if (path === '/api/turns/turn_1/events') {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => ({ done: true }),
+            }),
+          },
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.prompt = 'keep me anchored';
+  api.render();
+
+  const timeline = context.document.querySelector('#timeline');
+  timeline.scrollHeight = 1000;
+  timeline.clientHeight = 200;
+  timeline.scrollTop = 800;
+  api.updateTimelineFollowState();
+
+  await api.onComposerSubmit({ preventDefault() {} });
+
+  const nextTimeline = context.document.querySelector('#timeline');
+  assert.equal(nextTimeline.scrollTop, nextTimeline.scrollHeight - nextTimeline.clientHeight);
+});
+
+test('opening a report path switches to a report loading view before resolve finishes', async () => {
+  let resolveReportPath;
+  const resolveReady = new Promise((resolve) => {
+    resolveReportPath = resolve;
+  });
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/reports/resolve') {
+        await resolveReady;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+          }),
+        };
+      }
+      if (path === '/api/reports/project-a%2F2026-05-19%2Fsummary.md/content') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+            content: '# Summary',
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+
+  const pending = api.openReportByPath('/Users/alice/.codex-web/reports/project-a/2026-05-19/summary.md', { returnView: 'chat' });
+  await Promise.resolve();
+
+  assert.equal(api.state.view, 'report');
+  assert.equal(api.state.reportReturnView, 'chat');
+  assert.equal(api.state.currentReport?.project, 'project-a');
+  assert.match(context.document.querySelector('.report-viewer')?.innerHTML || '', /Loading report/u);
+
+  resolveReportPath();
+  await pending;
+
+  assert.match(context.document.querySelector('.report-viewer')?.innerHTML || '', /Summary/u);
+});
+
+test('returning from a report restores the chat timeline position', async () => {
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/reports/resolve') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+          }),
+        };
+      }
+      if (path === '/api/reports/project-a%2F2026-05-19%2Fsummary.md/content') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+            content: '# Summary',
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', text: 'hello' }];
+  api.render();
+
+  const timeline = context.document.querySelector('#timeline');
+  timeline.scrollHeight = 1400;
+  timeline.clientHeight = 400;
+  timeline.scrollTop = 640;
+  api.updateTimelineFollowState();
+
+  await api.openReportByPath('/Users/alice/.codex-web/reports/project-a/2026-05-19/summary.md', { returnView: 'chat' });
+  api.closeReportViewer();
+
+  const restoredTimeline = context.document.querySelector('#timeline');
+  assert.equal(restoredTimeline.scrollTop, restoredTimeline.scrollHeight - restoredTimeline.clientHeight - 360);
+});
+
+test('returning from a report keeps a following chat timeline at the latest content', async () => {
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/reports/resolve') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+          }),
+        };
+      }
+      if (path === '/api/reports/project-a%2F2026-05-19%2Fsummary.md/content') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+            content: '# Summary',
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', text: 'hello' }];
+  api.render();
+
+  const timeline = context.document.querySelector('#timeline');
+  timeline.scrollHeight = 1200;
+  timeline.clientHeight = 400;
+  timeline.scrollTop = 800;
+  api.updateTimelineFollowState();
+
+  await api.openReportByPath('/Users/alice/.codex-web/reports/project-a/2026-05-19/summary.md', { returnView: 'chat' });
+  api.closeReportViewer();
+
+  const restoredTimeline = context.document.querySelector('#timeline');
+  assert.equal(restoredTimeline.scrollTop, restoredTimeline.scrollHeight - restoredTimeline.clientHeight);
+});
+
+test('report viewer rerenders preserve the report scroll position', async () => {
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      assert.equal(path, '/api/reports/project-a%2F2026-05-19%2Fsummary.md/favorite');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          report: {
+            id: 'project-a/2026-05-19/summary.md',
+            project: 'project-a',
+            title: 'summary',
+            kind: 'markdown',
+            favorite: true,
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'report';
+  api.state.reports = [{
+    id: 'project-a/2026-05-19/summary.md',
+    project: 'project-a',
+    title: 'summary',
+    kind: 'markdown',
+    favorite: false,
+  }];
+  api.state.currentReport = api.state.reports[0];
+  api.state.currentReportContent = '# Summary\n\nLong content';
+  api.render();
+
+  const reportViewer = context.document.querySelector('.report-viewer');
+  reportViewer.scrollHeight = 1800;
+  reportViewer.clientHeight = 500;
+  reportViewer.scrollTop = 520;
+
+  await api.toggleReportFavorite('project-a/2026-05-19/summary.md');
+
+  assert.equal(context.document.querySelector('.report-viewer').scrollTop, 520);
+});
+
+test('chat stream updates do not rerender an open report viewer', async () => {
+  const { api, context } = await loadAppHarness();
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'report';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.currentReport = {
+    id: 'project-a/2026-05-19/summary.md',
+    project: 'project-a',
+    title: 'summary',
+    kind: 'markdown',
+  };
+  api.state.currentReportContent = '# Summary';
+  api.render();
+
+  const renderCount = context.__appRenderCount;
+  const reportViewer = context.document.querySelector('.report-viewer');
+  reportViewer.scrollTop = 480;
+
+  api.applyTurnEvent({
+    type: 'assistant.delta',
+    turnId: 'turn_1',
+    text: 'background update',
+    phase: 'streaming',
+  }, null);
+
+  assert.equal(context.__appRenderCount, renderCount);
+  assert.equal(context.document.querySelector('.report-viewer'), reportViewer);
+  assert.equal(reportViewer.scrollTop, 480);
+});
+
+test('session cards show only the last cwd segment in metadata', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sortMode = 'time';
+  api.state.sessions = [{
+    id: 'session_path',
+    cwd: '/Users/alice/workspace/project-alpha',
+    updatedAt: 1716200000000,
+    settings: { metadata: {} },
+  }];
+
+  const html = api.renderSessionCards();
+
+  assert.match(html, />project-alpha<\/span>/u);
+  assert.doesNotMatch(html, /Users\/alice\/workspace\/project-alpha/u);
+});
+
+test('session names prefer the last cwd segment over long stored project labels', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sortMode = 'time';
+  api.state.sessions = [{
+    id: 'session_name',
+    cwd: '/Users/alice/workspace/project-beta',
+    projectName: 'workspace/project-beta',
+    updatedAt: 1716200000000,
+    settings: { metadata: {} },
+  }];
+  api.state.currentSession = api.state.sessions[0];
+
+  const listHtml = api.renderSessionCards();
+  const chatHtml = api.renderChat().innerHTML;
+
+  assert.match(listHtml, /class="session-project">project-beta<\/span>/u);
+  assert.doesNotMatch(listHtml, /workspace\/project-beta/u);
+  assert.match(chatHtml, /class="project-title">project-beta<\/div>/u);
+});
+
+test('chat reports button falls back to the top-level report project when only nested metadata matches', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.currentSession = {
+    id: 'session_report',
+    cwd: '/Users/alice/work/project-alpha',
+    projectName: 'project-alpha',
+  };
+  api.state.reports = [
+    {
+      id: 'project-alpha/docs/2026-05-20/summary.md',
+      project: 'project-alpha/docs',
+      title: 'summary',
+      kind: 'markdown',
+      favorite: false,
+      updatedAt: '2026-05-20T10:00:00.000Z',
+    },
+  ];
+
+  const html = api.renderChat().innerHTML;
+
+  assert.match(html, /data-session-reports-project="project-alpha"/u);
+  assert.doesNotMatch(html, /data-session-reports-project="project-alpha\/docs"/u);
+});
+
+test('chat reports button keeps the nested report project path when the session cwd matches it exactly', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.currentSession = {
+    id: 'session_report_nested',
+    cwd: '/Users/alice/work/project-alpha/docs',
+    projectName: 'project-alpha/docs',
+  };
+  api.state.reports = [
+    {
+      id: 'project-alpha/2026-05-20/summary.md',
+      project: 'project-alpha/docs',
+      title: 'summary',
+      kind: 'markdown',
+      favorite: false,
+      updatedAt: '2026-05-20T10:00:00.000Z',
+    },
+  ];
+
+  const html = api.renderChat().innerHTML;
+
+  assert.match(html, /data-session-reports-project="project-alpha\/docs"/u);
+});
+
+test('chat reports button does not prepend parent workspace segments from cwd', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.currentSession = {
+    id: 'session_workspace_prefix',
+    cwd: '/Users/alice/vibecoding/codex-mobile-web-app',
+    projectName: 'vibecoding/codex-mobile-web-app',
+  };
+  api.state.reports = [
+    {
+      id: 'codex-mobile-web-app/2026-05-20/summary.md',
+      project: 'codex-mobile-web-app',
+      title: 'summary',
+      kind: 'markdown',
+      favorite: false,
+      updatedAt: '2026-05-20T10:00:00.000Z',
+    },
+  ];
+
+  const html = api.renderChat().innerHTML;
+
+  assert.match(html, /data-session-reports-project="codex-mobile-web-app"/u);
+  assert.doesNotMatch(html, /data-session-reports-project="vibecoding\/codex-mobile-web-app"/u);
+});
+
+test('chat reports button falls back to cwd leaf before reports load so workspace prefixes do not leak', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.currentSession = {
+    id: 'session_reports_not_loaded',
+    cwd: '/Users/alice/vibecoding/codex-mobile-web-app',
+    projectName: 'vibecoding/codex-mobile-web-app',
+  };
+  api.state.reports = [];
+  api.state.reportsLoaded = false;
+
+  const html = api.renderChat().innerHTML;
+
+  assert.match(html, /data-session-reports-project="codex-mobile-web-app"/u);
+  assert.doesNotMatch(html, /data-session-reports-project="vibecoding\/codex-mobile-web-app"/u);
 });
 
 test('turn failures render as visible timeline error messages', async () => {
@@ -915,7 +1566,7 @@ test('stream failures render a visible timeline error instead of only composer s
   assert.match(errorItem?.text || '', /SSE failed hard/u);
 });
 
-test('thread work errors are highlighted and kept at the latest timeline position', async () => {
+test('thread work updates stay off the timeline and surface failures as visible error messages', async () => {
   const { api } = await loadAppHarness();
 
   let assistantEntry = null;
@@ -955,16 +1606,23 @@ test('thread work errors are highlighted and kept at the latest timeline positio
     batchId: 'cmd_error',
     status: 'failed',
   }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'turn.failed',
+    turnId: 'turn_work_error',
+    threadId: 'session_1',
+    message: 'Command failed with exit code 1',
+  }, assistantEntry);
 
   const latest = api.state.timeline.at(-1);
-  assert.equal(latest?.kind, 'work');
-  assert.equal(latest?.status, 'error');
+  assert.equal(api.state.timeline.some((item) => item.kind === 'work'), false);
+  assert.equal(latest?.kind, 'message');
+  assert.equal(latest?.role, 'system');
+  assert.equal(latest?.severity, 'error');
 
   const html = api.renderTimelineItem(latest);
-  assert.match(html, /work-card work-error/u);
+  assert.doesNotMatch(html, /work-card/u);
   assert.match(html, /<span class="error-badge">Error<\/span>/u);
   assert.match(html, /Command failed with exit code 1/u);
-  assert.match(html, /1 failing/u);
 });
 
 test('composer API failures render a visible timeline error', async () => {
@@ -1013,7 +1671,7 @@ test('composer API failures render a visible timeline error', async () => {
   assert.match(errorItem?.text || '', /Codex refused the first turn/u);
 });
 
-test('turn events aggregate batches and approvals into one work item', async () => {
+test('approval requests still render as standalone actionable cards without work timeline items', async () => {
   const { api } = await loadAppHarness();
 
   let assistantEntry = null;
@@ -1049,19 +1707,20 @@ test('turn events aggregate batches and approvals into one work item', async () 
     summary: { command: 'npm install' },
   }, assistantEntry);
 
-  assert.equal(api.state.timeline.filter((item) => item.kind === 'work').length, 1);
+  assert.equal(api.state.timeline.some((item) => item.kind === 'work'), false);
   assert.equal(api.state.timeline.some((item) => item.kind === 'batch'), false);
-  assert.equal(api.state.timeline.some((item) => item.kind === 'approval'), false);
+  assert.equal(api.state.timeline.filter((item) => item.kind === 'approval').length, 1);
 
-  const work = api.state.timeline.find((item) => item.kind === 'work');
-  assert.equal(work.turnId, 'turn_1');
-  assert.equal(work.batches.length, 1);
-  assert.equal(work.approvals.length, 1);
-  assert.match(api.renderTimelineItem(work), /Read 1/u);
-  assert.match(api.renderTimelineItem(work), /Approval 1/u);
+  const approval = api.state.timeline.find((item) => item.kind === 'approval');
+  assert.equal(approval.approvalId, 'approval_1');
+  assert.equal(api.state.approvals.get('approval_1')?.resolved, false);
+  const html = api.renderTimelineItem(approval);
+  assert.match(html, /Approval requested/u);
+  assert.match(html, /npm install/u);
+  assert.match(html, /data-approval-action="accept"/u);
 });
 
-test('work item stays visible at the bottom after assistant text completes', async () => {
+test('assistant final messages stay at the bottom after hidden work updates complete', async () => {
   const { api } = await loadAppHarness();
 
   let assistantEntry = null;
@@ -1096,9 +1755,10 @@ test('work item stays visible at the bottom after assistant text completes', asy
     status: 'completed',
   }, assistantEntry);
 
-  assert.equal(api.state.timeline.at(-1)?.id, 'work_turn_bottom');
-  assert.equal(api.state.timeline.at(-1)?.kind, 'work');
-  assert.match(api.renderTimelineItem(api.state.timeline.at(-1)), /npm test/u);
+  assert.equal(api.state.timeline.some((item) => item.kind === 'work'), false);
+  assert.equal(api.state.timeline.at(-1)?.id, 'assistant_turn_bottom_final');
+  assert.equal(api.state.timeline.at(-1)?.kind, 'message');
+  assert.match(api.renderTimelineItem(api.state.timeline.at(-1)), /Final response/u);
 });
 
 test('mobile UI persists per-browser chat timelines across reloads', async () => {
@@ -1556,6 +2216,80 @@ test('reports page returns to sessions or chat depending on entry point', async 
   assert.equal(api.state.timeline.length, 1);
 });
 
+test('report viewer opened from a session reports page returns to that session', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (url) => {
+      if (String(url).startsWith('/api/reports/project-a%2F2026-05-19%2Fsummary.md/content')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+            content: '# Summary',
+          }),
+        };
+      }
+      if (String(url).startsWith('/api/reports')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [] }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+      };
+    },
+  });
+
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_a';
+  api.state.currentSession = { id: 'session_a', cwd: '/Users/alice/work/project-a', projectName: 'Project A' };
+  api.state.reports = [{
+    id: 'project-a/2026-05-19/summary.md',
+    project: 'project-a',
+    title: 'summary',
+    kind: 'markdown',
+    favorite: false,
+    updatedAt: '2026-05-19T10:00:00.000Z',
+  }];
+  api.state.reportsLoaded = true;
+
+  await api.openReportsPage({ project: 'project-a', returnView: 'chat' });
+  await api.openReportById('project-a/2026-05-19/summary.md');
+  assert.equal(api.state.view, 'report');
+  assert.equal(api.state.reportReturnView, 'chat');
+
+  api.closeReportViewer();
+
+  assert.equal(api.state.view, 'chat');
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.equal(api.state.currentSession?.id, 'session_a');
+});
+
+test('reports project back navigation returns to the originating session', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.view = 'reports';
+  api.state.sessionId = 'session_a';
+  api.state.currentSession = { id: 'session_a', cwd: '/Users/alice/work/project-a', projectName: 'Project A' };
+  api.state.reportsReturnView = 'chat';
+  api.state.reportProject = 'project-a';
+
+  api.handleReportsBackNavigation();
+
+  assert.equal(api.state.view, 'chat');
+  assert.equal(api.state.reportProject, '');
+  assert.equal(api.state.sessionId, 'session_a');
+});
+
 test('report viewer renders markdown and sandboxed html reports', async () => {
   const { api } = await loadAppHarness();
 
@@ -1604,6 +2338,30 @@ test('assistant report paths open as app report links', async () => {
   });
   assert.match(plainHtml, /data-report-path="\/Users\/alice\/\.codex-web\/reports\/project-a\/2026-05-19\/summary\.md"/u);
   assert.match(plainHtml, />summary\.md<\/a>/u);
+});
+
+test('assistant local markdown paths outside codex-web reports stay as plain text', async () => {
+  const { api } = await loadAppHarness();
+
+  const markdownHtml = api.renderTimelineItem({
+    kind: 'message',
+    role: 'assistant',
+    label: 'Assistant',
+    text: '[Render Test](/Users/alice/work/codex-mobile-web-app/render-test.md)',
+  });
+  assert.doesNotMatch(markdownHtml, /class="report-link"/u);
+  assert.doesNotMatch(markdownHtml, /data-report-path=/u);
+  assert.match(markdownHtml, /render-test\.md/u);
+
+  const plainHtml = api.renderTimelineItem({
+    kind: 'message',
+    role: 'assistant',
+    label: 'Assistant',
+    text: '查看这个文件：/Users/alice/work/codex-mobile-web-app/render-test.md',
+  });
+  assert.doesNotMatch(plainHtml, /class="report-link"/u);
+  assert.doesNotMatch(plainHtml, /data-report-path=/u);
+  assert.match(plainHtml, /render-test\.md/u);
 });
 
 test('chat header opens reports for the current project when available', async () => {
@@ -2441,12 +3199,80 @@ test('backgrounded PWA stream failures keep the active turn recoverable', async 
 async function loadAppHarness(overrides = {}) {
   const app = await readFile(appUrl, 'utf8');
   const storage = new Map(Object.entries(overrides.storage || {}));
-  const appElement = {
-    innerHTML: '',
-    appendChild() {},
+  const elements = new Map();
+  let activeElement = null;
+  const trackElement = (selector, element) => {
+    elements.set(selector, element);
+    return element;
   };
+  const createTrackedElement = (selector, patch = {}) => ({
+    innerHTML: '',
+    style: {},
+    classList: {
+      add() {},
+      remove() {},
+    },
+    hidden: false,
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    addEventListener() {},
+    removeEventListener() {},
+    setAttribute() {},
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ height: 0 }),
+    focus() {
+      activeElement = this;
+    },
+    ...patch,
+  });
+  const materializeAppHtml = (html) => {
+    elements.delete('#timeline');
+    elements.delete('#prompt-input');
+    elements.delete('.report-viewer');
+    if (String(html || '').includes('id="timeline"')) {
+      const timelineHtml = String(html).match(/<main class="timeline" id="timeline">([\s\S]*?)<\/main>/u)?.[1] || '';
+      trackElement('#timeline', createTrackedElement('#timeline', {
+        innerHTML: timelineHtml,
+        scrollTop: 0,
+        scrollHeight: 1000,
+        clientHeight: 400,
+      }));
+    }
+    if (String(html || '').includes('id="prompt-input"')) {
+      trackElement('#prompt-input', createTrackedElement('#prompt-input', {
+        value: '',
+        scrollHeight: 38,
+      }));
+    }
+    if (String(html || '').includes('class="report-viewer"')) {
+      const reportHtml = String(html).match(/<main class="report-viewer">([\s\S]*?)<\/main>/u)?.[1] || '';
+      trackElement('.report-viewer', createTrackedElement('.report-viewer', {
+        innerHTML: reportHtml,
+        scrollTop: 0,
+        scrollHeight: 1200,
+        clientHeight: 600,
+      }));
+    }
+  };
+  const appElement = {
+    _innerHTML: '',
+    get innerHTML() {
+      return this._innerHTML;
+    },
+    set innerHTML(value) {
+      this._innerHTML = String(value || '');
+      context.__appRenderCount += 1;
+      materializeAppHtml(this._innerHTML);
+    },
+    appendChild(child) {
+      this.innerHTML = child?.innerHTML || '';
+    },
+  };
+  trackElement('#app', appElement);
   const context = {
     console,
+    __appRenderCount: 0,
     localStorage: {
       getItem: (key) => storage.get(key) || null,
       setItem: (key, value) => {
@@ -2459,6 +3285,9 @@ async function loadAppHarness(overrides = {}) {
     document: {
       body: { scrollHeight: 0 },
       visibilityState: 'visible',
+      get activeElement() {
+        return activeElement;
+      },
       documentElement: {
         dataset: {},
         style: {
@@ -2467,7 +3296,7 @@ async function loadAppHarness(overrides = {}) {
         },
       },
       addEventListener() {},
-      querySelector: (selector) => selector === '#app' ? appElement : null,
+      querySelector: (selector) => elements.get(selector) || null,
       querySelectorAll: () => [],
       createElement: () => ({
         className: '',
@@ -2496,6 +3325,8 @@ async function loadAppHarness(overrides = {}) {
   vm.runInNewContext(`${app}
 globalThis.__codexWebTest = {
   state,
+  context: globalThis,
+  render: typeof render === 'function' ? render : null,
   MAX_TIMELINE_CACHE_MAP_ITEMS: typeof MAX_TIMELINE_CACHE_MAP_ITEMS === 'number' ? MAX_TIMELINE_CACHE_MAP_ITEMS : null,
   MAX_TIMELINE_SUMMARY_TEXT: typeof MAX_TIMELINE_SUMMARY_TEXT === 'number' ? MAX_TIMELINE_SUMMARY_TEXT : null,
   firstInputForSession,
@@ -2509,6 +3340,7 @@ globalThis.__codexWebTest = {
 	  renderComposerStatus: typeof renderComposerStatus === 'function' ? renderComposerStatus : null,
 	  applyMessageFontSize: typeof applyMessageFontSize === 'function' ? applyMessageFontSize : null,
 	  setMessageFontSize: typeof setMessageFontSize === 'function' ? setMessageFontSize : null,
+	  updateComposerExpansionState: typeof updateComposerExpansionState === 'function' ? updateComposerExpansionState : null,
 	  hydrateTimelineFromSession,
   restoreTimelineForSession: typeof restoreTimelineForSession === 'function' ? restoreTimelineForSession : null,
   showMoreSessionHistory: typeof showMoreSessionHistory === 'function' ? showMoreSessionHistory : null,
@@ -2519,14 +3351,22 @@ globalThis.__codexWebTest = {
   refreshSessionsList: typeof refreshSessionsList === 'function' ? refreshSessionsList : null,
   refreshCurrentView: typeof refreshCurrentView === 'function' ? refreshCurrentView : null,
   restoreAuth: typeof restoreAuth === 'function' ? restoreAuth : null,
-  refreshReportsList: typeof refreshReportsList === 'function' ? refreshReportsList : null,
-  openReportsPage: typeof openReportsPage === 'function' ? openReportsPage : null,
-  closeReportsPage: typeof closeReportsPage === 'function' ? closeReportsPage : null,
-  openReportById: typeof openReportById === 'function' ? openReportById : null,
+	  refreshReportsList: typeof refreshReportsList === 'function' ? refreshReportsList : null,
+	  openReportsPage: typeof openReportsPage === 'function' ? openReportsPage : null,
+	  closeReportsPage: typeof closeReportsPage === 'function' ? closeReportsPage : null,
+	  handleReportsBackNavigation: typeof handleReportsBackNavigation === 'function' ? handleReportsBackNavigation : null,
+	  toggleReportFavorite: typeof toggleReportFavorite === 'function' ? toggleReportFavorite : null,
+	  showSessionList: typeof showSessionList === 'function' ? showSessionList : null,
+	  openReportById: typeof openReportById === 'function' ? openReportById : null,
+	  closeReportViewer: typeof closeReportViewer === 'function' ? closeReportViewer : null,
   openReportByPath: typeof openReportByPath === 'function' ? openReportByPath : null,
+  getActiveScrollContainer: typeof getActiveScrollContainer === 'function' ? getActiveScrollContainer : null,
   setSessionSortMode: typeof setSessionSortMode === 'function' ? setSessionSortMode : null,
   selectSession: typeof selectSession === 'function' ? selectSession : null,
   onComposerSubmit: typeof onComposerSubmit === 'function' ? onComposerSubmit : null,
+  attachTimelineScrollTracking: typeof attachTimelineScrollTracking === 'function' ? attachTimelineScrollTracking : null,
+  updateTimelineFollowState: typeof updateTimelineFollowState === 'function' ? updateTimelineFollowState : null,
+  scrollTimelineToBottomIfFollowingLatest: typeof scrollTimelineToBottomIfFollowingLatest === 'function' ? scrollTimelineToBottomIfFollowingLatest : null,
   filteredSessions: typeof filteredSessions === 'function' ? filteredSessions : null,
   sortedSessions: typeof sortedSessions === 'function' ? sortedSessions : null,
   toggleSessionFavorite: typeof toggleSessionFavorite === 'function' ? toggleSessionFavorite : null,
@@ -2538,7 +3378,6 @@ globalThis.__codexWebTest = {
 	  applyTheme: typeof applyTheme === 'function' ? applyTheme : null,
 	  applyDefaultThreadSettings: typeof applyDefaultThreadSettings === 'function' ? applyDefaultThreadSettings : null,
 	  applyDefaultSettings: typeof applyDefaultSettings === 'function' ? applyDefaultSettings : null,
-	  setActivityDetailsEnabled: typeof setActivityDetailsEnabled === 'function' ? setActivityDetailsEnabled : null,
 	  renderSettingsDrawer: typeof renderSettingsDrawer === 'function' ? renderSettingsDrawer : null,
 	  handleApiError: typeof handleApiError === 'function' ? handleApiError : null,
 	  streamTurnEvents,
