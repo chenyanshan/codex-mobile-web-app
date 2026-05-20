@@ -35,7 +35,7 @@ test('mobile UI exposes iOS PWA install metadata and registers a service worker'
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.type), ['image/png', 'image/png']);
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.sizes), ['192x192', '512x512']);
   assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
-  assert.match(serviceWorker, /codex-web-static-2026-05-19-thread-activity-details-v16/u);
+  assert.match(serviceWorker, /codex-web-static-2026-05-20-message-size-settings-v18/u);
   assert.match(serviceWorker, /'\/icon-192\.png'/u);
   assert.match(serviceWorker, /'\/icon-512\.png'/u);
   assert.match(serviceWorker, /'\/apple-touch-icon\.png'/u);
@@ -174,6 +174,10 @@ test('app settings persist theme and default thread settings', async () => {
   api.applyTheme('light');
   assert.equal(storage.get('codexWebTheme'), 'light');
   assert.equal(context.document.documentElement.dataset.theme, 'light');
+
+  api.applyMessageFontSize('small');
+  assert.equal(storage.get('codexWebMessageFontSize'), 'small');
+  assert.equal(context.document.documentElement.dataset.messageFontSize, 'small');
 
   api.applyDefaultThreadSettings({
     model: 'gpt-5.4-mini',
@@ -387,6 +391,92 @@ test('settings drawer opens without changing chat scroll geometry', async () => 
   assert.match(styles, /\.settings-drawer\s*\{[^}]*max-height:\s*min\(52dvh,\s*420px\);/su);
   assert.match(styles, /\.settings-drawer\s*\{[^}]*overflow-y:\s*auto;/su);
   assert.doesNotMatch(styles, /\.settings-drawer\s*\{[^}]*margin-bottom:/su);
+});
+
+test('app settings page exposes message font size controls scoped to chat messages', async () => {
+  const [app, styles] = await Promise.all([
+    readFile(appUrl, 'utf8'),
+    readFile(stylesUrl, 'utf8'),
+  ]);
+
+  assert.match(app, /const MESSAGE_FONT_SIZE_KEY = 'codexWebMessageFontSize';/u);
+  assert.match(app, /function renderAppSettings\(\)[\s\S]*data-message-font-size="small"[\s\S]*data-message-font-size="medium"[\s\S]*data-message-font-size="large"/u);
+  assert.doesNotMatch(app, /function renderSettingsDrawer\(\)[\s\S]*data-message-font-size="small"/u);
+  assert.match(app, /for \(const button of document\.querySelectorAll\('\[data-message-font-size\]'\)\)/u);
+  assert.match(styles, /\.message-card \.message-text,\s*\.message-card \.markdown-body\s*\{[^}]*font-size:\s*var\(--message-font-size\);/su);
+  assert.match(styles, /\.message-card \.markdown-body h1,\s*\.message-card \.markdown-body h2,\s*\.message-card \.markdown-body h3\s*\{[^}]*font-size:\s*var\(--message-heading-font-size\);/su);
+  assert.doesNotMatch(styles, /\.report-document\s*\{[^}]*font-size:\s*var\(--message-font-size\);/su);
+});
+
+test('message font size loads from storage and applies root variables', async () => {
+  const { api, storage, context } = await loadAppHarness({
+    storage: {
+      codexWebMessageFontSize: 'large',
+    },
+  });
+
+  const styleCalls = [];
+  context.document.documentElement.style.setProperty = (name, value) => {
+    styleCalls.push([name, value]);
+  };
+
+  api.applyMessageFontSize(api.state.messageFontSize, { persist: false });
+
+  assert.equal(api.state.messageFontSize, 'large');
+  assert.equal(storage.get('codexWebMessageFontSize'), 'large');
+  assert.equal(context.document.documentElement.dataset.messageFontSize, 'large');
+  assert.deepEqual(styleCalls, [
+    ['--message-font-size', '17px'],
+    ['--message-heading-font-size', '16px'],
+  ]);
+});
+
+test('changing message font size preserves timeline bottom offset', async () => {
+  const { api, storage, context } = await loadAppHarness();
+
+  let fontApplied = false;
+  const timeline = {
+    _scrollTop: 420,
+    clientHeight: 500,
+    get scrollTop() {
+      return this._scrollTop;
+    },
+    set scrollTop(value) {
+      this._scrollTop = value;
+    },
+    get scrollHeight() {
+      return fontApplied ? 1180 : 1000;
+    },
+  };
+  const appElement = context.document.querySelector('#app');
+  context.document.documentElement.style.setProperty = (name) => {
+    if (name === '--message-font-size') {
+      fontApplied = true;
+    }
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === '#timeline') {
+      return timeline;
+    }
+    if (selector === '#app') {
+      return appElement;
+    }
+    return null;
+  };
+
+  api.setMessageFontSize('large');
+
+  assert.equal(api.state.messageFontSize, 'large');
+  assert.equal(storage.get('codexWebMessageFontSize'), 'large');
+  assert.equal(timeline.scrollTop, 600);
+});
+
+test('prompt focus protection keeps timeline scroll anchored during keyboard reflow', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /promptInput\.addEventListener\('touchstart',\s*protectPromptFocusScroll,\s*\{\s*passive:\s*true\s*\}\)/u);
+  assert.match(app, /promptInput\.addEventListener\('focus',\s*protectPromptFocusScroll\)/u);
+  assert.match(app, /function scheduleTimelineViewportRestore\(/u);
 });
 
 test('chat and session list use separate scroll containers', async () => {
@@ -1323,6 +1413,8 @@ test('session topbar shows Sort only on Favorites and keeps New visually neutral
   const favoritesHtml = api.renderSessionList().innerHTML;
 
   assert.match(favoritesHtml, /id="favorite-sort-button"/u);
+  assert.match(favoritesHtml, /<div class="topbar-actions">[\s\S]*id="open-reports-button"[\s\S]*id="favorite-sort-button"[\s\S]*id="open-new-session-button"[\s\S]*id="open-app-settings-button"/u);
+  assert.match(favoritesHtml, /class="reports-action compact-button" type="button" id="open-reports-button"/u);
   assert.match(favoritesHtml, /class="ghost compact-button" type="button" id="favorite-sort-button"/u);
   assert.match(favoritesHtml, /class="ghost compact-button" type="button" id="open-new-session-button"/u);
   assert.match(favoritesHtml, /class="ghost compact-button" type="button" id="open-app-settings-button"/u);
@@ -1333,8 +1425,214 @@ test('session topbar shows Sort only on Favorites and keeps New visually neutral
   const allHtml = api.renderSessionList().innerHTML;
 
   assert.doesNotMatch(allHtml, /id="favorite-sort-button"/u);
+  assert.match(allHtml, /<div class="topbar-actions">[\s\S]*id="open-reports-button"[\s\S]*id="open-new-session-button"[\s\S]*id="open-app-settings-button"/u);
   assert.match(allHtml, /class="ghost compact-button" type="button" id="open-new-session-button"/u);
   assert.match(allHtml, /class="ghost compact-button" type="button" id="open-app-settings-button"/u);
+});
+
+test('session topbar exposes Reports without replacing Message textarea or Set', async () => {
+  const { api } = await loadAppHarness();
+
+  const sessionsHtml = api.renderSessionList().innerHTML;
+  assert.match(sessionsHtml, /id="open-reports-button"[^>]*>Reports<\/button>/u);
+  assert.doesNotMatch(sessionsHtml, /data-main-view/u);
+  assert.doesNotMatch(sessionsHtml, /main-view-toggle/u);
+
+  api.state.view = 'chat';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  const chatHtml = api.renderChat().innerHTML;
+  assert.match(chatHtml, /id="settings-toggle"/u);
+  assert.match(chatHtml, /<textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">/u);
+  assert.doesNotMatch(chatHtml, /<input class="prompt-input" id="prompt-input"/u);
+});
+
+test('reports page renders report projects before project report cards', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.view = 'reports';
+  api.state.reports = [
+    {
+      id: 'project-a/2026-05-19/summary.md',
+      project: 'project-a',
+      title: 'summary',
+      kind: 'markdown',
+      favorite: true,
+      updatedAt: '2026-05-19T10:00:00.000Z',
+    },
+    {
+      id: 'project-b/2026-05-19/audit.html',
+      project: 'project-b',
+      title: 'audit',
+      kind: 'html',
+      favorite: false,
+      updatedAt: '2026-05-19T09:00:00.000Z',
+    },
+  ];
+  const html = api.renderReportsPage().innerHTML;
+
+  assert.match(html, /Reports/u);
+  assert.match(html, /class="page-nav"/u);
+  assert.match(html, /class="ghost page-back-button" type="button" id="back-to-list-button" aria-label="Back">&lt;<\/button>/u);
+  assert.match(html, /data-report-project="project-a"/u);
+  assert.match(html, /data-report-project="project-b"/u);
+  assert.doesNotMatch(html, /data-report-id="project-a\/2026-05-19\/summary\.md"/u);
+  assert.doesNotMatch(html, /data-report-favorite-id="project-a\/2026-05-19\/summary\.md"/u);
+  assert.doesNotMatch(html, /id="report-search-input"/u);
+});
+
+test('reports page renders a selected project report list', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.view = 'reports';
+  api.state.reportProject = 'project-a';
+  api.state.reports = [
+    {
+      id: 'project-a/2026-05-19/summary.md',
+      project: 'project-a',
+      title: 'summary',
+      kind: 'markdown',
+      favorite: true,
+      updatedAt: '2026-05-19T10:00:00.000Z',
+    },
+    {
+      id: 'project-b/2026-05-19/audit.html',
+      project: 'project-b',
+      title: 'audit',
+      kind: 'html',
+      favorite: false,
+      updatedAt: '2026-05-19T09:00:00.000Z',
+    },
+  ];
+
+  const html = api.renderReportsPage().innerHTML;
+
+  assert.match(html, /project-a/u);
+  assert.match(html, /summary/u);
+  assert.match(html, /data-report-id="project-a\/2026-05-19\/summary\.md"/u);
+  assert.match(html, /data-report-favorite-id="project-a\/2026-05-19\/summary\.md"/u);
+  assert.doesNotMatch(html, /data-report-project="project-b"/u);
+  assert.doesNotMatch(html, /data-report-id="project-b\/2026-05-19\/audit\.html"/u);
+});
+
+test('reports page returns to sessions or chat depending on entry point', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (url) => {
+      if (String(url).startsWith('/api/reports')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [] }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+      };
+    },
+  });
+
+  await api.openReportsPage();
+  assert.equal(api.state.view, 'reports');
+  assert.equal(api.state.reportsReturnView, 'sessions');
+  api.closeReportsPage();
+  assert.equal(api.state.view, 'sessions');
+
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_a';
+  api.state.currentSession = { id: 'session_a', cwd: '/Users/alice/work/project-a', projectName: 'Project A' };
+  api.state.timeline = [{ id: 'msg_1', kind: 'message', role: 'assistant', text: 'hello' }];
+
+  await api.openReportsPage({ project: 'project-a', returnView: 'chat' });
+  assert.equal(api.state.view, 'reports');
+  assert.equal(api.state.reportProject, 'project-a');
+  assert.equal(api.state.reportsReturnView, 'chat');
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.equal(api.state.timeline.length, 1);
+
+  api.closeReportsPage();
+  assert.equal(api.state.view, 'chat');
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.equal(api.state.timeline.length, 1);
+});
+
+test('report viewer renders markdown and sandboxed html reports', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.currentReport = {
+    id: 'project-a/2026-05-19/summary.md',
+    project: 'project-a',
+    title: 'summary',
+    kind: 'markdown',
+    favorite: false,
+  };
+  api.state.currentReportContent = '# Done\n\n- **item**\n';
+  let html = api.renderReportViewer().innerHTML;
+  assert.match(html, /<div class="report-document markdown-body">/u);
+  assert.match(html, /<h1>Done<\/h1>/u);
+  assert.match(html, /<strong>item<\/strong>/u);
+
+  api.state.currentReport = {
+    id: 'project-a/2026-05-19/audit.html',
+    project: 'project-a',
+    title: 'audit',
+    kind: 'html',
+    favorite: false,
+  };
+  api.state.currentReportContent = '<h1>Audit</h1>';
+  html = api.renderReportViewer().innerHTML;
+  assert.match(html, /<iframe class="report-frame" sandbox="" srcdoc="&lt;h1&gt;Audit&lt;\/h1&gt;"><\/iframe>/u);
+});
+
+test('assistant report paths open as app report links', async () => {
+  const { api } = await loadAppHarness();
+
+  const markdownHtml = api.renderTimelineItem({
+    kind: 'message',
+    role: 'assistant',
+    label: 'Assistant',
+    text: '[Summary](/Users/alice/.codex-web/reports/project-a/2026-05-19/summary.md)',
+  });
+  assert.match(markdownHtml, /data-report-path="\/Users\/alice\/\.codex-web\/reports\/project-a\/2026-05-19\/summary\.md"/u);
+  assert.match(markdownHtml, /class="report-link"/u);
+
+  const plainHtml = api.renderTimelineItem({
+    kind: 'message',
+    role: 'assistant',
+    label: 'Assistant',
+    text: '手机可打开报告：/Users/alice/.codex-web/reports/project-a/2026-05-19/summary.md',
+  });
+  assert.match(plainHtml, /data-report-path="\/Users\/alice\/\.codex-web\/reports\/project-a\/2026-05-19\/summary\.md"/u);
+  assert.match(plainHtml, />summary\.md<\/a>/u);
+});
+
+test('chat header opens reports for the current project when available', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sessionId = 'session_a';
+  api.state.currentSession = {
+    id: 'session_a',
+    cwd: '/Users/alice/work/project-a',
+    projectName: 'Project A',
+  };
+  api.state.reports = [
+    {
+      id: 'project-a/2026-05-19/summary.md',
+      project: 'project-a',
+      title: 'summary',
+      kind: 'markdown',
+      favorite: false,
+      updatedAt: '2026-05-19T10:00:00.000Z',
+    },
+  ];
+
+  const html = api.renderChat().innerHTML;
+
+  assert.match(html, /class="ghost compact-button session-report-button"/u);
+  assert.match(html, /data-session-reports-project="project-a"/u);
+  assert.doesNotMatch(html, /data-session-report-id/u);
+  assert.match(html, /id="settings-toggle"/u);
+  assert.match(html, /<textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">/u);
 });
 
 test('favorite filter shows only favorite sessions and all shows every session', async () => {
@@ -1421,7 +1719,7 @@ test('session restore renders favorites first and preloads all sessions in the b
   });
   await flushMicrotasks();
 
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/reports']);
   pending[1]?.resolve({
     ok: true,
     status: 200,
@@ -1434,15 +1732,20 @@ test('session restore renders favorites first and preloads all sessions in the b
       items: [{ id: 'favorite_session', favorite: true, updatedAt: 20, settings: { metadata: {} } }],
     }),
   });
+  pending[3]?.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({ items: [] }),
+  });
   await restore;
   await flushMicrotasks();
 
   assert.equal(api.state.sortMode, 'favorites');
   assert.equal(api.state.sessionsScope, 'favorites');
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session']));
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/sessions']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
 
-  pending[3]?.resolve({
+  pending[4]?.resolve({
     ok: true,
     status: 200,
     json: async () => ({
@@ -1461,7 +1764,7 @@ test('session restore renders favorites first and preloads all sessions in the b
 
   await api.setSessionSortMode('time');
 
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/sessions']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session', 'all_session']));
 });
 
@@ -2137,7 +2440,7 @@ test('backgrounded PWA stream failures keep the active turn recoverable', async 
 
 async function loadAppHarness(overrides = {}) {
   const app = await readFile(appUrl, 'utf8');
-  const storage = new Map();
+  const storage = new Map(Object.entries(overrides.storage || {}));
   const appElement = {
     innerHTML: '',
     appendChild() {},
@@ -2199,9 +2502,14 @@ globalThis.__codexWebTest = {
   previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
   renderSessionCards: typeof renderSessionCards === 'function' ? renderSessionCards : null,
   renderSessionList: typeof renderSessionList === 'function' ? renderSessionList : null,
-  renderTimelineItem: typeof renderTimelineItem === 'function' ? renderTimelineItem : null,
-  renderComposerStatus: typeof renderComposerStatus === 'function' ? renderComposerStatus : null,
-  hydrateTimelineFromSession,
+	  renderChat: typeof renderChat === 'function' ? renderChat : null,
+	  renderReportsPage: typeof renderReportsPage === 'function' ? renderReportsPage : null,
+	  renderReportViewer: typeof renderReportViewer === 'function' ? renderReportViewer : null,
+	  renderTimelineItem: typeof renderTimelineItem === 'function' ? renderTimelineItem : null,
+	  renderComposerStatus: typeof renderComposerStatus === 'function' ? renderComposerStatus : null,
+	  applyMessageFontSize: typeof applyMessageFontSize === 'function' ? applyMessageFontSize : null,
+	  setMessageFontSize: typeof setMessageFontSize === 'function' ? setMessageFontSize : null,
+	  hydrateTimelineFromSession,
   restoreTimelineForSession: typeof restoreTimelineForSession === 'function' ? restoreTimelineForSession : null,
   showMoreSessionHistory: typeof showMoreSessionHistory === 'function' ? showMoreSessionHistory : null,
   applySessionSettings: typeof applySessionSettings === 'function' ? applySessionSettings : null,
@@ -2211,6 +2519,11 @@ globalThis.__codexWebTest = {
   refreshSessionsList: typeof refreshSessionsList === 'function' ? refreshSessionsList : null,
   refreshCurrentView: typeof refreshCurrentView === 'function' ? refreshCurrentView : null,
   restoreAuth: typeof restoreAuth === 'function' ? restoreAuth : null,
+  refreshReportsList: typeof refreshReportsList === 'function' ? refreshReportsList : null,
+  openReportsPage: typeof openReportsPage === 'function' ? openReportsPage : null,
+  closeReportsPage: typeof closeReportsPage === 'function' ? closeReportsPage : null,
+  openReportById: typeof openReportById === 'function' ? openReportById : null,
+  openReportByPath: typeof openReportByPath === 'function' ? openReportByPath : null,
   setSessionSortMode: typeof setSessionSortMode === 'function' ? setSessionSortMode : null,
   selectSession: typeof selectSession === 'function' ? selectSession : null,
   onComposerSubmit: typeof onComposerSubmit === 'function' ? onComposerSubmit : null,

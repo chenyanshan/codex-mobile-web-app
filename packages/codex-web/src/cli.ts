@@ -166,6 +166,7 @@ export async function startServeCommand(
 async function ensureRuntimeDirectories(config: CodexWebConfig): Promise<void> {
   await fs.promises.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
   await fs.promises.mkdir(path.join(config.stateDir, 'logs'), { recursive: true, mode: 0o700 });
+  await fs.promises.mkdir(config.reportsDir, { recursive: true, mode: 0o700 });
 }
 
 async function readPasswordFromStdin({

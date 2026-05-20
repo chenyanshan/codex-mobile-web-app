@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'codex-web-static-2026-05-19-thread-activity-details-v16';
+const STATIC_CACHE = 'codex-web-static-2026-05-20-message-size-settings-v18';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

@@ -19,6 +19,8 @@ function createConfig() {
     codexBin: 'codex',
     stateDir: '/tmp/codex-web-state',
     authPath: '/tmp/codex-web-state/auth.json',
+    reportsDir: '/tmp/codex-web-state/reports',
+    reportIndexPath: '/tmp/codex-web-state/report-index.json',
     envPath: '/tmp/codex-web-service.env',
     debug: false,
   };
@@ -206,6 +208,7 @@ test('serve command creates state and log directories before server start', asyn
   const stateDir = path.join(tempRoot, 'state');
   const authPath = path.join(stateDir, 'auth.json');
   const logDir = path.join(stateDir, 'logs');
+  const reportsDir = path.join(stateDir, 'reports');
 
   const server = await startServeCommand(parseCliArgs(['serve']), {
     env: {},
@@ -213,6 +216,8 @@ test('serve command creates state and log directories before server start', asyn
       ...createConfig(),
       stateDir,
       authPath,
+      reportsDir,
+      reportIndexPath: path.join(stateDir, 'report-index.json'),
     }),
     createAuthStore: () => ({
       isConfigured: async () => true,
@@ -236,8 +241,10 @@ test('serve command creates state and log directories before server start', asyn
 
   const stateStat = await fs.stat(stateDir);
   const logStat = await fs.stat(logDir);
+  const reportsStat = await fs.stat(reportsDir);
   assert.equal(stateStat.isDirectory(), true);
   assert.equal(logStat.isDirectory(), true);
+  assert.equal(reportsStat.isDirectory(), true);
 });
 
 function spawnProcess(

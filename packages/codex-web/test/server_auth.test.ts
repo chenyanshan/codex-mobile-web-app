@@ -1,17 +1,52 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { createCodexWebServer } from '../src/server.js';
 
-function createConfig() {
+interface TestConfig {
+  host: string;
+  port: number;
+  defaultCwd: string;
+  codexBin: string;
+  stateDir: string;
+  authPath: string;
+  reportsDir: string;
+  reportIndexPath: string;
+  envPath: string;
+  debug: boolean;
+}
+
+function createConfig(overrides: Partial<TestConfig> = {}): TestConfig {
+  const stateDir = overrides.stateDir ?? '/tmp';
   return {
     host: '127.0.0.1',
     port: 0,
     defaultCwd: '/tmp',
     codexBin: 'codex',
-    stateDir: '/tmp',
-    authPath: '/tmp/auth.json',
+    stateDir,
+    authPath: path.join(stateDir, 'auth.json'),
+    reportsDir: path.join(stateDir, 'reports'),
+    reportIndexPath: path.join(stateDir, 'report-index.json'),
     envPath: '/tmp/service.env',
     debug: false,
+    ...overrides,
+  };
+}
+
+function createAcceptingAuth() {
+  return {
+    isConfigured: async () => true,
+    login: async () => ({
+      token: 'cw_token',
+      session: { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' },
+      configuredNow: false,
+    }),
+    verifyToken: async (token: string | null | undefined) => token === 'cw_token'
+      ? { id: 's1', deviceName: 'phone', createdAt: '', lastSeenAt: '' }
+      : null,
+    logout: async () => {},
   };
 }
 
@@ -713,6 +748,149 @@ test('GET /api/sessions passes the favorite filter to the runtime', async () => 
     assert.equal(allResponse.status, 200);
     assert.equal((await allResponse.json()).items[0].id, 'thread_1');
     assert.deepEqual(calls, [{ favorite: true }, {}]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('GET /api/reports lists reports for authenticated clients', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-server-reports-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(stateDir, 'reports', 'project-a', '2026-05-19', 'summary.md');
+  await fs.mkdir(path.dirname(reportPath), { recursive: true });
+  await fs.writeFile(reportPath, '# Summary\n', 'utf8');
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: createRuntimeStub() as any,
+    config: createConfig({ stateDir }),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/reports`, {
+      headers: { Authorization: 'Bearer cw_token' },
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json() as { items: Array<{ id: string; project: string; kind: string }> };
+    assert.deepEqual(payload.items.map((report) => ({
+      id: report.id,
+      project: report.project,
+      kind: report.kind,
+    })), [
+      {
+        id: 'project-a/2026-05-19/summary.md',
+        project: 'project-a',
+        kind: 'markdown',
+      },
+    ]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('GET /api/reports/:id/content returns report content', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-server-reports-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(stateDir, 'reports', 'project-a', '2026-05-19', 'audit.html');
+  await fs.mkdir(path.dirname(reportPath), { recursive: true });
+  await fs.writeFile(reportPath, '<h1>Audit</h1>\n', 'utf8');
+  const reportId = 'project-a/2026-05-19/audit.html';
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: createRuntimeStub() as any,
+    config: createConfig({ stateDir }),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/reports/${encodeURIComponent(reportId)}/content`, {
+      headers: { Authorization: 'Bearer cw_token' },
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json() as { report: { id: string; kind: string }; content: string };
+    assert.equal(payload.report.id, reportId);
+    assert.equal(payload.report.kind, 'html');
+    assert.equal(payload.content, '<h1>Audit</h1>\n');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('PATCH /api/reports/:id/favorite updates report favorite state', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-server-reports-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(stateDir, 'reports', 'project-a', '2026-05-19', 'summary.md');
+  await fs.mkdir(path.dirname(reportPath), { recursive: true });
+  await fs.writeFile(reportPath, '# Summary\n', 'utf8');
+  const reportId = 'project-a/2026-05-19/summary.md';
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: createRuntimeStub() as any,
+    config: createConfig({ stateDir }),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/reports/${encodeURIComponent(reportId)}/favorite`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ favorite: true }),
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json() as { report: { favorite: boolean } };
+    assert.equal(payload.report.favorite, true);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('POST /api/reports/resolve accepts report-root absolute paths and rejects outside paths', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-server-reports-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(stateDir, 'reports', 'project-a', '2026-05-19', 'summary.md');
+  const outsidePath = path.join(stateDir, 'outside.md');
+  await fs.mkdir(path.dirname(reportPath), { recursive: true });
+  await fs.writeFile(reportPath, '# Summary\n', 'utf8');
+  await fs.writeFile(outsidePath, '# Outside\n', 'utf8');
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: createRuntimeStub() as any,
+    config: createConfig({ stateDir }),
+  });
+  await server.start();
+  try {
+    const resolved = await fetch(`${server.baseUrl}/api/reports/resolve`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ path: reportPath }),
+    });
+    assert.equal(resolved.status, 200);
+    assert.equal(((await resolved.json()) as { report: { id: string } }).report.id, 'project-a/2026-05-19/summary.md');
+
+    const rejected = await fetch(`${server.baseUrl}/api/reports/resolve`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ path: outsidePath }),
+    });
+    assert.equal(rejected.status, 400);
+    assert.deepEqual(await rejected.json(), {
+      error: 'invalid_report_path',
+      message: 'Report path is outside the reports directory.',
+    });
   } finally {
     await server.stop();
   }

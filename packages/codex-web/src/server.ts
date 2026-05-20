@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import type { PublicAuthSession } from './auth_store.js';
 import type { CodexWebConfig } from './config.js';
 import type { CodexWebStoredEvent } from './event_bus.js';
+import { FileReportStore } from './report_store.js';
+import type { CodexWebReport } from './report_store.js';
 import type {
   CodexWebRuntime,
   CreateSessionInput,
@@ -292,6 +294,34 @@ async function handleRequest({
     return;
   }
 
+  const reportStore = new FileReportStore({
+    reportsDir: config.reportsDir,
+    indexPath: config.reportIndexPath,
+  });
+
+  if (pathname === '/api/reports' && method === 'GET') {
+    writeJson(response, 200, { items: await reportStore.listReports() });
+    return;
+  }
+
+  if (pathname === '/api/reports/resolve' && method === 'POST') {
+    const body = await readJsonBody(request);
+    const inputPath = typeof body.path === 'string' ? body.path : '';
+    if (!inputPath.trim()) {
+      writeJson(response, 400, {
+        error: 'invalid_report_path',
+        message: 'path is required',
+      });
+      return;
+    }
+    const report = await resolveReportForResponse(reportStore, inputPath, response);
+    if (!report) {
+      return;
+    }
+    writeJson(response, 200, { report });
+    return;
+  }
+
   if (pathname === '/api/runtime/reload' && method === 'POST') {
     const result = await runtime.reloadRuntime();
     writeJson(response, 200, { ok: true, ...result });
@@ -360,6 +390,50 @@ async function handleRequest({
       return;
     }
     writeJson(response, 200, { session });
+    return;
+  }
+
+  const reportContentMatch = pathname.match(/^\/api\/reports\/([^/]+)\/content$/u);
+  if (reportContentMatch && method === 'GET') {
+    const reportId = decodeURIComponent(reportContentMatch[1]!);
+    const content = await readReportContentForResponse(reportStore, reportId, response);
+    if (!content) {
+      return;
+    }
+    writeJson(response, 200, content);
+    return;
+  }
+
+  const reportFavoriteMatch = pathname.match(/^\/api\/reports\/([^/]+)\/favorite$/u);
+  if (reportFavoriteMatch && method === 'PATCH') {
+    const reportId = decodeURIComponent(reportFavoriteMatch[1]!);
+    const body = await readJsonBody(request);
+    if (typeof body.favorite !== 'boolean') {
+      writeJson(response, 400, { error: 'favorite must be a boolean' });
+      return;
+    }
+    const favorite = body.favorite;
+    const report = await readReportForResponse(
+      () => reportStore.setFavorite(reportId, favorite),
+      response,
+    );
+    if (!report) {
+      return;
+    }
+    writeJson(response, 200, { report });
+    return;
+  }
+
+  const reportMatch = pathname.match(/^\/api\/reports\/([^/]+)$/u);
+  if (reportMatch && method === 'GET') {
+    const report = await readReportForResponse(
+      () => reportStore.readReport(decodeURIComponent(reportMatch[1]!)),
+      response,
+    );
+    if (!report) {
+      return;
+    }
+    writeJson(response, 200, { report });
     return;
   }
 
@@ -560,6 +634,74 @@ function writeSessionNotFound(response: ServerResponse): void {
     error: 'session_not_found',
     message: 'Selected session was not found.',
   });
+}
+
+async function resolveReportForResponse(
+  reportStore: FileReportStore,
+  inputPath: string,
+  response: ServerResponse,
+): Promise<CodexWebReport | null> {
+  return readReportForResponse(() => reportStore.resolveReport(inputPath), response);
+}
+
+async function readReportContentForResponse(
+  reportStore: FileReportStore,
+  reportId: string,
+  response: ServerResponse,
+): Promise<{ report: CodexWebReport; content: string } | null> {
+  try {
+    const content = await reportStore.readContent(reportId);
+    if (!content) {
+      writeReportNotFound(response);
+      return null;
+    }
+    return content;
+  } catch (error) {
+    if (isInvalidReportPathError(error)) {
+      writeInvalidReportPath(response, error);
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function readReportForResponse(
+  read: () => Promise<CodexWebReport | null>,
+  response: ServerResponse,
+): Promise<CodexWebReport | null> {
+  try {
+    const report = await read();
+    if (!report) {
+      writeReportNotFound(response);
+      return null;
+    }
+    return report;
+  } catch (error) {
+    if (isInvalidReportPathError(error)) {
+      writeInvalidReportPath(response, error);
+      return null;
+    }
+    throw error;
+  }
+}
+
+function writeReportNotFound(response: ServerResponse): void {
+  writeJson(response, 404, {
+    error: 'report_not_found',
+    message: 'Selected report was not found.',
+  });
+}
+
+function writeInvalidReportPath(response: ServerResponse, error: unknown): void {
+  writeJson(response, 400, {
+    error: 'invalid_report_path',
+    message: error instanceof Error ? error.message : 'Invalid report path.',
+  });
+}
+
+function isInvalidReportPathError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /invalid report id|outside the reports directory|markdown or html/u.test(message);
 }
 
 function isSessionNotFoundError(error: unknown): boolean {

@@ -10,6 +10,8 @@ test('service config defaults to LAN-facing binding and external state paths', (
   assert.equal(config.defaultCwd, '/Users/alice');
   assert.equal(config.stateDir, '/Users/alice/.codex-web');
   assert.equal(config.authPath, '/Users/alice/.codex-web/auth.json');
+  assert.equal(config.reportsDir, '/Users/alice/.codex-web/reports');
+  assert.equal(config.reportIndexPath, '/Users/alice/.codex-web/report-index.json');
   assert.equal(config.envPath, '/Users/alice/.config/codex-web/service.env');
 });
 

@@ -1,9 +1,10 @@
-const APP_BUILD_ID = '2026-05-19-thread-activity-details-v16';
+const APP_BUILD_ID = '2026-05-20-message-size-settings-v18';
 const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
 const THEME_KEY = 'codexWebTheme';
 const DEFAULT_THREAD_SETTINGS_KEY = 'codexWebDefaultThreadSettings';
 const ACTIVITY_DETAILS_KEY = 'codexWebActivityDetails';
+const MESSAGE_FONT_SIZE_KEY = 'codexWebMessageFontSize';
 const MAX_TIMELINE_CACHE_SESSIONS = 16;
 const MAX_TIMELINE_CACHE_ITEMS = 80;
 const MAX_TIMELINE_CACHE_MAP_ITEMS = 24;
@@ -20,6 +21,7 @@ const DEFAULT_PERMISSION_PRESET = 'full-access';
 const DEFAULT_APPROVAL_POLICY = 'never';
 const DEFAULT_SANDBOX_MODE = 'danger-full-access';
 const DEFAULT_THEME = 'dark';
+const DEFAULT_MESSAGE_FONT_SIZE = 'medium';
 const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
 const STREAM_STALE_MS = 30_000;
 const EDGE_SWIPE_START_PX = 24;
@@ -42,10 +44,20 @@ const state = {
   sessionsLoading: false,
   sessionsLoadingScope: null,
   sessionsRequestId: 0,
+  reports: [],
+  reportsLoading: false,
+  reportsLoaded: false,
+  reportsRequestId: 0,
+  reportProject: '',
+  currentReport: null,
+  currentReportContent: '',
+  reportReturnView: 'reports',
+  reportsReturnView: 'sessions',
   currentSession: null,
   sessionId: null,
   view: 'sessions',
   theme: normalizeTheme(localStorage.getItem(THEME_KEY)),
+  messageFontSize: normalizeMessageFontSize(localStorage.getItem(MESSAGE_FONT_SIZE_KEY)),
   defaultThreadSettings: loadDefaultThreadSettings(),
   sortMode: 'favorites',
   favoriteSortMode: false,
@@ -89,9 +101,11 @@ let composerOffsetRun = 0;
 let pullToRefreshCleanup = null;
 let edgeSwipeStart = null;
 let allSessionsPreloadPromise = null;
+let promptFocusRestoreTimer = null;
 
 bootstrap();
 applyTheme(state.theme, { persist: false });
+applyMessageFontSize(state.messageFontSize, { persist: false });
 registerServiceWorker();
 setupPwaPullToRefresh();
 setupEdgeSwipeBackNavigation();
@@ -126,6 +140,7 @@ async function restoreAuth() {
     const [modelsPayload] = await Promise.all([
       apiFetch('/api/models').catch(() => ({ items: [] })),
       refreshSessionsList({ renderAfter: false, scope: 'favorites' }).catch(() => null),
+      refreshReportsList({ renderAfter: false }).catch(() => null),
     ]);
     state.authSession = session;
     state.models = Array.isArray(modelsPayload.items) ? modelsPayload.items : [];
@@ -166,6 +181,15 @@ function setLoggedOut(message = '') {
   state.sessionsLoadingScope = null;
   state.sessionsRequestId += 1;
   allSessionsPreloadPromise = null;
+  state.reports = [];
+  state.reportsLoading = false;
+  state.reportsLoaded = false;
+  state.reportsRequestId += 1;
+  state.reportProject = '';
+  state.currentReport = null;
+  state.currentReportContent = '';
+  state.reportReturnView = 'reports';
+  state.reportsReturnView = 'sessions';
   state.sessionId = null;
   state.currentSession = null;
   state.view = 'sessions';
@@ -268,6 +292,12 @@ function renderMain() {
   if (state.view === 'settings') {
     return renderAppSettings();
   }
+  if (state.view === 'reports') {
+    return renderReportsPage();
+  }
+  if (state.view === 'report') {
+    return renderReportViewer();
+  }
   if (state.view === 'new') {
     return renderNewSession();
   }
@@ -288,6 +318,7 @@ function renderSessionList() {
         `
     : `
           <div class="topbar-actions">
+            <button class="reports-action compact-button" type="button" id="open-reports-button">Reports</button>
             ${canSortFavorites ? '<button class="ghost compact-button" type="button" id="favorite-sort-button">Sort</button>' : ''}
             <button class="ghost compact-button" type="button" id="open-new-session-button">New</button>
             <button class="ghost compact-button" type="button" id="open-app-settings-button">Set</button>
@@ -316,6 +347,105 @@ function renderSessionList() {
   return shell;
 }
 
+function renderReportsPage() {
+  const shell = document.createElement('div');
+  shell.className = 'shell';
+  const title = state.reportProject ? state.reportProject : 'Reports';
+  shell.innerHTML = `
+    <div class="screen page-screen">
+      ${renderPageNav(title, { backId: 'back-to-list-button' })}
+      <main class="report-list">${state.reportProject ? renderReportCards() : renderReportProjects()}</main>
+    </div>
+  `;
+  return shell;
+}
+
+function renderReportProjects() {
+  const projects = reportProjects();
+  if (!projects.length) {
+    if (state.reportsLoading) {
+      return '<div class="empty-state">Loading reports...</div>';
+    }
+    return '<div class="empty-state">No reports yet.</div>';
+  }
+  return projects.map((project) => `
+    <article class="report-card report-project-card">
+      <button class="report-card-open" type="button" data-report-project="${escapeAttribute(project.name)}">
+        <span class="report-card-main">
+          <span class="report-title">${escapeHtml(project.name)}</span>
+          <span class="report-path">${escapeHtml(`${project.count} ${project.count === 1 ? 'report' : 'reports'}`)}</span>
+        </span>
+        <span class="report-card-meta">
+          <span>${escapeHtml(project.favoriteCount ? `${project.favoriteCount} favorite` : 'reports')}</span>
+          <span>${escapeHtml(formatShortDateTime(project.updatedAt))}</span>
+        </span>
+      </button>
+    </article>
+  `).join('');
+}
+
+function renderReportCards() {
+  const reports = filteredReports();
+  if (!reports.length) {
+    if (state.reportsLoading) {
+      return '<div class="empty-state">Loading reports...</div>';
+    }
+    return '<div class="empty-state">No reports yet.</div>';
+  }
+  let currentProject = '';
+  return reports.map((report) => {
+    const projectHeader = report.project !== currentProject
+      ? `<div class="report-project-heading">${escapeHtml(report.project)}</div>`
+      : '';
+    currentProject = report.project;
+    return `
+      ${projectHeader}
+      <article class="report-card">
+        <button class="report-card-open" type="button" data-report-id="${escapeAttribute(report.id)}">
+          <span class="report-card-main">
+            <span class="report-title">${escapeHtml(report.title)}</span>
+            <span class="report-path">${escapeHtml(shorten(report.id, 82))}</span>
+          </span>
+          <span class="report-card-meta">
+            <span>${escapeHtml(report.kind || 'report')}</span>
+            <span>${escapeHtml(formatShortDateTime(report.updatedAt))}</span>
+          </span>
+        </button>
+        <button class="ghost compact-button report-favorite" type="button" data-report-favorite-id="${escapeAttribute(report.id)}" aria-pressed="${String(report.favorite === true)}">${report.favorite ? 'Unfavorite' : 'Favorite'}</button>
+      </article>
+    `;
+  }).join('');
+}
+
+function renderReportViewer() {
+  const report = state.currentReport;
+  const shell = document.createElement('div');
+  shell.className = 'shell';
+  if (!report) {
+    shell.innerHTML = `
+      <div class="screen page-screen">
+        ${renderPageNav('Report', { backId: 'back-to-reports-button' })}
+        <main class="report-viewer"><div class="empty-state">Report not loaded.</div></main>
+      </div>
+    `;
+    return shell;
+  }
+  shell.innerHTML = `
+    <div class="screen page-screen">
+      ${renderPageNav(report.title || 'Report', { backId: 'back-to-reports-button' })}
+      <main class="report-viewer">${renderReportDocument(report, state.currentReportContent)}</main>
+    </div>
+  `;
+  return shell;
+}
+
+function renderReportDocument(report, content) {
+  if (report?.kind === 'html') {
+    return `<iframe class="report-frame" sandbox="" srcdoc="${escapeAttribute(content || '')}"></iframe>`;
+  }
+  return `<div class="report-document markdown-body">${renderMarkdown(content || '')}</div>`;
+}
+
 function renderAppSettings() {
   const shell = document.createElement('div');
   shell.className = 'shell';
@@ -335,6 +465,14 @@ function renderAppSettings() {
             <button type="button" data-app-theme="light" aria-pressed="${String(state.theme === 'light')}">White</button>
             <button type="button" data-app-theme="sunny" aria-pressed="${String(state.theme === 'sunny')}">Yellow</button>
             <button type="button" data-app-theme="forest" aria-pressed="${String(state.theme === 'forest')}">Green</button>
+          </div>
+        </section>
+        <section class="settings-section">
+          <div class="settings-section-title">Message Size</div>
+          <div class="toggle">
+            <button type="button" data-message-font-size="small" aria-pressed="${String(state.messageFontSize === 'small')}">Small</button>
+            <button type="button" data-message-font-size="medium" aria-pressed="${String(state.messageFontSize === 'medium')}">Medium</button>
+            <button type="button" data-message-font-size="large" aria-pressed="${String(state.messageFontSize === 'large')}">Large</button>
           </div>
         </section>
         <section class="settings-section">
@@ -405,6 +543,7 @@ function renderNewSession() {
 }
 
 function renderChat() {
+  const sessionReportsProject = reportProjectForSession(state.currentSession);
   const shell = document.createElement('div');
   shell.className = 'shell';
   shell.innerHTML = `
@@ -413,7 +552,9 @@ function renderChat() {
         <div class="chat-nav">
           <button class="ghost chat-back-button" type="button" id="back-to-list-button" aria-label="Sessions">&lt;</button>
           <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
-          <div class="chat-nav-spacer" aria-hidden="true"></div>
+          ${sessionReportsProject
+            ? `<button class="ghost compact-button session-report-button" type="button" data-session-reports-project="${escapeAttribute(sessionReportsProject)}">Reports</button>`
+            : '<div class="chat-nav-spacer" aria-hidden="true"></div>'}
         </div>
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
@@ -432,6 +573,19 @@ function renderChat() {
     </div>
   `;
   return shell;
+}
+
+function renderPageNav(title, options = {}) {
+  const backId = options.backId || 'back-to-list-button';
+  return `
+    <header class="topbar page-topbar">
+      <div class="page-nav">
+        <button class="ghost page-back-button" type="button" id="${escapeAttribute(backId)}" aria-label="Back">&lt;</button>
+        <div class="page-title">${escapeHtml(title)}</div>
+        <div class="page-nav-spacer" aria-hidden="true"></div>
+      </div>
+    </header>
+  `;
 }
 
 function renderSessionCards() {
@@ -984,6 +1138,53 @@ function bindGlobalEvents() {
     });
   }
 
+  const openReportsButton = document.querySelector('#open-reports-button');
+  if (openReportsButton) {
+    openReportsButton.addEventListener('click', () => {
+      void openReportsPage();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-report-project]')) {
+    button.addEventListener('click', () => {
+      state.reportProject = button.getAttribute('data-report-project') || '';
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-report-id]')) {
+    button.addEventListener('click', () => {
+      void openReportById(button.getAttribute('data-report-id') || '', { returnView: 'reports' });
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-session-reports-project]')) {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void openReportsPage({ project: button.getAttribute('data-session-reports-project') || '', returnView: 'chat' });
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-report-favorite-id]')) {
+    button.addEventListener('click', () => {
+      void toggleReportFavorite(button.getAttribute('data-report-favorite-id') || '');
+    });
+  }
+
+  for (const link of document.querySelectorAll('[data-report-path]')) {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      void openReportByPath(link.getAttribute('data-report-path') || '', { returnView: 'chat' });
+    });
+  }
+
+  const backToReportsButton = document.querySelector('#back-to-reports-button');
+  if (backToReportsButton) {
+    backToReportsButton.addEventListener('click', () => {
+      closeReportViewer();
+    });
+  }
+
   const favoriteSortButton = document.querySelector('#favorite-sort-button');
   if (favoriteSortButton) {
     favoriteSortButton.addEventListener('click', () => {
@@ -1008,7 +1209,16 @@ function bindGlobalEvents() {
   const backToListButton = document.querySelector('#back-to-list-button');
   if (backToListButton) {
     backToListButton.addEventListener('click', () => {
-      showSessionList();
+      if (state.view === 'reports') {
+        if (state.reportProject) {
+          state.reportProject = '';
+          render();
+        } else {
+          closeReportsPage();
+        }
+      } else {
+        showSessionList();
+      }
     });
   }
 
@@ -1079,6 +1289,8 @@ function bindGlobalEvents() {
 
   const promptInput = document.querySelector('#prompt-input');
   if (promptInput) {
+    promptInput.addEventListener('touchstart', protectPromptFocusScroll, { passive: true });
+    promptInput.addEventListener('focus', protectPromptFocusScroll);
     promptInput.addEventListener('input', (event) => {
       state.prompt = event.target.value;
       autoGrowPromptInput(event.target);
@@ -1090,6 +1302,12 @@ function bindGlobalEvents() {
   const settingsToggle = document.querySelector('#settings-toggle');
   if (settingsToggle) {
     settingsToggle.addEventListener('click', toggleSettingsDrawer);
+  }
+
+  for (const button of document.querySelectorAll('[data-message-font-size]')) {
+    button.addEventListener('click', () => {
+      setMessageFontSize(button.getAttribute('data-message-font-size') || DEFAULT_MESSAGE_FONT_SIZE);
+    });
   }
 
   const activityDetailToggle = document.querySelector('#activity-detail-toggle');
@@ -1242,6 +1460,47 @@ function withTimelineScrollPreserved(callback) {
   });
 }
 
+function withTimelineBottomOffsetPreserved(callback) {
+  const timeline = document.querySelector('#timeline');
+  const previousScrollHeight = timeline?.scrollHeight ?? null;
+  const previousClientHeight = timeline?.clientHeight ?? null;
+  const previousScrollTop = timeline?.scrollTop ?? null;
+  const previousBottomOffset = previousScrollHeight !== null && previousClientHeight !== null && previousScrollTop !== null
+    ? Math.max(0, previousScrollHeight - previousClientHeight - previousScrollTop)
+    : null;
+  callback();
+  if (previousBottomOffset === null) {
+    return;
+  }
+  scheduleTimelineViewportRestore(previousBottomOffset);
+}
+
+function scheduleTimelineViewportRestore(bottomOffset) {
+  requestAnimationFrame(() => {
+    const timeline = document.querySelector('#timeline');
+    if (!timeline) {
+      return;
+    }
+    timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight - Number(bottomOffset || 0));
+  });
+}
+
+function protectPromptFocusScroll() {
+  const timeline = document.querySelector('#timeline');
+  if (!timeline) {
+    return;
+  }
+  const bottomOffset = Math.max(0, timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop);
+  scheduleTimelineViewportRestore(bottomOffset);
+  if (promptFocusRestoreTimer) {
+    clearTimeout(promptFocusRestoreTimer);
+  }
+  promptFocusRestoreTimer = setTimeout(() => {
+    scheduleTimelineViewportRestore(bottomOffset);
+    promptFocusRestoreTimer = null;
+  }, 160);
+}
+
 function autoGrowPromptInput(textarea) {
   if (!textarea?.style) {
     return;
@@ -1295,6 +1554,9 @@ function showSessionList() {
   saveCurrentTimeline();
   stopStream();
   state.view = 'sessions';
+  state.currentReport = null;
+  state.currentReportContent = '';
+  state.reportReturnView = 'reports';
   state.favoriteSortMode = false;
   state.favoriteSortDraft = [];
   state.archiveConfirmSessionId = null;
@@ -1308,6 +1570,47 @@ function showSessionList() {
   render();
 }
 
+async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
+  const normalizedProject = String(project || '').trim();
+  const normalizedReturnView = returnView === 'chat' && state.sessionId ? 'chat' : 'sessions';
+  if (normalizedReturnView !== 'chat') {
+    saveCurrentTimeline();
+    stopStream();
+  }
+  state.view = 'reports';
+  state.favoriteSortMode = false;
+  state.favoriteSortDraft = [];
+  state.archiveConfirmSessionId = null;
+  if (normalizedReturnView !== 'chat') {
+    state.sessionId = null;
+    state.currentSession = null;
+    resetTurnState();
+  }
+  state.currentReport = null;
+  state.currentReportContent = '';
+  state.reportReturnView = 'reports';
+  state.reportsReturnView = normalizedReturnView;
+  state.reportProject = normalizedProject;
+  state.error = '';
+  if (!state.reportsLoaded) {
+    await refreshReportsList({ renderAfter: true });
+    return;
+  }
+  render();
+}
+
+function closeReportsPage() {
+  state.currentReport = null;
+  state.currentReportContent = '';
+  if (state.reportsReturnView === 'chat' && state.sessionId) {
+    state.view = 'chat';
+    render();
+    scrollTimelineToBottom();
+    return;
+  }
+  showSessionList();
+}
+
 function openAppSettingsPage() {
   saveCurrentTimeline();
   stopStream();
@@ -1317,6 +1620,8 @@ function openAppSettingsPage() {
   state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
+  state.currentReport = null;
+  state.currentReportContent = '';
   resetTurnState();
   state.error = '';
   render();
@@ -1332,6 +1637,8 @@ function openNewSessionPage() {
   state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
+  state.currentReport = null;
+  state.currentReportContent = '';
   state.newCwd = state.cwd || '';
   resetTurnState();
   state.error = '';
@@ -2155,6 +2462,110 @@ async function refreshSessionsList({
   }
 }
 
+async function refreshReportsList({ renderAfter = true } = {}) {
+  const requestId = state.reportsRequestId + 1;
+  state.reportsRequestId = requestId;
+  state.reportsLoading = true;
+  if (renderAfter) {
+    render();
+  }
+  try {
+    const payload = await apiFetch('/api/reports');
+    const reports = normalizeReports(payload);
+    if (requestId !== state.reportsRequestId) {
+      return reports;
+    }
+    state.reports = reports;
+    state.reportsLoaded = true;
+    return state.reports;
+  } finally {
+    if (requestId === state.reportsRequestId) {
+      state.reportsLoading = false;
+    }
+    if (renderAfter) {
+      render();
+    }
+  }
+}
+
+async function openReportById(reportId, { returnView = state.view } = {}) {
+  if (!reportId) {
+    return;
+  }
+  state.reportReturnView = returnView === 'chat' ? 'chat' : 'reports';
+  state.view = 'report';
+  state.currentReport = state.reports.find((report) => report.id === reportId) || {
+    id: reportId,
+    title: reportTitleFromId(reportId),
+    kind: reportKindFromId(reportId),
+    project: reportProjectFromId(reportId),
+  };
+  state.currentReportContent = '';
+  state.error = '';
+  render();
+  try {
+    const payload = await apiFetch(`/api/reports/${encodeURIComponent(reportId)}/content`);
+    state.currentReport = payload.report;
+    state.currentReportContent = payload.content || '';
+    upsertReport(payload.report);
+    render();
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+async function openReportByPath(reportPath, { returnView = 'chat' } = {}) {
+  if (!reportPath) {
+    return;
+  }
+  try {
+    const payload = await apiFetch('/api/reports/resolve', {
+      method: 'POST',
+      body: { path: reportPath },
+    });
+    if (payload?.report) {
+      upsertReport(payload.report);
+      await openReportById(payload.report.id, { returnView });
+    }
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+async function toggleReportFavorite(reportId) {
+  const report = state.reports.find((item) => item.id === reportId);
+  if (!report) {
+    return;
+  }
+  const favorite = report.favorite !== true;
+  try {
+    const payload = await apiFetch(`/api/reports/${encodeURIComponent(reportId)}/favorite`, {
+      method: 'PATCH',
+      body: { favorite },
+    });
+    if (payload?.report) {
+      upsertReport(payload.report);
+      if (state.currentReport?.id === payload.report.id) {
+        state.currentReport = payload.report;
+      }
+    }
+    state.status = favorite ? 'Report favorited' : 'Favorite removed';
+    state.statusTone = 'success';
+    state.error = '';
+    render();
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+function closeReportViewer() {
+  const returnView = state.reportReturnView;
+  state.currentReport = null;
+  state.currentReportContent = '';
+  state.view = returnView === 'chat' && state.sessionId ? 'chat' : 'reports';
+  render();
+}
+
 async function setSessionSortMode(mode) {
   const nextMode = mode === 'time' ? 'time' : 'favorites';
   if (nextMode !== 'favorites') {
@@ -2917,6 +3328,147 @@ function isFavoriteSession(session) {
   return session?.favorite === true || session?.settings?.favorite === true || session?.settings?.metadata?.favorite === true;
 }
 
+function normalizeReports(payload) {
+  const reports = Array.isArray(payload?.items) ? payload.items : [];
+  return reports
+    .map(normalizeReport)
+    .filter(Boolean)
+    .sort(compareReports);
+}
+
+function normalizeReport(report) {
+  if (!report || typeof report.id !== 'string' || !report.id) {
+    return null;
+  }
+  return {
+    id: report.id,
+    project: typeof report.project === 'string' && report.project ? report.project : reportProjectFromId(report.id),
+    title: typeof report.title === 'string' && report.title ? report.title : reportTitleFromId(report.id),
+    kind: report.kind === 'html' ? 'html' : 'markdown',
+    favorite: report.favorite === true,
+    updatedAt: report.updatedAt || '',
+    createdAt: report.createdAt || '',
+    sizeBytes: Number.isFinite(report.sizeBytes) ? Number(report.sizeBytes) : 0,
+  };
+}
+
+function filteredReports() {
+  const reports = [...state.reports].sort(compareReports);
+  const project = String(state.reportProject || '').trim();
+  if (!project) {
+    return reports;
+  }
+  const projectSlug = slugifyReportKey(project);
+  return reports.filter((report) => slugifyReportKey(report.project) === projectSlug || slugifyReportKey(reportProjectFromId(report.id)) === projectSlug);
+}
+
+function reportProjects() {
+  const projects = new Map();
+  for (const report of state.reports) {
+    const name = report.project || reportProjectFromId(report.id);
+    const key = slugifyReportKey(name);
+    const existing = projects.get(key) || {
+      name,
+      count: 0,
+      favoriteCount: 0,
+      updatedAt: '',
+    };
+    existing.count += 1;
+    existing.favoriteCount += report.favorite ? 1 : 0;
+    if (!existing.updatedAt || String(report.updatedAt || '').localeCompare(existing.updatedAt) > 0) {
+      existing.updatedAt = report.updatedAt || '';
+    }
+    projects.set(key, existing);
+  }
+  return [...projects.values()].sort((left, right) => {
+    if (left.favoriteCount !== right.favoriteCount) {
+      return right.favoriteCount - left.favoriteCount;
+    }
+    return String(right.updatedAt || '').localeCompare(String(left.updatedAt || ''))
+      || String(left.name || '').localeCompare(String(right.name || ''));
+  });
+}
+
+function compareReports(left, right) {
+  if (left.favorite !== right.favorite) {
+    return left.favorite ? -1 : 1;
+  }
+  return String(left.project || '').localeCompare(String(right.project || ''))
+    || String(right.updatedAt || '').localeCompare(String(left.updatedAt || ''))
+    || String(left.title || '').localeCompare(String(right.title || ''));
+}
+
+function upsertReport(report) {
+  const normalized = normalizeReport(report);
+  if (!normalized) {
+    return;
+  }
+  const index = state.reports.findIndex((item) => item.id === normalized.id);
+  if (index >= 0) {
+    state.reports[index] = {
+      ...state.reports[index],
+      ...normalized,
+    };
+  } else {
+    state.reports.unshift(normalized);
+  }
+  state.reports.sort(compareReports);
+}
+
+function reportTitleFromId(reportId) {
+  const file = String(reportId || '').split('/').filter(Boolean).pop() || 'report';
+  return file.replace(/\.[^.]+$/u, '');
+}
+
+function reportProjectFromId(reportId) {
+  return String(reportId || '').split('/').filter(Boolean)[0] || 'reports';
+}
+
+function reportKindFromId(reportId) {
+  return /\.html?$/iu.test(String(reportId || '')) ? 'html' : 'markdown';
+}
+
+function reportProjectForSession(session) {
+  const slugs = sessionReportProjectSlugs(session);
+  if (!slugs.size) {
+    return '';
+  }
+  const report = [...state.reports]
+    .sort(compareReports)
+    .find((item) => slugs.has(slugifyReportKey(item.project)) || slugs.has(slugifyReportKey(reportProjectFromId(item.id))))
+    || null;
+  if (report) {
+    return report.project || reportProjectFromId(report.id);
+  }
+  return [...slugs][0] || '';
+}
+
+function sessionReportProjectSlugs(session) {
+  const values = [
+    session?.projectName,
+    session?.title,
+    projectNameFromCwd(session?.cwd || ''),
+  ];
+  const slugs = new Set();
+  for (const value of values) {
+    const slug = slugifyReportKey(value);
+    if (slug) {
+      slugs.add(slug);
+    }
+  }
+  return slugs;
+}
+
+function slugifyReportKey(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/gu, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '');
+}
+
 function projectNameFromCwd(cwd) {
   const parts = String(cwd || '').split(/[\\/]+/u).filter(Boolean);
   if (!parts.length) {
@@ -3076,6 +3628,53 @@ function applyTheme(theme, options = {}) {
 
 function normalizeTheme(theme) {
   return ['dark', 'light', 'sunny', 'forest'].includes(theme) ? theme : DEFAULT_THEME;
+}
+
+function normalizeMessageFontSize(size) {
+  return ['small', 'medium', 'large'].includes(size) ? size : DEFAULT_MESSAGE_FONT_SIZE;
+}
+
+function messageFontSizeTokens(size) {
+  switch (normalizeMessageFontSize(size)) {
+    case 'small':
+      return {
+        fontSize: '13px',
+        headingFontSize: '13px',
+      };
+    case 'large':
+      return {
+        fontSize: '17px',
+        headingFontSize: '16px',
+      };
+    default:
+      return {
+        fontSize: '15px',
+        headingFontSize: '14px',
+      };
+  }
+}
+
+function applyMessageFontSize(size, options = {}) {
+  const nextSize = normalizeMessageFontSize(size);
+  const tokens = messageFontSizeTokens(nextSize);
+  state.messageFontSize = nextSize;
+  document.documentElement.dataset.messageFontSize = nextSize;
+  document.documentElement.style.setProperty('--message-font-size', tokens.fontSize);
+  document.documentElement.style.setProperty('--message-heading-font-size', tokens.headingFontSize);
+  if (options.persist !== false) {
+    localStorage.setItem(MESSAGE_FONT_SIZE_KEY, nextSize);
+  }
+}
+
+function setMessageFontSize(size) {
+  const nextSize = normalizeMessageFontSize(size);
+  if (nextSize === state.messageFontSize) {
+    return;
+  }
+  withTimelineBottomOffsetPreserved(() => {
+    applyMessageFontSize(nextSize);
+    withTimelineScrollPreserved(() => render());
+  });
 }
 
 function permissionPresetFromSettings(settings) {
@@ -3610,11 +4209,38 @@ function renderMarkdown(value) {
 }
 
 function renderInlineMarkdown(value) {
-  return escapeHtml(value)
+  return linkPlainReportPaths(escapeHtml(value)
     .replace(/`([^`]+)`/gu, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/gu, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/gu, '<em>$1</em>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/gu, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    .replace(/\[([^\]]+)\]\(((?:\/|~\/|\.\.?\/)[^)\s]+\.(?:md|markdown|html?|htm))\)/giu, (_match, label, href) => renderReportLink(label, href))
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/gu, '<a href="$2" target="_blank" rel="noreferrer">$1</a>'));
+}
+
+function linkPlainReportPaths(html) {
+  return String(html || '').replace(
+    /(^|[\s:：>])((?:\/|~\/|\.\.?\/)[^\s<>"']*?\.codex-web\/reports\/[^\s<>"']+?\.(?:md|markdown|html?|htm))(?=$|[\s<),，。！？!?])/giu,
+    (_match, prefix, reportPath) => `${prefix}${renderReportLink(shortReportPathLabel(reportPath), reportPath)}`,
+  );
+}
+
+function renderReportLink(label, href) {
+  const reportPath = decodeHtmlEntityText(href);
+  return `<a href="#" class="report-link" data-report-path="${escapeAttribute(reportPath)}">${label}</a>`;
+}
+
+function shortReportPathLabel(reportPath) {
+  const decoded = decodeHtmlEntityText(reportPath);
+  return decoded.split(/[\\/]/u).filter(Boolean).pop() || decoded;
+}
+
+function decodeHtmlEntityText(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
 }
 
 function escapeHtml(value) {

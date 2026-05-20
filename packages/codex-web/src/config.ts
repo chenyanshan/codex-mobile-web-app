@@ -9,6 +9,8 @@ export interface CodexWebConfig {
   codexBin: string;
   stateDir: string;
   authPath: string;
+  reportsDir: string;
+  reportIndexPath: string;
   envPath: string;
   debug: boolean;
 }
@@ -37,6 +39,8 @@ export function loadServiceConfig({
     codexBin: normalizeString(merged.CODEX_REAL_BIN) || 'codex',
     stateDir,
     authPath: path.join(stateDir, 'auth.json'),
+    reportsDir: path.join(stateDir, 'reports'),
+    reportIndexPath: path.join(stateDir, 'report-index.json'),
     envPath,
     debug: parseBoolean(merged.CODEX_WEB_DEBUG, false),
   };
