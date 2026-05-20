@@ -73,6 +73,45 @@ The installer script will:
 - start the service
 - print the local and LAN URLs when available
 
+## Install The Report Skill
+
+After the macOS installer succeeds, the agent should also install the bundled
+report skill from:
+
+```text
+skills/codex-mobile-report
+```
+
+Run:
+
+```bash
+mkdir -p ~/.codex/skills
+mkdir -p ~/.codex/skills/codex-mobile-report
+cp -R skills/codex-mobile-report/. ~/.codex/skills/codex-mobile-report/
+```
+
+If the user plans to keep editing this repository locally, the agent may use a
+symlink instead:
+
+```bash
+mkdir -p ~/.codex/skills
+ln -s "$(pwd)/skills/codex-mobile-report" ~/.codex/skills/codex-mobile-report
+```
+
+## How To Use After Install
+
+After installation, the agent should explain the basic usage flow:
+
+1. Open the printed local URL on the Mac, or the printed LAN URL on the phone.
+2. Log in with the password that was set during install.
+3. On iPhone or Android, follow `docs/pwa-setup.md` to add the app to the home
+   screen.
+4. In later Codex chats, the user can ask for a phone-readable report such as:
+   `请用 codex-mobile-report 给我生成手机可读报告`
+5. The report skill writes reports under:
+   `~/.codex-web/reports/`
+6. Codex Web lists those reports inside the mobile app.
+
 ## Post-Install Handoff
 
 After the installer succeeds, point the user to:
@@ -80,3 +119,4 @@ After the installer succeeds, point the user to:
 - `README.md` for the normal project overview
 - `README.zh-CN.md` for Chinese instructions
 - `docs/pwa-setup.md` for mobile PWA installation on iPhone or Android
+- `skills/codex-mobile-report` for phone-readable report generation

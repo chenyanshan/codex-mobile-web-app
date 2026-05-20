@@ -103,6 +103,15 @@ Typical Codex chat flow:
    the password
    whether launchd autostart should be installed
 4. Codex runs the installer script on macOS
+5. Codex installs the bundled `codex-mobile-report` skill
+6. Codex tells the user which URL to open and how to add the app as a PWA
+
+After install, the normal usage flow is:
+
+1. Open the printed local URL or LAN URL
+2. Log in with the password set during install
+3. Add the site to the phone home screen
+4. Ask Codex for a phone-readable report when needed
 
 ## Install The Report Skill
 

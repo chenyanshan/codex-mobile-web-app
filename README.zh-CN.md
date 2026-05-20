@@ -100,6 +100,15 @@ scripts/install/install-codex-web-macos.sh
    密码是什么
    要不要安装 launchd 开机自启动
 4. Codex 在 macOS 上执行安装脚本
+5. Codex 安装仓库自带的 `codex-mobile-report` skill
+6. Codex 告诉用户该打开哪个 URL，以及怎样加到手机主屏幕
+
+安装完成后的使用方式：
+
+1. 打开安装脚本打印出来的本机 URL 或局域网 URL
+2. 用安装时设置的密码登录
+3. 按 PWA 方式添加到手机主屏幕
+4. 后续在 Codex 对话里按需要求生成手机可读报告
 
 ## 安装报告 Skill
 
@@ -131,6 +140,12 @@ ln -s "$(pwd)/skills/codex-mobile-report" ~/.codex/skills/codex-mobile-report
 ```
 
 Codex Web 会通过已鉴权 API 暴露这些报告，并在移动端应用内打开报告链接。
+
+常见用法示例：
+
+```text
+请用 codex-mobile-report 给我生成手机可读报告
+```
 
 ## Codex Web 配置
 
