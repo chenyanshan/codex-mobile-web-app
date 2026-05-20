@@ -9,6 +9,9 @@ Codex runtime。
 runtime、读写本地项目文件、执行 shell 命令，以及保存应用状态。公网访问、
 tunnel、反向代理不属于本仓库范围。
 
+> 让 Codex 直接安装：
+> `帮我安装 https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
+
 ## 当前状态
 
 本仓库从 `CodexBridge-main` 拆分出来。

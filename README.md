@@ -9,6 +9,9 @@ starts the Codex runtime, reads and writes local project files, executes shell
 commands, and stores app state. Remote access through a tunnel or reverse proxy
 is intentionally outside this repository.
 
+> Ask Codex to install it:
+> `帮我安装 https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
+
 ## Current State
 
 This repository was split out from `CodexBridge-main`.
