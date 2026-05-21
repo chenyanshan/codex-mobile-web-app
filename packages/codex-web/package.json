@@ -18,7 +18,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "serve": "node --import tsx src/cli.ts serve",
+    "serve": "node --conditions=development --import tsx src/cli.ts serve",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts"
   },

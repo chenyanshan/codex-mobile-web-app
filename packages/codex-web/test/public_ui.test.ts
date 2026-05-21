@@ -35,7 +35,7 @@ test('mobile UI exposes iOS PWA install metadata and registers a service worker'
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.type), ['image/png', 'image/png']);
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.sizes), ['192x192', '512x512']);
   assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
-  assert.match(serviceWorker, /codex-web-static-2026-05-20-first-turn-recovery-v30/u);
+  assert.match(serviceWorker, /codex-web-static-2026-05-21-runtime-status-v37/u);
   assert.match(serviceWorker, /'\/icon-192\.png'/u);
   assert.match(serviceWorker, /'\/icon-512\.png'/u);
   assert.match(serviceWorker, /'\/apple-touch-icon\.png'/u);
@@ -565,9 +565,22 @@ test('changing message font size preserves timeline bottom offset', async () => 
 test('prompt focus protection keeps timeline scroll anchored during keyboard reflow', async () => {
   const app = await readFile(appUrl, 'utf8');
 
-  assert.match(app, /promptInput\.addEventListener\('touchstart',\s*protectPromptFocusScroll,\s*\{\s*passive:\s*true\s*\}\)/u);
-  assert.match(app, /promptInput\.addEventListener\('focus',\s*protectPromptFocusScroll\)/u);
+  assert.match(app, /promptInput\.addEventListener\('touchstart',\s*syncPromptFocusLayout,\s*\{\s*passive:\s*true\s*\}\)/u);
+  assert.match(app, /promptInput\.addEventListener\('focus',\s*syncPromptFocusLayout\)/u);
   assert.match(app, /function scheduleTimelineViewportRestore\(/u);
+});
+
+test('prompt focus refreshes textarea layout before input changes', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /function syncPromptFocusLayout\(eventOrTextarea\)/u);
+  assert.match(app, /function syncPromptInputLayout\(textarea\)/u);
+  assert.match(app, /syncPromptFocusLayout[\s\S]*protectPromptFocusScroll\(\)/u);
+  assert.match(app, /syncPromptFocusLayout[\s\S]*syncPromptInputLayout\(textarea\)/u);
+  assert.match(app, /syncPromptFocusLayout[\s\S]*requestAnimationFrame\(\(\) => \{\s*syncPromptInputLayout\(textarea\);/u);
+  assert.match(app, /syncPromptFocusLayout[\s\S]*promptFocusLayoutTimer = setTimeout\(\(\) => \{[\s\S]*syncPromptInputLayout\(textarea\);/u);
+  assert.match(app, /promptFocusLayoutTimer/u);
+  assert.match(app, /syncPromptInputLayout\(event\.target\);/u);
 });
 
 test('chat and session list use separate scroll containers', async () => {
@@ -891,7 +904,7 @@ test('composer status renders a small bottom status separator', async () => {
   api.state.status = 'Turn running';
   api.state.statusTone = 'warn';
 
-  assert.match(api.renderComposerStatus(), /composer-status/u);
+  assert.match(api.renderComposerStatus(), /<div class="composer-status" data-tone="work"><span>Running<\/span><\/div>/u);
   assert.match(api.renderComposerStatus(), /<span>Running<\/span>/u);
   assert.doesNotMatch(api.renderComposerStatus(), /----- Running -----/u);
 
@@ -908,6 +921,7 @@ test('composer status separator uses continuous css rules outside the message bo
   assert.match(styles, /\.composer-status::before,\s*\.composer-status::after\s*\{[^}]*flex:\s*1;/su);
   assert.match(styles, /\.composer-status::before,\s*\.composer-status::after\s*\{[^}]*border-top:\s*1px solid currentColor;/su);
   assert.match(styles, /\.composer-status\s*\{[^}]*width:\s*min\(40%,\s*288px\);/su);
+  assert.match(styles, /\.composer-status\[data-tone="work"\]\s*\{[^}]*color:\s*var\(--success\);/su);
   assert.match(styles, /\.composer-status span\s*\{/u);
 });
 
@@ -1528,14 +1542,37 @@ test('turn failures render as visible timeline error messages', async () => {
 
   const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_error');
   assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.error, '');
   assert.equal(errorItem?.kind, 'message');
   assert.equal(errorItem?.role, 'system');
   assert.match(errorItem?.text || '', /Codex app-server disconnected/u);
+  assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
 
   const html = api.renderTimelineItem(errorItem);
   assert.match(html, /message-card system error-message/u);
   assert.match(html, /<span class="error-badge">Error<\/span>/u);
   assert.match(html, /Codex app-server disconnected/u);
+});
+
+test('turn failures prefer raw details when present', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyTurnEvent({
+    type: 'turn.failed',
+    turnId: 'turn_rate_limit',
+    threadId: 'session_1',
+    message: 'Codex request failed',
+    details: '429 Too Many Requests: model rate limit reached',
+  }, null);
+
+  const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_rate_limit');
+  assert.equal(errorItem?.severity, 'error');
+  assert.match(errorItem?.text || '', /429 Too Many Requests/u);
+  assert.doesNotMatch(errorItem?.text || '', /^Codex request failed$/u);
+
+  const html = api.renderTimelineItem(errorItem);
+  assert.match(html, /message-card system error-message/u);
+  assert.match(html, /429 Too Many Requests/u);
 });
 
 test('stream failures render a visible timeline error instead of only composer status', async () => {
@@ -1560,10 +1597,12 @@ test('stream failures render a visible timeline error instead of only composer s
 
   const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_stream_error');
   assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.error, '');
   assert.equal(errorItem?.kind, 'message');
   assert.equal(errorItem?.role, 'system');
   assert.equal(errorItem?.severity, 'error');
   assert.match(errorItem?.text || '', /SSE failed hard/u);
+  assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
 });
 
 test('thread work updates stay off the timeline and surface failures as visible error messages', async () => {
@@ -2157,6 +2196,95 @@ test('history hydration falls back to the full available conversation when fewer
       ['assistant', 'Follow-up assistant note'],
     ]),
   );
+});
+
+test('history hydration includes failed turns as durable error messages', async () => {
+  const { api } = await loadAppHarness();
+
+  const timeline = api.hydrateTimelineFromSession({
+    id: 'session_failed_history',
+    thread: {
+      turns: [
+        {
+          id: 'turn_403',
+          status: 'failed',
+          error: 'unexpected status 403 Forbidden: invalid credentials',
+          items: [
+            { type: 'message', role: 'user', text: 'Trigger auth failure' },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.equal(JSON.stringify(timeline.map((item) => [item.id, item.role, item.text])), JSON.stringify([
+    ['history_turn_403_0', 'user', 'Trigger auth failure'],
+    ['error_turn_403', 'system', 'unexpected status 403 Forbidden: invalid credentials'],
+  ]));
+  const errorItem = timeline.find((item) => item.id === 'error_turn_403');
+  assert.equal(errorItem?.severity, 'error');
+  assert.equal(errorItem?.label, 'Error');
+  assert.match(api.renderTimelineItem(errorItem), /message-card system error-message/u);
+});
+
+test('session refresh keeps historical failed turn messages when later turns succeed', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_mixed') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_mixed',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_403',
+                    status: 'failed',
+                    error: 'unexpected status 403 Forbidden',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Bad key attempt' },
+                    ],
+                  },
+                  {
+                    id: 'turn_recovered',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Continue after fixing key' },
+                      { type: 'message', role: 'assistant', text: 'Recovered answer' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_mixed';
+  api.state.currentSession = { id: 'session_mixed', cwd: '/repo' };
+  api.state.timeline = [
+    { id: 'history_turn_403_0', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Bad key attempt' },
+    { id: 'error_turn_403', kind: 'message', role: 'system', severity: 'error', label: 'Error', meta: 'failed', text: 'unexpected status 403 Forbidden' },
+  ];
+
+  await api.refreshCurrentSessionMetadata({ hydrateTimeline: true });
+
+  const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_403');
+  assert.equal(errorItem?.severity, 'error');
+  assert.match(errorItem?.text || '', /403 Forbidden/u);
+  assert.match(api.state.timeline.map((item) => item.text).join('\n'), /Recovered answer/u);
+  assert.equal(api.state.error, '');
+  assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
 });
 
 test('session history defaults to two recent exchanges and expands older history on demand', async () => {
@@ -3315,6 +3443,7 @@ test('PWA stream network failures keep the active turn recoverable when visibili
   assert.equal(api.state.turnId, 'turn_1');
   assert.equal(api.state.streamWasBackgrounded, true);
   assert.equal(api.state.status, 'Stream paused');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="warn"><span>Paused</span></div>');
 });
 
 test('PWA history refresh completes a paused active turn from session history', async () => {
@@ -3367,6 +3496,274 @@ test('PWA history refresh completes a paused active turn from session history', 
   assert.equal(api.state.turnId, null);
   assert.equal(api.state.streamWasBackgrounded, false);
   assert.match(api.state.timeline.map((item) => item.text).join('\n'), /Final answer from history/u);
+});
+
+test('PWA history refresh surfaces the latest failed turn as a visible error', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_failed',
+                    status: 'failed',
+                    error: 'unexpected status 403 Forbidden: invalid credentials',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Question from PWA' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.status = 'Ready';
+  api.state.statusTone = 'success';
+
+  await api.refreshCurrentView();
+
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.turnId, null);
+  assert.equal(api.state.status, 'Turn failed');
+  assert.equal(api.state.statusTone, 'danger');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="danger"><span>Failed</span></div>');
+  assert.equal(api.state.error, '');
+  const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_failed');
+  assert.equal(errorItem?.kind, 'message');
+  assert.equal(errorItem?.role, 'system');
+  assert.equal(errorItem?.severity, 'error');
+  assert.match(errorItem?.text || '', /403 Forbidden/u);
+  assert.match(api.renderTimelineItem(errorItem), /message-card system error-message/u);
+  assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
+});
+
+test('opening a session surfaces a failed terminal turn as a visible error', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_failed') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_failed',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_forbidden',
+                    status: 'failed',
+                    error: 'unexpected status 403 Forbidden',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Trigger auth failure' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessions = [{ id: 'session_failed', cwd: '/repo', settings: { metadata: {} } }];
+
+  await api.selectSession('session_failed');
+
+  assert.equal(api.state.view, 'chat');
+  assert.equal(api.state.status, 'Turn failed');
+  assert.equal(api.state.statusTone, 'danger');
+  assert.equal(api.state.error, '');
+  const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_forbidden');
+  assert.equal(errorItem?.severity, 'error');
+  assert.match(errorItem?.text || '', /403 Forbidden/u);
+  assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
+});
+
+test('failed terminal turns without details still render a fallback error', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_failed_without_details',
+                    status: 'failed',
+                    error: null,
+                    items: [
+                      { type: 'message', role: 'user', text: 'No details failure' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+
+  await api.refreshCurrentView();
+
+  assert.equal(api.state.error, '');
+  const errorItem = api.state.timeline.find((item) => item.id === 'error_turn_failed_without_details');
+  assert.equal(errorItem?.severity, 'error');
+  assert.equal(errorItem?.text, 'Turn failed');
+  assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
+});
+
+test('interrupted turn events render as stopped instead of interrupted', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.pendingTurn = true;
+  api.state.turnId = 'turn_stop';
+  api.applyTurnEvent({
+    type: 'turn.completed',
+    turnId: 'turn_stop',
+    threadId: 'session_1',
+    status: 'interrupted',
+  }, null);
+
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.status, 'Turn stopped');
+  assert.equal(api.state.statusTone, 'warn');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="warn"><span>Stopped</span></div>');
+});
+
+test('history refresh renders interrupted terminal turns as stopped', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_cancelled',
+                    status: 'cancelled',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Stop this' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+
+  await api.refreshCurrentView();
+
+  assert.equal(api.state.status, 'Turn stopped');
+  assert.equal(api.state.statusTone, 'warn');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="warn"><span>Stopped</span></div>');
+});
+
+test('PWA history refresh clears stale running state from the latest terminal turn', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_newer_completed',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Question from another client' },
+                      { type: 'message', role: 'assistant', text: 'Completed elsewhere' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.pendingTurn = true;
+  api.state.turnId = 'turn_stale';
+  api.state.streamWasBackgrounded = true;
+  api.state.status = 'Turn running';
+  api.state.statusTone = 'warn';
+
+  await api.refreshCurrentSessionMetadata({ hydrateTimeline: true });
+
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.turnId, null);
+  assert.equal(api.state.streamWasBackgrounded, false);
+  assert.equal(api.state.status, 'Ready');
+  assert.equal(api.state.statusTone, 'success');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="success"><span>Done</span></div>');
 });
 
 test('session refresh restores running status when history reports an active turn', async () => {
@@ -3427,7 +3824,7 @@ test('session refresh restores running status when history reports an active tur
   assert.equal(api.state.pendingTurn, true);
   assert.equal(api.state.turnId, 'turn_active');
   assert.equal(api.state.status, 'Turn running');
-  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="warn"><span>Running</span></div>');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="work"><span>Running</span></div>');
   assert.ok(fetchCalls.includes('/api/turns/turn_active/events'));
 });
 
@@ -3486,7 +3883,7 @@ test('opening a session restores running status when the session has an active t
   assert.equal(api.state.pendingTurn, true);
   assert.equal(api.state.turnId, 'turn_active');
   assert.equal(api.state.status, 'Turn running');
-  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="warn"><span>Running</span></div>');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="work"><span>Running</span></div>');
   assert.ok(fetchCalls.includes('/api/turns/turn_active/events'));
 });
 

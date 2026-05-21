@@ -145,6 +145,14 @@ export async function startServeCommand(
   const createRuntimeFn = dependencies.createRuntime ?? (({ config: runtimeConfig }) => new CodexWebRuntime({
     codexBin: runtimeConfig.codexBin,
     defaultCwd: runtimeConfig.defaultCwd,
+    logger: runtimeConfig.debug
+      ? {
+        debug: writeDebugStderrLine,
+        info: writeDebugStderrLine,
+        warn: writeDebugStderrLine,
+        error: writeDebugStderrLine,
+      }
+      : undefined,
     settingsStore: new FileSessionSettingsStore({
       settingsPath: path.join(runtimeConfig.stateDir, 'session-settings.json'),
     }),
@@ -228,6 +236,19 @@ function takeOneTimePassword(env: NodeJS.ProcessEnv): string | null {
     : null;
   delete env.CODEX_WEB_PASSWORD;
   return password;
+}
+
+function writeDebugStderrLine(message: string): void {
+  const normalized = String(message ?? '').trim();
+  if (!normalized) {
+    return;
+  }
+  for (const line of normalized.split(/\r?\n/gu)) {
+    const trimmed = line.trim();
+    if (trimmed) {
+      defaultStderr.write(`${trimmed}\n`);
+    }
+  }
 }
 
 function parsePort(value: string): number {

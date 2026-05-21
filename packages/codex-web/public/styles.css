@@ -780,6 +780,10 @@ button:disabled {
   color: var(--text);
 }
 
+.message-card.error-message .message-text {
+  color: var(--danger);
+}
+
 .message-card {
   max-width: min(86vw, 620px);
 }
@@ -1074,6 +1078,10 @@ button:disabled {
 
 .composer-status span {
   flex: 0 0 auto;
+}
+
+.composer-status[data-tone="work"] {
+  color: var(--success);
 }
 
 .composer-status[data-tone="warn"] {

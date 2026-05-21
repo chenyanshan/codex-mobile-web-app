@@ -19,6 +19,20 @@ test('launchd restart keeps the job loaded so KeepAlive can recover it', async (
   assert.match(script, /launchctl kickstart -k "\$\{LAUNCHD_TARGET\}"/u);
 });
 
+test('launchd detached restart schedules a one-shot helper before killing the service', async () => {
+  const script = await readScript('scripts/service/restart-codex-web-launchd-user-detached.sh');
+
+  assert.match(script, /HELPER_LABEL="com\.ganxing\.codex-web\.restart"/u);
+  assert.match(script, /StartInterval/u);
+  assert.match(script, /launchctl bootstrap "\$\{LAUNCHD_DOMAIN\}" "\$\{HELPER_PLIST_PATH\}"/u);
+  assert.match(script, /launchctl kickstart -k "\$\{LAUNCHD_DOMAIN\}\/\$\{HELPER_LABEL\}"/u);
+  assert.match(script, /launchctl kickstart -k %s/u);
+  assert.match(script, /shell_escape "\$\{LAUNCHD_TARGET\}"/u);
+  assert.match(script, /echo "scheduled detached restart:/u);
+  assert.doesNotMatch(script, /RESTART_SCRIPT/u);
+  assert.doesNotMatch(script, /scripts\/service\/restart-codex-web-launchd-user\.sh/u);
+});
+
 test('launchd install does not unload a running Codex Web service', async () => {
   const script = await readScript('scripts/service/install-codex-web-launchd-user.sh');
 

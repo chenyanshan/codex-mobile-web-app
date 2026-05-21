@@ -148,6 +148,20 @@ tools, plugins, or image generation as substitutes.
 This means the request-side builtin tool surface is narrow, but the response
 side transcript is richer than plain text-only output.
 
+## Runtime error reporting
+
+`CodexAppClient` watches the app-server turn stream, session transcript, and
+Codex CLI stderr for terminal runtime failures that can otherwise leave a turn
+without a useful final assistant message. Important provider failures such as
+unexpected `401`, `403`, or `429` responses are returned to callers as turn
+errors so UI layers can render them explicitly.
+
+Transient reconnect notices are filtered out. Service lifecycle interruptions
+are separate from provider errors: if the host service is restarted while a
+turn is active, Codex may later report that turn as `interrupted` with no error
+payload. Callers should present that as a stopped/interrupted turn, not as a
+provider error.
+
 ## Public bind
 
 Default mode is loopback only. Public exposure must be explicit:

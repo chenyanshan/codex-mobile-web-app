@@ -212,6 +212,27 @@ Change host, port, default working directory, or Codex binary by editing
 CODEX_WEB_HOST=127.0.0.1
 ```
 
+## Runtime Status And Errors
+
+The status above the message composer is a runtime status, not a request
+spinner. It is reconciled from live turn events and refreshed session history,
+so it remains accurate when you stay on a session, return from the background,
+or open an existing session from the list. Active turns show as green `Running`;
+successful terminal turns show as `Done`; interrupted, cancelled, or aborted
+turns show as `Stopped`.
+
+Provider/runtime failures that block a turn, such as `401`, `403`, `429`, or
+unexpected provider status responses, are surfaced as red system messages in
+the conversation timeline. Those messages are persisted with the session view
+and are restored after refresh or reopening the session. The UI intentionally
+shows only the important runtime message and avoids exposing local file paths or
+stack traces.
+
+If the Codex Web service itself is restarted while a turn is in progress, Codex
+may mark that turn as `interrupted` with no error payload. In that case the UI
+shows `Stopped`, not a red error, because the turn ended due to service
+lifecycle interruption rather than a provider/runtime error.
+
 ## macOS Install
 
 Install the user LaunchAgent:
@@ -229,8 +250,14 @@ Service helpers:
 ```bash
 scripts/service/status-codex-web-launchd-user.sh
 scripts/service/restart-codex-web-launchd-user.sh
+scripts/service/restart-codex-web-launchd-user-detached.sh
 scripts/service/logs-codex-web-launchd-user.sh
 ```
+
+Use the detached restart helper when Codex Web needs to restart itself from a
+running Codex-controlled session. It schedules the launchd restart outside the
+current runtime process, so the restart can continue after the current backend
+connection is interrupted.
 
 The LaunchAgent uses `/bin/zsh -lc` to source
 `~/.config/codex-web/service.env` and run:

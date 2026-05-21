@@ -16,7 +16,7 @@ export type CodexWebEvent =
   | { id: string; type: 'approval.requested'; turnId: string; approvalId: string; approvalKind: string; summary: Record<string, unknown>; raw?: unknown }
   | { id: string; type: 'approval.resolved'; turnId: string; approvalId: string; decision: 'accepted' | 'accepted_for_session' | 'denied'; raw?: unknown }
   | { id: string; type: 'turn.completed'; turnId: string; threadId: string; status: string; raw?: unknown }
-  | { id: string; type: 'turn.failed'; turnId: string; threadId: string | null; message: string; raw?: unknown };
+  | { id: string; type: 'turn.failed'; turnId: string; threadId: string | null; message: string; details?: string | null; raw?: unknown };
 
 export function normalizeTurnStartedEvent({
   turnId,
@@ -269,6 +269,18 @@ export function normalizeTurnCompletedEvent({
   result: Partial<ProviderTurnResult>;
 }): CodexWebEvent[] {
   const events: CodexWebEvent[] = [];
+  const errorDetails = extractErrorDetails(result);
+  if (errorDetails) {
+    events.push({
+      id: createEventId(),
+      type: 'turn.failed',
+      turnId,
+      threadId,
+      message: errorDetails,
+      details: errorDetails,
+    });
+    return events;
+  }
   const text = String(result.outputText || result.previewText || '').trim();
   if (text) {
     events.push({
@@ -300,13 +312,15 @@ export function normalizeTurnFailedEvent({
   threadId?: string | null;
   error: unknown;
 }): CodexWebEvent {
+  const message = error instanceof Error ? error.message : String(error);
+  const details = extractErrorDetails(error);
   return {
     id: createEventId(),
     type: 'turn.failed',
     turnId,
     threadId,
-    message: error instanceof Error ? error.message : String(error),
-    raw: error,
+    message,
+    details: details && details !== message ? details : null,
   };
 }
 
@@ -326,4 +340,24 @@ function approvalSummary(request: ProviderApprovalRequest): Record<string, unkno
     fileWritePermissions: request.fileWritePermissions ?? [],
     availableDecisionKeys: request.availableDecisionKeys ?? [],
   };
+}
+
+function extractErrorDetails(value: unknown): string | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return normalizeDetailText(record.details)
+    ?? normalizeDetailText(record.rawMessage)
+    ?? normalizeDetailText(record.errorMessage)
+    ?? normalizeDetailText(record.stderr)
+    ?? null;
+}
+
+function normalizeDetailText(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed || null;
 }

@@ -1202,6 +1202,81 @@ test('runtime emits normalized turn and approval events and maps approval decisi
   assert.deepEqual(resolvedTypes, ['approval.resolved', 'batch.completed']);
 });
 
+test('runtime preserves raw turn failure details for UI display', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread()], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_1', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread(),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_429', threadId: 'thread_1' });
+      const error = new Error('Codex request failed');
+      (error as Error & { details?: string }).details = '429 Too Many Requests: model rate limit reached';
+      throw error;
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const started = await runtime.startTurn('thread_1', { text: 'hi' });
+  assert.equal(started.turnId, 'turn_429');
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const failed = runtime.getTurnEvents('turn_429').map((entry) => entry.event).find((event) => event.type === 'turn.failed');
+  assert.equal(failed?.type, 'turn.failed');
+  assert.equal((failed as any).message, 'Codex request failed');
+  assert.equal((failed as any).details, '429 Too Many Requests: model rate limit reached');
+});
+
+test('runtime logs terminal turn diagnostics for failed native turns', async () => {
+  const logs: string[] = [];
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread()], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_1', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread(),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_403', threadId: 'thread_1' });
+      throw new Error('unexpected status 403 Forbidden: invalid key');
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    logger: {
+      debug: (message) => {
+        logs.push(message);
+      },
+    },
+  });
+
+  const started = await runtime.startTurn('thread_1', { text: 'hi' });
+  assert.equal(started.turnId, 'turn_403');
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.match(logs.join('\n'), /\[codex-web-runtime\] turn_error/u);
+  assert.match(logs.join('\n'), /unexpected status 403 Forbidden/u);
+  assert.match(logs.join('\n'), /\[codex-web-runtime\] event_append/u);
+  assert.match(logs.join('\n'), /turn\.failed/u);
+});
+
 test('runtime uses completed turn id when start callback is missing', async () => {
   const client: CodexWebRuntimeClient = {
     listModels: async () => [],

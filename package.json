@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "codex-web": "node --import tsx packages/codex-web/src/cli.ts",
+    "codex-web": "node --conditions=development --import tsx packages/codex-web/src/cli.ts",
     "serve": "npm run serve --workspace packages/codex-web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"

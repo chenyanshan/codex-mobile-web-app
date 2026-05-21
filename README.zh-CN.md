@@ -210,6 +210,23 @@ CODEX_WEB_DEBUG=0
 CODEX_WEB_HOST=127.0.0.1
 ```
 
+## Runtime 状态和报错
+
+message 输入框上方的状态表示 runtime 状态，不只是请求 spinner。它会同时根据
+实时 turn 事件和刷新后的 session history 校准，所以无论一直停留在 session
+页、从外部切回，还是从 session 列表重新进入，都应该保持准确。活跃 turn 显示
+为绿色 `Running`；成功结束显示 `Done`；`interrupted`、`cancelled`、`aborted`
+这类非成功终止显示 `Stopped`。
+
+会阻断 turn 的 provider/runtime 报错，例如 `401`、`403`、`429` 或 provider
+返回 unexpected status，会作为红色 system 消息展示在对话时间线里。这些消息
+属于对话内容的一部分，刷新或重新进入 session 后仍会恢复。前端只展示关键
+runtime 报错信息，避免把本机文件路径或 stack trace 暴露到界面上。
+
+如果 Codex Web 服务在某个 turn 运行中被重启，Codex 可能会把该 turn 标为
+`interrupted`，并且没有 error payload。这时前端会显示 `Stopped`，不会显示红色
+报错，因为这是服务生命周期打断，不是 provider/runtime 返回的错误。
+
 ## macOS 安装
 
 安装用户级 LaunchAgent：
@@ -227,8 +244,13 @@ scripts/service/install-codex-web-launchd-user.sh
 ```bash
 scripts/service/status-codex-web-launchd-user.sh
 scripts/service/restart-codex-web-launchd-user.sh
+scripts/service/restart-codex-web-launchd-user-detached.sh
 scripts/service/logs-codex-web-launchd-user.sh
 ```
+
+当需要从 Codex 控制中的运行时里重启 Codex Web 自身时，使用 detached 重启脚本。
+它会把 launchd 重启动作放到当前 runtime 进程之外执行，这样当前后端连接被打断
+后，重启动作仍能继续完成。
 
 LaunchAgent 使用 `/bin/zsh -lc` 加载 `~/.config/codex-web/service.env`，然后运行：
 

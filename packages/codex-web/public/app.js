@@ -1,4 +1,4 @@
-const APP_BUILD_ID = '2026-05-20-first-turn-recovery-v30';
+const APP_BUILD_ID = '2026-05-21-runtime-status-v37';
 const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
 const THEME_KEY = 'codexWebTheme';
@@ -29,6 +29,31 @@ const EDGE_SWIPE_START_PX = 24;
 const EDGE_SWIPE_TRIGGER_PX = 72;
 const EDGE_SWIPE_MAX_VERTICAL_PX = 48;
 const TIMELINE_FOLLOW_LATEST_TOLERANCE_PX = 24;
+const NON_RUNTIME_STATUS_LABELS = new Set([
+  'Checking auth',
+  'Loading',
+  'Restoring session',
+  'Syncing sessions',
+  'Logging in',
+  'Login required',
+  'Refreshing',
+  'Starting session',
+  'Loading session',
+  'Starting turn',
+  'Waiting for first response',
+  'Request failed',
+  'Stream failed',
+  'Reloading runtime',
+  'Runtime reloaded',
+  'Approval sent',
+  'Approval resolved',
+  'Interrupt requested',
+  'Session archived',
+  'Session favorited',
+  'Favorite removed',
+  'Favorite order saved',
+  'Favorite order saved; unavailable sessions removed',
+]);
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
@@ -107,6 +132,7 @@ let pullToRefreshCleanup = null;
 let edgeSwipeStart = null;
 let allSessionsPreloadPromise = null;
 let promptFocusRestoreTimer = null;
+let promptFocusLayoutTimer = null;
 let sessionListRestoreScrollTop = null;
 let timelineScrollTrackingAttached = false;
 let chatTimelineReturnSnapshot = null;
@@ -791,7 +817,7 @@ function renderTimeline() {
 }
 
 function renderComposerStatus() {
-  return `<div class="composer-status" data-tone="${escapeAttribute(state.statusTone)}"><span>${escapeHtml(composerStatusLabel())}</span></div>`;
+  return `<div class="composer-status" data-tone="${escapeAttribute(composerStatusTone())}"><span>${escapeHtml(composerStatusLabel())}</span></div>`;
 }
 
 function composerStatusLabel() {
@@ -804,7 +830,17 @@ function composerStatusLabel() {
   if (state.status === 'Ready') {
     return 'Done';
   }
+  if (state.status === 'Turn stopped') {
+    return 'Stopped';
+  }
   return state.status || 'Idle';
+}
+
+function composerStatusTone() {
+  if (state.pendingTurn && state.status !== 'Stream paused') {
+    return 'work';
+  }
+  return state.statusTone;
 }
 
 function renderTimelineItem(item) {
@@ -1332,13 +1368,11 @@ function bindGlobalEvents() {
 
   const promptInput = document.querySelector('#prompt-input');
   if (promptInput) {
-    promptInput.addEventListener('touchstart', protectPromptFocusScroll, { passive: true });
-    promptInput.addEventListener('focus', protectPromptFocusScroll);
+    promptInput.addEventListener('touchstart', syncPromptFocusLayout, { passive: true });
+    promptInput.addEventListener('focus', syncPromptFocusLayout);
     promptInput.addEventListener('input', (event) => {
       state.prompt = event.target.value;
-      updateComposerExpansionState(event.target);
-      autoGrowPromptInput(event.target);
-      syncComposerOffset();
+      syncPromptInputLayout(event.target);
     });
     updateComposerExpansionState(promptInput);
     autoGrowPromptInput(promptInput);
@@ -1799,6 +1833,31 @@ function protectPromptFocusScroll() {
   }, 160);
 }
 
+function syncPromptFocusLayout(eventOrTextarea) {
+  const textarea = eventOrTextarea?.target ?? eventOrTextarea;
+  protectPromptFocusScroll();
+  syncPromptInputLayout(textarea);
+  requestAnimationFrame(() => {
+    syncPromptInputLayout(textarea);
+  });
+  if (promptFocusLayoutTimer) {
+    clearTimeout(promptFocusLayoutTimer);
+  }
+  promptFocusLayoutTimer = setTimeout(() => {
+    syncPromptInputLayout(textarea);
+    promptFocusLayoutTimer = null;
+  }, 180);
+}
+
+function syncPromptInputLayout(textarea) {
+  if (!textarea) {
+    return;
+  }
+  updateComposerExpansionState(textarea);
+  autoGrowPromptInput(textarea);
+  syncComposerOffset();
+}
+
 function autoGrowPromptInput(textarea) {
   if (!textarea?.style) {
     return;
@@ -2040,12 +2099,12 @@ async function selectSession(sessionId) {
   state.cwd = nextSession.cwd || '';
   applySessionSettings(nextSession);
   restoreTimelineForSession(nextSession);
-  const restoredActiveTurn = restoreActiveTurnFromSession(nextSession);
+  const restoredRuntimeStatus = syncRuntimeStatusFromSession(nextSession, { source: 'stale' });
   state.view = 'chat';
   state.composerExpanded = false;
   state.settingsOpen = false;
   state.error = '';
-  state.status = restoredActiveTurn ? 'Turn running' : 'Loading session';
+  state.status = restoredRuntimeStatus.changed && restoredRuntimeStatus.activeTurnId ? 'Turn running' : 'Loading session';
   state.statusTone = 'warn';
   state.timelineShouldFollowLatest = true;
   render();
@@ -2068,16 +2127,16 @@ async function selectSession(sessionId) {
   state.cwd = refreshedSession.cwd || '';
   applySessionSettings(refreshedSession);
   restoreTimelineForSession(refreshedSession);
-  const refreshedActiveTurn = restoreActiveTurnFromSession(refreshedSession);
+  const refreshedRuntimeStatus = syncRuntimeStatusFromSession(refreshedSession);
   state.error = '';
-  if (!refreshedActiveTurn) {
+  if (!refreshedRuntimeStatus.changed) {
     state.status = 'Ready';
     state.statusTone = 'success';
   }
   state.timelineShouldFollowLatest = true;
   render();
   scrollTimelineToBottom();
-  if (refreshedActiveTurn && state.turnId) {
+  if (refreshedRuntimeStatus.activeTurnId && state.turnId) {
     streamTurnEvents(state.turnId, { forceReconnect: true });
   }
 }
@@ -2148,8 +2207,8 @@ async function onComposerSubmit(event) {
       return;
     }
     state.pendingTurn = false;
-    appendTimelineError(state.turnId || `request_${Date.now()}`, error?.payload?.message || error?.message || 'Request failed');
-    handleApiError(error);
+    surfaceTimelineError(state.turnId || `request_${Date.now()}`, error?.payload?.message || error?.message || 'Request failed');
+    handleApiError(error, { suppressComposerError: true });
   }
 }
 
@@ -2391,8 +2450,8 @@ async function streamTurnEvents(turnId, options = {}) {
     state.pendingTurn = false;
     state.status = 'Stream failed';
     state.statusTone = 'danger';
-    appendTimelineError(turnId, error?.payload?.message || error?.message || 'Stream failed');
-    handleApiError(error);
+    surfaceTimelineError(turnId, error?.payload?.message || error?.message || 'Stream failed');
+    handleApiError(error, { suppressComposerError: true });
   } finally {
     if (state.streamAbortController === controller) {
       state.streamAbortController = null;
@@ -2434,8 +2493,7 @@ async function streamTurnEvents(turnId, options = {}) {
       assistantEntry = applyTurnEvent(payload, assistantEntry);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      state.error = message;
-      appendTimelineError(turnId, message);
+      surfaceTimelineError(turnId, message);
     }
     resetFrame();
   }
@@ -2586,8 +2644,11 @@ function applyTurnEvent(event, assistantEntry) {
     case 'turn.completed':
       state.pendingTurn = false;
       state.streamWasBackgrounded = false;
-      state.status = event.status === 'completed' ? 'Ready' : `Turn ${event.status}`;
-      state.statusTone = event.status === 'completed' ? 'success' : 'warn';
+      {
+        const runtimeStatus = runtimeStatusForTurnStatus(event.status);
+        state.status = runtimeStatus.status;
+        state.statusTone = runtimeStatus.tone;
+      }
       state.turnId = null;
       stopStream();
       void refreshCurrentSessionMetadata();
@@ -2599,8 +2660,7 @@ function applyTurnEvent(event, assistantEntry) {
       state.statusTone = 'danger';
       state.turnId = null;
       stopStream();
-      state.error = event.message || 'Turn failed';
-      appendTimelineError(event.turnId, state.error);
+      surfaceTimelineError(event.turnId, event.details || event.message || 'Turn failed');
       break;
   }
   saveCurrentTimeline();
@@ -2738,8 +2798,7 @@ async function recoverFirstTurnAfterDelay({ sessionId, promptText, message }) {
   state.pendingTurn = false;
   state.status = 'Request failed';
   state.statusTone = 'danger';
-  appendTimelineError(`request_${sessionId}`, message);
-  state.error = message;
+  surfaceTimelineError(`request_${sessionId}`, message);
   renderChatAtLatestIfFollowing(() => {});
 }
 
@@ -2783,8 +2842,7 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false, viewport
         state.cwd = session?.cwd || state.cwd;
         if (hydrateTimeline && session) {
           hydrateCurrentTimelineFromSession(session);
-          restoreActiveTurnFromSession(session);
-          reconcileActiveTurnFromSession(session);
+          syncRuntimeStatusFromSession(session);
         }
       }
       if (state.sessionId === sessionId) {
@@ -3070,7 +3128,7 @@ async function refreshCurrentView() {
       });
       render();
     }
-    if (!state.pendingTurn) {
+    if (!state.pendingTurn && !isRuntimeStatusLabel(state.status)) {
       state.status = 'Ready';
       state.statusTone = 'success';
       render();
@@ -3113,42 +3171,173 @@ function timelineMessageSignature(items) {
     .join('\n');
 }
 
-function reconcileActiveTurnFromSession(session) {
-  if (!state.pendingTurn || !state.turnId) {
-    return;
-  }
-  const turns = Array.isArray(session?.thread?.turns) ? session.thread.turns : [];
-  const turn = turns.find((item) => item?.id === state.turnId);
-  if (!turn || !isTerminalTurnStatus(turn.status)) {
-    return;
-  }
-  state.pendingTurn = false;
-  state.streamWasBackgrounded = false;
-  state.status = turn.status === 'completed' ? 'Ready' : `Turn ${turn.status}`;
-  state.statusTone = turn.status === 'completed' ? 'success' : 'warn';
-  state.turnId = null;
-  stopStream();
-}
-
-function restoreActiveTurnFromSession(session) {
-  if (state.pendingTurn && state.turnId) {
-    return false;
-  }
+function syncRuntimeStatusFromSession(session, { source = 'detail' } = {}) {
+  const turns = sessionTurns(session);
   const activeTurn = findActiveTurn(session);
   if (!activeTurn?.id) {
-    return false;
+    const latestTurn = latestRuntimeTurn(turns);
+    if (!latestTurn) {
+      if (source === 'detail') {
+        clearRuntimeTurnState();
+        return setRuntimeStatus('Ready', 'success', { activeTurnId: null, terminalTurnId: null });
+      }
+      return { changed: false, activeTurnId: null, terminalTurnId: null };
+    }
+    const normalizedStatus = normalizeTurnStatus(latestTurn.status);
+    if (isSuccessTurnStatus(normalizedStatus)) {
+      clearRuntimeTurnState();
+      return setRuntimeStatus('Ready', 'success', { activeTurnId: null, terminalTurnId: latestTurn.id || null });
+    }
+    if (isFailureTurnStatus(normalizedStatus)) {
+      clearRuntimeTurnState();
+      const message = surfaceRuntimeTurnErrorFromSession(session, latestTurn);
+      return setRuntimeStatus('Turn failed', 'danger', { activeTurnId: null, terminalTurnId: latestTurn.id || null, errorMessage: message });
+    }
+    if (isInterruptedTurnStatus(normalizedStatus)) {
+      clearRuntimeTurnState();
+      return setRuntimeStatus('Turn stopped', 'warn', { activeTurnId: null, terminalTurnId: latestTurn.id || null });
+    }
+    clearRuntimeTurnState();
+    return setRuntimeStatus(`Turn ${latestTurn.status || 'completed'}`, 'warn', { activeTurnId: null, terminalTurnId: latestTurn.id || null });
   }
   state.pendingTurn = true;
   state.turnId = activeTurn.id;
   state.streamWasBackgrounded = true;
   state.lastTurnEventAt = 0;
-  state.status = 'Turn running';
-  state.statusTone = 'warn';
-  return true;
+  return setRuntimeStatus('Turn running', 'warn', { activeTurnId: activeTurn.id, terminalTurnId: null });
+}
+
+function clearRuntimeTurnState() {
+  if (state.pendingTurn || state.turnId) {
+    stopStream();
+  }
+  state.pendingTurn = false;
+  state.turnId = null;
+  state.streamWasBackgrounded = false;
+  state.lastTurnEventAt = 0;
+}
+
+function setRuntimeStatus(status, tone, result) {
+  const previousStatus = state.status;
+  const previousTone = state.statusTone;
+  const canReplace = isRuntimeStatusLabel(previousStatus) || NON_RUNTIME_STATUS_LABELS.has(previousStatus);
+  if (canReplace) {
+    state.status = status;
+    state.statusTone = tone;
+  }
+  return {
+    changed: previousStatus !== state.status || previousTone !== state.statusTone || Boolean(result.activeTurnId || result.terminalTurnId),
+    ...result,
+  };
+}
+
+function isRuntimeStatusLabel(status) {
+  const value = String(status || '');
+  return value === 'Ready'
+    || value === 'Turn running'
+    || value === 'Stream paused'
+    || value === 'Turn failed'
+    || value === 'Turn interrupted'
+    || value === 'Turn stopped'
+    || /^Turn /u.test(value);
+}
+
+function runtimeStatusForTurnStatus(status) {
+  if (isSuccessTurnStatus(status)) {
+    return { status: 'Ready', tone: 'success' };
+  }
+  if (isFailureTurnStatus(status)) {
+    return { status: 'Turn failed', tone: 'danger' };
+  }
+  if (isInterruptedTurnStatus(status)) {
+    return { status: 'Turn stopped', tone: 'warn' };
+  }
+  return { status: `Turn ${status || 'completed'}`, tone: 'warn' };
+}
+
+function surfaceRuntimeTurnErrorFromSession(session, turn) {
+  const message = runtimeTurnErrorMessage(turn);
+  if (state.view === 'chat' && state.sessionId === session?.id) {
+    surfaceTimelineError(turn?.id || `session_${session?.id || 'unknown'}_failed`, message);
+    saveCurrentTimeline();
+  }
+  return message;
+}
+
+function runtimeTurnErrorMessage(turn) {
+  return normalizeRuntimeErrorText(turn?.details)
+    || normalizeRuntimeErrorText(turn?.error)
+    || normalizeRuntimeErrorText(turn?.message)
+    || runtimeTurnItemErrorMessage(turn)
+    || 'Turn failed';
+}
+
+function runtimeTurnItemErrorMessage(turn) {
+  const items = Array.isArray(turn?.items) ? turn.items : [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    const marker = [
+      item?.type,
+      item?.phase,
+      item?.status,
+      item?.severity,
+      item?.raw?.type,
+      item?.raw?.status,
+    ].map((value) => String(value || '').toLowerCase()).join(' ');
+    const hasErrorMarker = /error|fail|denied|unauthorized|forbidden|rate[_\s-]*limit/u.test(marker);
+    const candidate = normalizeRuntimeErrorText(item?.details)
+      || normalizeRuntimeErrorText(item?.error)
+      || normalizeRuntimeErrorText(item?.message)
+      || normalizeRuntimeErrorText(item?.result)
+      || normalizeRuntimeErrorText(item?.raw?.details)
+      || normalizeRuntimeErrorText(item?.raw?.message)
+      || normalizeRuntimeErrorText(item?.raw?.error);
+    if (candidate && (hasErrorMarker || /unexpected status|unauthorized|forbidden|too many requests|rate limit|error|failed|failure|401|403|429/u.test(candidate.toLowerCase()))) {
+      return candidate;
+    }
+    const text = normalizeRuntimeErrorText(item?.text);
+    if (text && hasErrorMarker) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function normalizeRuntimeErrorText(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value;
+  return normalizeRuntimeErrorText(record.details)
+    || normalizeRuntimeErrorText(record.rawMessage)
+    || normalizeRuntimeErrorText(record.errorMessage)
+    || normalizeRuntimeErrorText(record.message)
+    || normalizeRuntimeErrorText(record.error)
+    || normalizeRuntimeErrorText(record.stderr)
+    || normalizeRuntimeErrorText(record.stack)
+    || null;
+}
+
+function sessionTurns(session) {
+  return Array.isArray(session?.thread?.turns) ? session.thread.turns : [];
+}
+
+function latestRuntimeTurn(turns) {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (turn?.id || turn?.status) {
+      return turn;
+    }
+  }
+  return null;
 }
 
 function findActiveTurn(session) {
-  const turns = Array.isArray(session?.thread?.turns) ? session.thread.turns : [];
+  const turns = sessionTurns(session);
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index];
     if (turn?.id && isActiveTurnStatus(turn.status)) {
@@ -3167,7 +3356,19 @@ function isActiveTurnStatus(status) {
 }
 
 function isTerminalTurnStatus(status) {
-  return ['completed', 'complete', 'failed', 'error', 'cancelled', 'canceled', 'interrupted', 'aborted'].includes(normalizeTurnStatus(status));
+  return isSuccessTurnStatus(status) || isFailureTurnStatus(status) || isInterruptedTurnStatus(status);
+}
+
+function isSuccessTurnStatus(status) {
+  return ['completed', 'complete', 'succeeded', 'success', 'finished'].includes(normalizeTurnStatus(status));
+}
+
+function isFailureTurnStatus(status) {
+  return ['failed', 'error', 'timedout', 'timeout'].includes(normalizeTurnStatus(status));
+}
+
+function isInterruptedTurnStatus(status) {
+  return ['cancelled', 'canceled', 'interrupted', 'aborted'].includes(normalizeTurnStatus(status));
 }
 
 function normalizeTurnStatus(status) {
@@ -3506,6 +3707,18 @@ function fullHydratedTimelineFromSession(session) {
         role,
         label: role === 'user' ? 'You' : 'Assistant',
         meta: 'history',
+        text,
+      });
+    }
+    if (isFailureTurnStatus(turn?.status)) {
+      const text = runtimeTurnErrorMessage(turn);
+      items.push({
+        id: `error_${turn?.id || `history_failed_${items.length}`}`,
+        kind: 'message',
+        role: 'system',
+        severity: 'error',
+        label: 'Error',
+        meta: 'failed',
         text,
       });
     }
@@ -4230,6 +4443,11 @@ function appendMessage(entry) {
   state.timeline.push(entry);
 }
 
+function surfaceTimelineError(turnId, message) {
+  appendTimelineError(turnId, message);
+  state.error = '';
+}
+
 function appendTimelineError(turnId, message) {
   const text = String(message || 'Turn failed');
   const id = `error_${turnId || Date.now()}`;
@@ -4459,10 +4677,9 @@ async function recoverActiveTurnAfterForeground() {
   const viewportSnapshot = rememberedTimelineViewport()
     || chatTimelineForegroundSnapshot
     || captureTimelineViewport();
-  const shouldReconnect = state.pendingTurn && state.turnId && !isTurnStreamHealthy();
   await refreshCurrentSessionMetadata({ hydrateTimeline: true, viewportSnapshot });
   chatTimelineForegroundSnapshot = null;
-  if (shouldReconnect && state.pendingTurn && state.turnId) {
+  if (state.pendingTurn && state.turnId && !isTurnStreamHealthy()) {
     streamTurnEvents(state.turnId, { forceReconnect: true });
   }
 }
@@ -4534,7 +4751,7 @@ function handleApiError(error, options = {}) {
     setLoggedOut(options.login ? message : 'Session expired');
     return;
   }
-  state.error = message;
+  state.error = options.suppressComposerError ? '' : message;
   if (options.login) {
     state.loginError = message;
     state.status = 'Login required';

@@ -291,3 +291,282 @@ test('app client extracts work details from session jsonl response items when tu
   ]);
   assert.match(String(workEvents[3]?.summary?.output), /Success/u);
 });
+
+test('app client fails open turns from session jsonl runtime errors without task complete', async () => {
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-native-api-runtime-error-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  const turnId = 'turn_invalid_key';
+  const message = 'unexpected status 401 Unauthorized: {"code":"INVALID_API_KEY","message":"Invalid API key"}, url: https://allinai7.cloud/v1/responses, request id: a12befc6-4026-4e7b-94dc-7e184daca4e4';
+  fs.writeFileSync(sessionPath, [
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'task_started',
+        turn_id: turnId,
+      },
+    },
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'error',
+        message,
+        codex_error_info: 'other',
+      },
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n'));
+
+  let now = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+
+  client.readThread = async () => ({
+    threadId: 'thread_1',
+    path: sessionPath,
+    turns: [{
+      id: turnId,
+      status: 'running',
+      items: [],
+    }],
+  } as any);
+
+  await assert.rejects(
+    client.waitForTurnResult({
+      threadId: 'thread_1',
+      turnId,
+      timeoutMs: 1000,
+    }),
+    /INVALID_API_KEY/u,
+  );
+});
+
+test('app client fails open turns from generic session failed events', async () => {
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-native-api-generic-runtime-error-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  const turnId = 'turn_generic_failure';
+  fs.writeFileSync(sessionPath, [
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'task_started',
+        turn_id: turnId,
+      },
+    },
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'model_request_failed',
+        error: 'upstream provider returned a non-retryable failure',
+      },
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n'));
+
+  let now = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+
+  client.readThread = async () => ({
+    threadId: 'thread_1',
+    path: sessionPath,
+    turns: [{
+      id: turnId,
+      status: 'running',
+      items: [],
+    }],
+  } as any);
+
+  await assert.rejects(
+    client.waitForTurnResult({
+      threadId: 'thread_1',
+      turnId,
+      timeoutMs: 1000,
+    }),
+    /upstream provider returned a non-retryable failure/u,
+  );
+});
+
+test('app client fails turns from matching Codex error notifications before completed snapshots', async () => {
+  const message = 'unexpected status 403 Forbidden: {"code":"FORBIDDEN","message":"Forbidden"}';
+  let now = 0;
+  let emitted = false;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+
+  client.readThread = async () => {
+    if (!emitted) {
+      emitted = true;
+      client.emit('notification', {
+        method: 'error',
+        params: {
+          threadId: 'thread_1',
+          turnId: 'turn_notification_error',
+          error: {
+            message,
+          },
+        },
+      });
+    }
+    return {
+      threadId: 'thread_1',
+      path: null,
+      turns: [{
+        id: 'turn_notification_error',
+        status: 'completed',
+        items: [{
+          type: 'message',
+          role: 'assistant',
+          text: '',
+        }],
+      }],
+    } as any;
+  };
+
+  await assert.rejects(
+    client.waitForTurnResult({
+      threadId: 'thread_1',
+      turnId: 'turn_notification_error',
+      timeoutMs: 1000,
+    }),
+    /403 Forbidden/u,
+  );
+});
+
+test('app client ignores transient reconnecting error notifications while turn is still running', async () => {
+  let now = 0;
+  let readCount = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+
+  client.readThread = async () => {
+    readCount += 1;
+    if (readCount === 1) {
+      client.emit('notification', {
+        method: 'error',
+        params: {
+          threadId: 'thread_1',
+          turnId: 'turn_reconnect',
+          message: 'Reconnecting... 1/5',
+        },
+      });
+    }
+    return {
+      threadId: 'thread_1',
+      path: null,
+      turns: [{
+        id: 'turn_reconnect',
+        status: readCount < 2 ? 'inProgress' : 'completed',
+        items: readCount < 2
+          ? []
+          : [{
+            type: 'message',
+            role: 'assistant',
+            phase: 'final_answer',
+            text: 'Recovered after reconnect.',
+          }],
+      }],
+    } as any;
+  };
+
+  const result = await client.waitForTurnResult({
+    threadId: 'thread_1',
+    turnId: 'turn_reconnect',
+    timeoutMs: 3000,
+  });
+
+  assert.equal(result.outputText, 'Recovered after reconnect.');
+});
+
+test('app client fails open turns from Codex stderr runtime errors', async () => {
+  const message = 'unexpected status 403 Forbidden: {"code":"FORBIDDEN","message":"Forbidden"}, url: https://allinai7.cloud/v1/responses, request id: req_forbidden';
+  let now = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+  (client as any).childStderrSequence += 1;
+  (client as any).childStderrTail.push({
+    sequence: (client as any).childStderrSequence,
+    text: `■ ${message}`,
+  });
+
+  client.readThread = async () => ({
+    threadId: 'thread_1',
+    path: null,
+    turns: [{
+      id: 'turn_stderr_failure',
+      status: 'running',
+      items: [],
+    }],
+  } as any);
+
+  await assert.rejects(
+    client.waitForTurnResult({
+      threadId: 'thread_1',
+      turnId: 'turn_stderr_failure',
+      timeoutMs: 1000,
+    }),
+    /403 Forbidden/u,
+  );
+});
+
+test('app client ignores stderr runtime errors emitted before a turn wait starts', async () => {
+  let now = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+  (client as any).childStderrSequence += 1;
+  (client as any).childStderrTail.push({
+    sequence: (client as any).childStderrSequence,
+    text: 'unexpected status 403 Forbidden from an earlier turn',
+  });
+
+  client.readThread = async () => ({
+    threadId: 'thread_1',
+    path: null,
+    turns: [{
+      id: 'turn_after_stderr',
+      status: 'completed',
+      items: [{
+        type: 'message',
+        role: 'assistant',
+        phase: 'final_answer',
+        text: 'Recovered',
+      }],
+    }],
+  } as any);
+
+  const result = await client.waitForTurnResult({
+    threadId: 'thread_1',
+    turnId: 'turn_after_stderr',
+    timeoutMs: 1000,
+    stderrBaseline: 1,
+  } as any);
+
+  assert.equal(result.outputText, 'Recovered');
+});

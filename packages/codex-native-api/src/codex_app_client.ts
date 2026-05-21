@@ -281,6 +281,11 @@ interface ProgressState {
   lastAssistantActivityAt: number;
 }
 
+interface CodexStderrEntry {
+  sequence: number;
+  text: string;
+}
+
 interface CodexAppClientOptions {
   codexCliBin: string;
   codexCliArgs?: string[];
@@ -360,7 +365,9 @@ export class CodexAppClient extends EventEmitter {
 
   childStartError: Error | null;
 
-  childStderrTail: string[];
+  childStderrTail: CodexStderrEntry[];
+
+  childStderrSequence: number;
 
   constructor({
     codexCliBin,
@@ -409,6 +416,7 @@ export class CodexAppClient extends EventEmitter {
     this.startPromise = null;
     this.childStartError = null;
     this.childStderrTail = [];
+    this.childStderrSequence = 0;
   }
 
   logDebug(event: string, payload: unknown = null): void {
@@ -446,6 +454,7 @@ export class CodexAppClient extends EventEmitter {
     this.socket = null;
     this.childStartError = null;
     this.childStderrTail = [];
+    this.childStderrSequence = 0;
     const child = this.child;
     if (child && child.exitCode === null) {
       await terminateChildProcess(child, this.platform).catch(() => {});
@@ -652,13 +661,14 @@ export class CodexAppClient extends EventEmitter {
       inputSummary: summarizeTurnInput(
         Array.isArray(input) && input.length > 0
           ? input
-          : [{
-            type: 'text',
-            text: inputText,
-            text_elements: [],
-          }],
+        : [{
+          type: 'text',
+          text: inputText,
+          text_elements: [],
+        }],
       ),
     });
+    const stderrBaseline = this.childStderrSequence;
     const result: any = await this.request('turn/start', {
       threadId,
       input: Array.isArray(input) && input.length > 0
@@ -706,6 +716,7 @@ export class CodexAppClient extends EventEmitter {
       onWorkEvent,
       onApprovalRequest,
       timeoutMs,
+      stderrBaseline,
     });
   }
 
@@ -1024,6 +1035,7 @@ export class CodexAppClient extends EventEmitter {
     }
     this.childStartError = null;
     this.childStderrTail = [];
+    this.childStderrSequence = 0;
     this.port = await reservePort();
     const featureArgs = this.enabledFeatures.flatMap((feature) => ['--enable', feature]);
     const launchSpec = createCodexAppServerLaunchSpec({
@@ -1061,7 +1073,11 @@ export class CodexAppClient extends EventEmitter {
     this.child.stderr?.on('data', (chunk) => {
       const text = String(chunk).trim();
       if (text) {
-        rememberCodexStderrLine(this.childStderrTail, text);
+        this.childStderrSequence += 1;
+        rememberCodexStderrLine(this.childStderrTail, {
+          sequence: this.childStderrSequence,
+          text,
+        });
         this.logger.debug?.(`[codex-app] codex.stderr ${text}`);
       }
     });
@@ -1091,7 +1107,7 @@ export class CodexAppClient extends EventEmitter {
         throw createCodexAppServerExitedError({
           command: this.codexCliBin,
           exitCode: this.child.exitCode,
-          stderrTail: this.childStderrTail,
+          stderrTail: codexStderrTextTail(this.childStderrTail),
         });
       }
       try {
@@ -1124,7 +1140,7 @@ export class CodexAppClient extends EventEmitter {
     throw createCodexConnectTimeoutError({
       command: this.codexCliBin,
       url,
-      stderrTail: this.childStderrTail,
+      stderrTail: codexStderrTextTail(this.childStderrTail),
     });
   }
 
@@ -1464,6 +1480,7 @@ export class CodexAppClient extends EventEmitter {
     onWorkEvent,
     onApprovalRequest,
     timeoutMs,
+    stderrBaseline = 0,
   }: {
     threadId: string;
     turnId: string;
@@ -1471,6 +1488,7 @@ export class CodexAppClient extends EventEmitter {
     onWorkEvent?: ((event: ProviderTurnWorkEvent) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
     timeoutMs: number;
+    stderrBaseline?: number;
   }): Promise<ProviderTurnResult> {
     const deadline = this.turnPollNow() + timeoutMs;
     let firstTerminalWithoutOutputAt = null;
@@ -1491,9 +1509,14 @@ export class CodexAppClient extends EventEmitter {
     const itemOutputKinds = new Map();
     const emittedSnapshotWorkEvents = new Set<string>();
     let sawTerminalNotification = false;
+    let turnNotificationError: string | null = null;
     const onNotification = (notification) => {
       if (isTerminalNotificationForThread(notification, threadId, turnId)) {
         sawTerminalNotification = true;
+      }
+      const notificationError = extractTurnErrorNotificationMessage(notification, { threadId, turnId });
+      if (notificationError) {
+        turnNotificationError = notificationError;
       }
       const workEvent = extractWorkEventUpdate(notification, { threadId, turnId });
       if (workEvent && typeof onWorkEvent === 'function') {
@@ -1629,6 +1652,38 @@ export class CodexAppClient extends EventEmitter {
           onWorkEvent,
           emittedKeys: emittedSnapshotWorkEvents,
         });
+        const openTurnRuntimeError = findOpenTurnRuntimeErrorFromSessionPath(thread?.path ?? null, turnId);
+        if (openTurnRuntimeError) {
+          this.logDebug('turn_wait_error', {
+            threadId,
+            turnId,
+            pollCount,
+            reason: 'session_runtime_error',
+            error: openTurnRuntimeError,
+          });
+          throw new Error(openTurnRuntimeError);
+        }
+        if (turnNotificationError) {
+          this.logDebug('turn_wait_error', {
+            threadId,
+            turnId,
+            pollCount,
+            reason: 'notification_error',
+            error: turnNotificationError,
+          });
+          throw new Error(turnNotificationError);
+        }
+        const stderrRuntimeError = findCodexStderrRuntimeError(this.childStderrTail, stderrBaseline);
+        if (stderrRuntimeError) {
+          this.logDebug('turn_wait_error', {
+            threadId,
+            turnId,
+            pollCount,
+            reason: 'stderr_runtime_error',
+            error: stderrRuntimeError,
+          });
+          throw new Error(stderrRuntimeError);
+        }
         if (includeTurnsUnsupported) {
           const previewText = progressState.finalAnswerText || progressState.commentaryText;
           const settleAnchor = Math.max(
@@ -3232,6 +3287,47 @@ function isTerminalNotificationForThread(
   return false;
 }
 
+function extractTurnErrorNotificationMessage(
+  notification: any,
+  {
+    threadId,
+    turnId,
+  }: {
+    threadId: string;
+    turnId: string;
+  },
+): string | null {
+  if (!notification || typeof notification.method !== 'string') {
+    return null;
+  }
+  const normalizedMethod = notification.method.replace(/[^a-z]/gi, '').toLowerCase();
+  if (normalizedMethod !== 'error') {
+    return null;
+  }
+  const notificationThreadId = extractThreadIdFromNotification(notification);
+  if (notificationThreadId && notificationThreadId !== threadId) {
+    return null;
+  }
+  const params = notification.params ?? {};
+  const notificationTurnId = extractNotificationTurnId(params);
+  if (notificationTurnId && notificationTurnId !== turnId) {
+    return null;
+  }
+  if (!notificationThreadId && !notificationTurnId) {
+    return null;
+  }
+  const message = extractStructuredString(params?.error)
+    ?? extractStructuredString(params?.message)
+    ?? extractStructuredString(params?.details)
+    ?? extractStructuredString(params)
+    ?? 'Codex runtime reported an error';
+  return isTransientTurnErrorNotificationMessage(message) ? null : message;
+}
+
+function isTransientTurnErrorNotificationMessage(message: string): boolean {
+  return /^Reconnecting\.\.\. \d+\/\d+$/u.test(message.trim());
+}
+
 function computeTerminalSettleMs(timeoutMs) {
   const numericTimeout = Number(timeoutMs || 0);
   if (!Number.isFinite(numericTimeout) || numericTimeout <= 0) {
@@ -3545,6 +3641,53 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
     return emptySessionTurnCompletionState();
   }
   return emptySessionTurnCompletionState();
+}
+
+function findOpenTurnRuntimeErrorFromSessionPath(sessionPath, turnId): string | null {
+  if (!sessionPath || !turnId || !fs.existsSync(sessionPath)) {
+    return null;
+  }
+  try {
+    const lines = fs.readFileSync(sessionPath, 'utf8').split('\n');
+    return findOpenTurnRuntimeError(lines, turnId);
+  } catch {
+    return null;
+  }
+}
+
+function findOpenTurnRuntimeError(lines: string[], turnId: string): string | null {
+  let inTurn = false;
+  let runtimeError: string | null = null;
+  for (const line of lines) {
+    const entry = parseSessionLine(line);
+    if (!entry) {
+      continue;
+    }
+    const payload = entry.payload ?? null;
+    if (isSessionTurnStartBoundary(entry, turnId)) {
+      inTurn = true;
+      runtimeError = null;
+      continue;
+    }
+    if (!inTurn) {
+      continue;
+    }
+    if (entry.type === 'event_msg' && payload?.type === 'task_complete' && String(payload?.turn_id ?? '') === turnId) {
+      return null;
+    }
+    if (isSessionAnyTurnBoundary(entry)) {
+      return runtimeError;
+    }
+    if (entry.type !== 'event_msg') {
+      continue;
+    }
+    if (String(payload?.type ?? '') === 'token_count') {
+      runtimeError = describeSessionRateLimitError(payload?.rate_limits ?? payload?.rateLimits ?? null) ?? runtimeError;
+      continue;
+    }
+    runtimeError = extractSessionErrorMessage(payload) ?? runtimeError;
+  }
+  return runtimeError;
 }
 
 function findSessionToolSuggestionMessageForTurn(lines: string[], taskCompleteIndex: number, turnId: string): string | null {
@@ -4813,11 +4956,44 @@ function extractTextCandidate(value) {
   return null;
 }
 
-function rememberCodexStderrLine(stderrTail: string[], text: string): void {
-  stderrTail.push(text);
+function rememberCodexStderrLine(stderrTail: CodexStderrEntry[], entry: CodexStderrEntry): void {
+  stderrTail.push(entry);
   while (stderrTail.length > 10) {
     stderrTail.shift();
   }
+}
+
+function codexStderrTextTail(stderrTail: CodexStderrEntry[]): string[] {
+  return stderrTail.map((entry) => entry.text);
+}
+
+function findCodexStderrRuntimeError(stderrTail: CodexStderrEntry[], baselineSequence = 0): string | null {
+  for (let index = stderrTail.length - 1; index >= 0; index -= 1) {
+    const entry = stderrTail[index];
+    if (!entry || entry.sequence <= baselineSequence) {
+      continue;
+    }
+    const message = normalizeCodexStderrRuntimeError(entry.text);
+    if (message) {
+      return message;
+    }
+  }
+  return null;
+}
+
+function normalizeCodexStderrRuntimeError(line: unknown): string | null {
+  const text = String(line ?? '').trim().replace(/^■\s*/u, '').trim();
+  if (!text) {
+    return null;
+  }
+  if (/unexpected status\s+\d{3}\b/iu.test(text)) {
+    return text;
+  }
+  if (/\b(401|403|429)\b/u.test(text)
+    && /\b(unauthorized|forbidden|too many requests|rate limit|invalid[_\s-]*api[_\s-]*key)\b/iu.test(text)) {
+    return text;
+  }
+  return null;
 }
 
 function createCodexAppServerLaunchSpec({

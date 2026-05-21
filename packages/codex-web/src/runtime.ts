@@ -1,5 +1,6 @@
 import {
   CodexAppClient,
+  createStderrLogger,
   formatConfigKeyPath,
   type ProviderApprovalRequest,
   type ProviderModelInfo,
@@ -29,6 +30,13 @@ import type {
   CodexWebSessionSettingsStore,
   CodexWebStoredSessionSettings,
 } from './session_settings_store.js';
+
+interface CodexWebRuntimeLogger {
+  debug?: (message: string) => void;
+  info?: (message: string) => void;
+  warn?: (message: string) => void;
+  error?: (message: string) => void;
+}
 
 export interface CodexWebSession {
   id: string;
@@ -103,6 +111,7 @@ export interface CodexWebRuntimeOptions {
   client?: CodexWebRuntimeClient;
   eventBus?: CodexWebEventBus;
   settingsStore?: CodexWebSessionSettingsStore;
+  logger?: CodexWebRuntimeLogger;
 }
 
 export interface CreateSessionInput {
@@ -154,10 +163,13 @@ export class CodexWebRuntime {
 
   private readonly workSummaries = new Map<string, Record<string, unknown>>();
 
+  private readonly logger: CodexWebRuntimeLogger;
+
   constructor({
     codexBin,
     defaultCwd,
-    client = new CodexAppClient({ codexCliBin: codexBin }),
+    logger = createStderrLogger({ envVar: 'CODEX_WEB_DEBUG' }),
+    client = new CodexAppClient({ codexCliBin: codexBin, logger }),
     eventBus = new CodexWebEventBus(),
     settingsStore,
   }: CodexWebRuntimeOptions) {
@@ -165,6 +177,7 @@ export class CodexWebRuntime {
     this.eventBus = eventBus;
     this.defaultCwd = defaultCwd;
     this.settingsStore = settingsStore ?? null;
+    this.logger = logger;
   }
 
   async listModels(): Promise<ProviderModelInfo[]> {
@@ -377,6 +390,17 @@ export class CodexWebRuntime {
     const settings = this.mergeSettings(sessionId, input.settings);
     this.persistSessionSettings(sessionId, settings);
     await this.ensureThreadReadyForTurn(sessionId);
+    this.logDebug('turn_start_requested', {
+      sessionId,
+      textLength: input.text.length,
+      cwd: session.cwd ?? this.defaultCwd,
+      model: settings.model,
+      reasoningEffort: settings.reasoningEffort,
+      serviceTier: settings.serviceTier,
+      sandboxMode: settings.sandboxMode ?? 'danger-full-access',
+      approvalPolicy: settings.approvalPolicy ?? 'never',
+      collaborationMode: settings.collaborationMode ?? 'default',
+    });
     let startedTurnId = '';
     let resolveStarted: ((value: { turnId: string }) => void) | null = null;
     let rejectStarted: ((reason?: unknown) => void) | null = null;
@@ -395,6 +419,11 @@ export class CodexWebRuntime {
         threadId: sessionId,
         raw,
       }));
+      this.logDebug('turn_started', {
+        sessionId,
+        turnId,
+        raw: summarizeRuntimeValue(raw),
+      });
       resolveStarted?.({ turnId });
       return true;
     };
@@ -459,11 +488,22 @@ export class CodexWebRuntime {
       if (!startedTurnId) {
         throw new Error('Turn started without turn id');
       }
-      for (const event of normalizeTurnCompletedEvent({
+      this.logDebug('turn_result', {
+        sessionId,
+        turnId: startedTurnId,
+        result: summarizeRuntimeTurnResult(result),
+      });
+      const normalizedEvents = normalizeTurnCompletedEvent({
         turnId: startedTurnId,
         threadId: sessionId,
         result,
-      })) {
+      });
+      this.logDebug('turn_normalized_events', {
+        sessionId,
+        turnId: startedTurnId,
+        events: normalizedEvents.map((event) => summarizeRuntimeEvent(event)),
+      });
+      for (const event of normalizedEvents) {
         this.append(startedTurnId, event);
       }
       return result;
@@ -472,11 +512,22 @@ export class CodexWebRuntime {
         rejectStarted?.(error);
       }
       const turnId = startedTurnId || `turn_failed_${sessionId}`;
-      this.append(turnId, normalizeTurnFailedEvent({
+      this.logDebug('turn_error', {
+        sessionId,
+        turnId,
+        error: summarizeRuntimeError(error),
+      });
+      const event = normalizeTurnFailedEvent({
         turnId,
         threadId: sessionId,
         error,
-      }));
+      });
+      this.logDebug('turn_normalized_events', {
+        sessionId,
+        turnId,
+        events: [summarizeRuntimeEvent(event)],
+      });
+      this.append(turnId, event);
       throw error;
     });
     runPromise.catch(() => {});
@@ -530,7 +581,21 @@ export class CodexWebRuntime {
   }
 
   private append(turnId: string, event: CodexWebEvent): void {
+    if (event.type === 'turn.completed' || event.type === 'turn.failed') {
+      this.logDebug('event_append', {
+        turnId,
+        event: summarizeRuntimeEvent(event),
+      });
+    }
     this.eventBus.append(turnId, event);
+  }
+
+  private logDebug(event: string, payload: unknown = null): void {
+    try {
+      this.logger.debug?.(`[codex-web-runtime] ${event} ${JSON.stringify(payload)}`);
+    } catch {
+      this.logger.debug?.(`[codex-web-runtime] ${event}`);
+    }
   }
 
   private async requireThread(threadId: string): Promise<ProviderThreadSummary> {
@@ -798,6 +863,75 @@ function summarizeSessionInputText(text: string | null | undefined): string | nu
     return normalized;
   }
   return `${normalized.slice(0, SESSION_INPUT_PREVIEW_MAX_LENGTH - 3).trimEnd()}...`;
+}
+
+function summarizeRuntimeTurnResult(result: ProviderTurnResult): Record<string, unknown> {
+  const withDetails = result as ProviderTurnResult & { details?: unknown };
+  return {
+    turnId: result.turnId ?? null,
+    threadId: result.threadId ?? null,
+    status: result.status ?? null,
+    outputState: result.outputState ?? null,
+    finalSource: result.finalSource ?? null,
+    outputTextLength: String(result.outputText ?? '').length,
+    previewTextLength: String(result.previewText ?? '').length,
+    errorMessage: result.errorMessage ?? null,
+    details: withDetails.details ?? null,
+  };
+}
+
+function summarizeRuntimeEvent(event: CodexWebEvent): Record<string, unknown> {
+  if (event.type === 'turn.completed') {
+    return {
+      type: event.type,
+      turnId: event.turnId,
+      threadId: event.threadId,
+      status: event.status,
+      raw: summarizeRuntimeValue(event.raw),
+    };
+  }
+  if (event.type === 'turn.failed') {
+    return {
+      type: event.type,
+      turnId: event.turnId,
+      threadId: event.threadId,
+      message: event.message,
+      details: event.details ?? null,
+      raw: summarizeRuntimeValue(event.raw),
+    };
+  }
+  return {
+    type: event.type,
+    turnId: 'turnId' in event ? event.turnId : null,
+  };
+}
+
+function summarizeRuntimeError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      details: (error as Error & { details?: unknown }).details ?? null,
+      stack: error.stack?.split('\n').slice(0, 4).join('\n') ?? null,
+    };
+  }
+  return {
+    value: summarizeRuntimeValue(error),
+  };
+}
+
+function summarizeRuntimeValue(value: unknown): unknown {
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+  if (value instanceof Error) {
+    return summarizeRuntimeError(value);
+  }
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return String(value);
+  }
 }
 
 function createDefaultSettings(sessionId: string): CodexWebStoredSessionSettings {
