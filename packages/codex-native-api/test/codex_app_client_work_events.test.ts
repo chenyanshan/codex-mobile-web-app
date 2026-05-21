@@ -495,6 +495,52 @@ test('app client ignores transient reconnecting error notifications while turn i
   assert.equal(result.outputText, 'Recovered after reconnect.');
 });
 
+test('app client retries transient rollout materialization read errors after turn starts', async () => {
+  let now = 0;
+  let readCount = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+
+  client.readThread = async () => {
+    readCount += 1;
+    if (readCount === 1) {
+      throw new Error(
+        'failed to read thread: thread-store internal error: failed to read thread '
+        + '/Users/test/.codex/sessions/rollout.jsonl: rollout at '
+        + '/Users/test/.codex/sessions/rollout.jsonl is empty',
+      );
+    }
+    return {
+      threadId: 'thread_1',
+      path: null,
+      turns: [{
+        id: 'turn_materializing',
+        status: 'completed',
+        items: [{
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          text: 'Recovered after materialization.',
+        }],
+      }],
+    } as any;
+  };
+
+  const result = await client.waitForTurnResult({
+    threadId: 'thread_1',
+    turnId: 'turn_materializing',
+    timeoutMs: 3000,
+  });
+
+  assert.equal(readCount, 2);
+  assert.equal(result.outputText, 'Recovered after materialization.');
+});
+
 test('app client fails open turns from Codex stderr runtime errors', async () => {
   const message = 'unexpected status 403 Forbidden: {"code":"FORBIDDEN","message":"Forbidden"}, url: https://allinai7.cloud/v1/responses, request id: req_forbidden';
   let now = 0;

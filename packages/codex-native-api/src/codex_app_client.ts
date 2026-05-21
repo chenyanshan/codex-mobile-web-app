@@ -3255,7 +3255,10 @@ function isThreadMaterializationPendingError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return /not materialized yet/i.test(message)
     || /includeTurns is unavailable before first user message/i.test(message)
-    || /empty session file/i.test(message);
+    || /empty session file/i.test(message)
+    || /rollout .* is empty/i.test(message)
+    || /no rollout found for thread id/i.test(message)
+    || /thread not loaded/i.test(message);
 }
 
 function isIncludeTurnsUnsupportedError(error) {
