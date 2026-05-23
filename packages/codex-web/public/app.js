@@ -1,4 +1,4 @@
-const APP_BUILD_ID = '2026-05-21-runtime-status-v37';
+const APP_BUILD_ID = '__CODEX_WEB_BUILD_ID__';
 const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
 const THEME_KEY = 'codexWebTheme';
@@ -22,9 +22,11 @@ const DEFAULT_SANDBOX_MODE = 'danger-full-access';
 const DEFAULT_THEME = 'dark';
 const DEFAULT_MESSAGE_FONT_SIZE = 'medium';
 const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
+const DESKTOP_PROMPT_TEXTAREA_MAX_HEIGHT = 220;
 const PROMPT_EXPAND_LINE_THRESHOLD = 4;
 const STREAM_STALE_MS = 30_000;
 const FIRST_TURN_RECOVERY_DELAY_MS = 10_000;
+const DESKTOP_WORKSPACE_MIN_WIDTH = 820;
 const EDGE_SWIPE_START_PX = 24;
 const EDGE_SWIPE_TRIGGER_PX = 72;
 const EDGE_SWIPE_MAX_VERTICAL_PX = 48;
@@ -84,6 +86,9 @@ const state = {
   currentSession: null,
   sessionId: null,
   view: 'sessions',
+  desktopNewSessionOpen: false,
+  desktopSettingsOpen: false,
+  desktopOverlay: null,
   theme: normalizeTheme(localStorage.getItem(THEME_KEY)),
   messageFontSize: normalizeMessageFontSize(localStorage.getItem(MESSAGE_FONT_SIZE_KEY)),
   defaultThreadSettings: loadDefaultThreadSettings(),
@@ -148,6 +153,10 @@ setupPwaPullToRefresh();
 setupEdgeSwipeBackNavigation();
 setupAppVersionRefresh();
 document.addEventListener('visibilitychange', onVisibilityChange);
+window.addEventListener('resize', () => {
+  handleLayoutResize();
+  render();
+});
 window.addEventListener('pageshow', onPageResume);
 window.addEventListener('focus', onPageResume);
 
@@ -231,6 +240,9 @@ function setLoggedOut(message = '') {
   state.sessionId = null;
   state.currentSession = null;
   state.view = 'sessions';
+  state.desktopNewSessionOpen = false;
+  state.desktopSettingsOpen = false;
+  state.desktopOverlay = null;
   state.sortMode = 'favorites';
   state.favoriteSortMode = false;
   state.favoriteSortDraft = [];
@@ -338,6 +350,9 @@ function renderLogin() {
 }
 
 function renderMain() {
+  if (isDesktopWorkspaceView()) {
+    return renderDesktopWorkspace();
+  }
   if (state.view === 'settings') {
     return renderAppSettings();
   }
@@ -356,7 +371,108 @@ function renderMain() {
   return renderSessionList();
 }
 
+function renderDesktopWorkspace() {
+  ensureDesktopActiveSession();
+  const shell = document.createElement('div');
+  shell.className = 'shell desktop-shell';
+  shell.innerHTML = `
+    <div class="desktop-workspace">
+      ${renderDesktopSidebar()}
+      ${renderDesktopChatPane()}
+      ${state.desktopSettingsOpen ? renderDesktopSettingsPanel() : ''}
+      ${state.desktopOverlay === 'reports' ? renderDesktopReportsOverlay() : ''}
+    </div>
+    ${renderArchiveConfirmModal()}
+  `;
+  return shell;
+}
+
+function renderDesktopSidebar() {
+  return `
+    <aside class="desktop-sidebar">
+      ${renderSessionListHeader({ desktop: true })}
+      ${state.desktopNewSessionOpen ? renderDesktopNewSessionLauncher() : ''}
+      <main class="session-list desktop-session-list">${renderSessionCards()}</main>
+    </aside>
+  `;
+}
+
+function renderDesktopChatPane() {
+  if (!state.currentSession && !state.sessionId && !state.cwd) {
+    return `
+      <section class="desktop-chat-pane desktop-empty-pane">
+        <div class="desktop-empty-state">
+          <h2>No active session</h2>
+          <p class="meta">Select a session on the left or start a new one.</p>
+          <button class="primary primary-action" type="button" id="desktop-empty-new-session-button">Start a new session</button>
+        </div>
+      </section>
+    `;
+  }
+  return `
+    <section class="desktop-chat-pane">
+      ${renderChatContent({ desktop: true })}
+    </section>
+  `;
+}
+
+function ensureDesktopActiveSession() {
+  if (!isDesktopLayout() || state.sessionId || state.currentSession) {
+    return;
+  }
+  const [firstSession] = sortedSessions();
+  if (!firstSession) {
+    return;
+  }
+  state.sessionId = firstSession.id;
+  state.currentSession = firstSession;
+  state.cwd = firstSession.cwd || '';
+  applySessionSettings(firstSession);
+  restoreTimelineForSession(firstSession);
+  syncRuntimeStatusFromSession(firstSession, { source: 'stale' });
+}
+
+function isDesktopLayout() {
+  const hasDesktopPointer = typeof window?.matchMedia === 'function'
+    ? window.matchMedia('(hover: hover) and (pointer: fine)').matches
+    : false;
+  return hasDesktopPointer
+    && typeof window?.innerWidth === 'number'
+    && window.innerWidth >= DESKTOP_WORKSPACE_MIN_WIDTH;
+}
+
+function isDesktopWorkspaceView() {
+  return isDesktopLayout() && ['sessions', 'chat', 'new'].includes(state.view);
+}
+
+function handleLayoutResize() {
+  if (isDesktopLayout()) {
+    return;
+  }
+  state.desktopNewSessionOpen = false;
+  state.desktopSettingsOpen = false;
+  state.desktopOverlay = null;
+  if (state.sessionId) {
+    state.view = 'chat';
+    return;
+  }
+  state.view = 'sessions';
+}
+
 function renderSessionList() {
+  const shell = document.createElement('div');
+  shell.className = 'shell';
+  shell.innerHTML = `
+    <div class="screen page-screen">
+      ${renderSessionListHeader()}
+      <main class="session-list">${renderSessionCards()}</main>
+    </div>
+    ${renderArchiveConfirmModal()}
+  `;
+  return shell;
+}
+
+function renderSessionListHeader({ desktop = false } = {}) {
   const canSortFavorites = state.sortMode === 'favorites';
   const topbarActions = state.favoriteSortMode
     ? `
@@ -373,11 +489,8 @@ function renderSessionList() {
             <button class="ghost compact-button" type="button" id="open-app-settings-button">Set</button>
           </div>
         `;
-  const shell = document.createElement('div');
-  shell.className = 'shell';
-  shell.innerHTML = `
-    <div class="screen page-screen">
-      <header class="topbar page-topbar">
+  return `
+      <header class="topbar page-topbar${desktop ? ' desktop-sidebar-topbar' : ''}">
         <div class="topbar-main">
           <div class="page-title">Sessions</div>
           ${topbarActions}
@@ -389,11 +502,7 @@ function renderSessionList() {
           </div>
         </div>
       </header>
-      <main class="session-list">${renderSessionCards()}</main>
-    </div>
-    ${renderArchiveConfirmModal()}
   `;
-  return shell;
 }
 
 function renderReportsPage() {
@@ -407,6 +516,18 @@ function renderReportsPage() {
     </div>
   `;
   return shell;
+}
+
+function renderDesktopReportsOverlay() {
+  const title = state.reportProject ? state.reportProject : 'Reports';
+  return `
+    <section class="desktop-overlay">
+      <div class="desktop-overlay-card">
+        ${renderPageNav(title, { backId: 'desktop-reports-close-button' })}
+        <main class="report-list">${state.reportProject ? renderReportCards() : renderReportProjects()}</main>
+      </div>
+    </section>
+  `;
 }
 
 function renderReportProjects() {
@@ -511,6 +632,29 @@ function renderAppSettings() {
         </div>
       </header>
       <main class="app-settings-page">
+        ${renderAppSettingsSections()}
+      </main>
+    </div>
+  `;
+  return shell;
+}
+
+function renderDesktopSettingsPanel() {
+  return `
+    <aside class="desktop-settings-panel">
+      <header class="desktop-panel-header">
+        <h2>Settings</h2>
+        <button class="ghost compact-button" type="button" id="desktop-settings-close-button">Close</button>
+      </header>
+      <main class="app-settings-page desktop-settings-body">
+        ${renderAppSettingsSections()}
+      </main>
+    </aside>
+  `;
+}
+
+function renderAppSettingsSections() {
+  return `
         <section class="settings-section">
           <div class="settings-section-title">Theme</div>
           <div class="toggle theme-toggle">
@@ -561,10 +705,7 @@ function renderAppSettings() {
         <section class="settings-section">
           <button class="danger compact-button full-width-button" type="button" id="settings-logout-button">Log out</button>
         </section>
-      </main>
-    </div>
   `;
-  return shell;
 }
 
 function renderNewSession() {
@@ -595,16 +736,42 @@ function renderNewSession() {
   return shell;
 }
 
+function renderDesktopNewSessionLauncher() {
+  return `
+    <section class="desktop-new-session-launcher">
+      <form class="panel stack" id="new-session-form">
+        <div class="field">
+          <label for="new-cwd-input">Project path</label>
+          <textarea id="new-cwd-input" name="cwd" rows="3" placeholder="Use server default">${escapeHtml(state.newCwd || state.cwd)}</textarea>
+        </div>
+        ${renderPathChoices()}
+        <div class="actions">
+          <button class="ghost compact-button" type="button" id="desktop-new-session-cancel-button">Cancel</button>
+          <button class="primary compact-button" type="submit">Start</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
 function renderChat() {
-  const sessionReportsProject = reportProjectForSession(state.currentSession);
-  const composerClassName = composerStateClassName();
   const shell = document.createElement('div');
   shell.className = 'shell';
   shell.innerHTML = `
     <div class="screen">
-      <header class="topbar chat-topbar">
+      ${renderChatContent()}
+    </div>
+  `;
+  return shell;
+}
+
+function renderChatContent({ desktop = false } = {}) {
+  const sessionReportsProject = reportProjectForSession(state.currentSession);
+  const composerClassName = composerStateClassName();
+  return `
+      <header class="topbar chat-topbar${desktop ? ' desktop-chat-topbar' : ''}">
         <div class="chat-nav">
-          <button class="ghost chat-back-button" type="button" id="back-to-list-button" aria-label="Sessions">&lt;</button>
+          ${desktop ? '<div class="chat-nav-spacer" aria-hidden="true"></div>' : '<button class="ghost chat-back-button" type="button" id="back-to-list-button" aria-label="Sessions">&lt;</button>'}
           <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
           ${sessionReportsProject
             ? `<button class="ghost compact-button session-report-button" type="button" data-session-reports-project="${escapeAttribute(sessionReportsProject)}">Reports</button>`
@@ -623,9 +790,7 @@ function renderChat() {
           </div>
         </form>
       </div>
-    </div>
   `;
-  return shell;
 }
 
 function renderPageNav(title, options = {}) {
@@ -684,7 +849,7 @@ function renderSessionCards() {
     return `<div class="empty-state">${message}</div>`;
   }
   return sessions.map((session) => `
-    <article class="session-card">
+    <article class="session-card${state.sessionId === session.id ? ' is-active' : ''}">
       <button class="session-card-open" type="button" data-session-id="${escapeAttribute(session.id)}" ${isSortingFavorites ? 'disabled' : ''}>
         <span class="session-card-main">
           <span class="session-project">${escapeHtml(projectNameForSession(session))}</span>
@@ -733,8 +898,8 @@ function renderArchiveConfirmModal() {
           <p class="meta">${escapeHtml(shorten(previewInputForSession(session), 120) || 'No prompt preview')}</p>
         </div>
         <div class="actions">
-          <button class="ghost" type="button" id="archive-cancel-button">Cancel</button>
-          <button class="danger" type="button" data-session-archive-confirm-id="${escapeAttribute(session.id)}">Archive</button>
+          <button class="ghost compact-button" type="button" id="archive-cancel-button">Cancel</button>
+          <button class="danger compact-button" type="button" data-session-archive-confirm-id="${escapeAttribute(session.id)}">Archive</button>
         </div>
       </section>
     </div>
@@ -845,7 +1010,8 @@ function composerStatusTone() {
 
 function renderTimelineItem(item) {
   if (item.kind === 'message') {
-    const body = item.role === 'assistant'
+    const usesMarkdown = item.role === 'assistant' || item.role === 'system';
+    const body = usesMarkdown
       ? `<div class="message-text markdown-body">${renderMarkdown(item.text)}</div>`
       : `<p class="message-text">${escapeHtml(item.text)}</p>`;
     return `
@@ -1221,10 +1387,40 @@ function bindGlobalEvents() {
     });
   }
 
+  const desktopNewSessionCancelButton = document.querySelector('#desktop-new-session-cancel-button');
+  if (desktopNewSessionCancelButton) {
+    desktopNewSessionCancelButton.addEventListener('click', () => {
+      state.desktopNewSessionOpen = false;
+      render();
+    });
+  }
+
+  const desktopEmptyNewSessionButton = document.querySelector('#desktop-empty-new-session-button');
+  if (desktopEmptyNewSessionButton) {
+    desktopEmptyNewSessionButton.addEventListener('click', () => {
+      openNewSessionPage();
+    });
+  }
+
+  const desktopSettingsCloseButton = document.querySelector('#desktop-settings-close-button');
+  if (desktopSettingsCloseButton) {
+    desktopSettingsCloseButton.addEventListener('click', () => {
+      state.desktopSettingsOpen = false;
+      render();
+    });
+  }
+
   const openReportsButton = document.querySelector('#open-reports-button');
   if (openReportsButton) {
     openReportsButton.addEventListener('click', () => {
       void openReportsPage();
+    });
+  }
+
+  const desktopReportsCloseButton = document.querySelector('#desktop-reports-close-button');
+  if (desktopReportsCloseButton) {
+    desktopReportsCloseButton.addEventListener('click', () => {
+      closeReportsPage();
     });
   }
 
@@ -1370,6 +1566,7 @@ function bindGlobalEvents() {
   if (promptInput) {
     promptInput.addEventListener('touchstart', syncPromptFocusLayout, { passive: true });
     promptInput.addEventListener('focus', syncPromptFocusLayout);
+    promptInput.addEventListener('keydown', handlePromptKeydown);
     promptInput.addEventListener('input', (event) => {
       state.prompt = event.target.value;
       syncPromptInputLayout(event.target);
@@ -1858,6 +2055,14 @@ function syncPromptInputLayout(textarea) {
   syncComposerOffset();
 }
 
+function handlePromptKeydown(event) {
+  if (!isDesktopLayout() || event.key !== 'Enter' || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  document.querySelector('#composer-form')?.requestSubmit();
+}
+
 function autoGrowPromptInput(textarea) {
   if (!textarea?.style) {
     return;
@@ -1867,7 +2072,7 @@ function autoGrowPromptInput(textarea) {
     return;
   }
   textarea.style.height = 'auto';
-  const maxHeight = PROMPT_TEXTAREA_MAX_HEIGHT;
+  const maxHeight = isDesktopLayout() ? DESKTOP_PROMPT_TEXTAREA_MAX_HEIGHT : PROMPT_TEXTAREA_MAX_HEIGHT;
   const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
   textarea.style.height = `${Math.max(38, nextHeight)}px`;
 }
@@ -1953,19 +2158,47 @@ function showSessionList() {
   state.favoriteSortMode = false;
   state.favoriteSortDraft = [];
   state.archiveConfirmSessionId = null;
-  state.sessionId = null;
-  state.currentSession = null;
-  state.turnId = null;
-  state.pendingTurn = false;
-  state.composerExpanded = false;
+  state.desktopNewSessionOpen = false;
+  state.desktopSettingsOpen = false;
+  state.desktopOverlay = null;
+  if (!isDesktopLayout()) {
+    state.sessionId = null;
+    state.currentSession = null;
+    state.turnId = null;
+    state.pendingTurn = false;
+    state.composerExpanded = false;
+    resetTurnState();
+    resetSessionHistoryWindow();
+  }
   state.error = '';
-  resetSessionHistoryWindow();
   render();
 }
 
 async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
   const normalizedProject = String(project || '').trim();
   const normalizedReturnView = returnView === 'chat' && state.sessionId ? 'chat' : 'sessions';
+  if (isDesktopLayout()) {
+    state.view = 'sessions';
+    state.desktopOverlay = 'reports';
+    state.desktopNewSessionOpen = false;
+    state.desktopSettingsOpen = false;
+    state.favoriteSortMode = false;
+    state.favoriteSortDraft = [];
+    state.archiveConfirmSessionId = null;
+    state.currentReport = null;
+    state.currentReportContent = '';
+    state.currentReportLoading = false;
+    state.reportReturnView = 'chat';
+    state.reportsReturnView = state.sessionId ? 'chat' : 'sessions';
+    state.reportProject = normalizedProject;
+    state.error = '';
+    if (!state.reportsLoaded) {
+      await refreshReportsList({ renderAfter: true });
+      return;
+    }
+    render();
+    return;
+  }
   if (normalizedReturnView === 'chat') {
     chatTimelineReturnSnapshot = captureTimelineViewport();
   }
@@ -1997,6 +2230,16 @@ async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
 }
 
 function closeReportsPage() {
+  if (isDesktopLayout()) {
+    state.desktopOverlay = null;
+    state.currentReport = null;
+    state.currentReportContent = '';
+    state.currentReportLoading = false;
+    state.reportProject = '';
+    state.view = 'sessions';
+    render();
+    return;
+  }
   if (state.reportsReturnView === 'chat' && state.sessionId) {
     const snapshot = chatTimelineReturnSnapshot || captureTimelineViewport();
     state.currentReport = null;
@@ -2027,23 +2270,48 @@ function handleReportsBackNavigation() {
 
 function openAppSettingsPage() {
   saveCurrentTimeline();
-  stopStream();
   state.favoriteSortMode = false;
   state.favoriteSortDraft = [];
-  state.view = 'settings';
   state.archiveConfirmSessionId = null;
-  state.sessionId = null;
-  state.currentSession = null;
   state.currentReport = null;
   state.currentReportContent = '';
   state.currentReportLoading = false;
-  resetTurnState();
   state.error = '';
+  if (isDesktopLayout()) {
+    state.view = 'sessions';
+    state.desktopSettingsOpen = true;
+    state.desktopNewSessionOpen = false;
+    state.desktopOverlay = null;
+    render();
+    return;
+  }
+  stopStream();
+  state.view = 'settings';
+  state.sessionId = null;
+  state.currentSession = null;
+  resetTurnState();
   render();
 }
 
 function openNewSessionPage() {
   saveCurrentTimeline();
+  if (isDesktopLayout()) {
+    applyDefaultSettings();
+    state.favoriteSortMode = false;
+    state.favoriteSortDraft = [];
+    state.view = 'sessions';
+    state.desktopNewSessionOpen = true;
+    state.desktopSettingsOpen = false;
+    state.desktopOverlay = null;
+    state.archiveConfirmSessionId = null;
+    state.currentReport = null;
+    state.currentReportContent = '';
+    state.currentReportLoading = false;
+    state.newCwd = state.cwd || '';
+    state.error = '';
+    render();
+    return;
+  }
   stopStream();
   applyDefaultSettings();
   state.favoriteSortMode = false;
@@ -2066,7 +2334,10 @@ function onNewSessionSubmit(event) {
   saveCurrentTimeline();
   stopStream();
   applyDefaultSettings();
-  state.view = 'chat';
+  state.view = isDesktopLayout() ? 'sessions' : 'chat';
+  state.desktopNewSessionOpen = false;
+  state.desktopSettingsOpen = false;
+  state.desktopOverlay = null;
   state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
@@ -2100,7 +2371,10 @@ async function selectSession(sessionId) {
   applySessionSettings(nextSession);
   restoreTimelineForSession(nextSession);
   const restoredRuntimeStatus = syncRuntimeStatusFromSession(nextSession, { source: 'stale' });
-  state.view = 'chat';
+  state.view = isDesktopLayout() ? 'sessions' : 'chat';
+  state.desktopNewSessionOpen = false;
+  state.desktopSettingsOpen = false;
+  state.desktopOverlay = null;
   state.composerExpanded = false;
   state.settingsOpen = false;
   state.error = '';
@@ -2120,6 +2394,7 @@ async function selectSession(sessionId) {
     return;
   }
   if (state.sessionId !== sessionId) {
+    renderSessionListAfterBackgroundUpdate();
     return;
   }
   const refreshedSession = state.sessions.find((session) => session.id === sessionId) || nextSession;
@@ -2129,6 +2404,7 @@ async function selectSession(sessionId) {
   restoreTimelineForSession(refreshedSession);
   const refreshedRuntimeStatus = syncRuntimeStatusFromSession(refreshedSession);
   state.error = '';
+  state.view = isDesktopLayout() ? 'sessions' : 'chat';
   if (!refreshedRuntimeStatus.changed) {
     state.status = 'Ready';
     state.statusTone = 'success';
@@ -2139,6 +2415,14 @@ async function selectSession(sessionId) {
   if (refreshedRuntimeStatus.activeTurnId && state.turnId) {
     streamTurnEvents(state.turnId, { forceReconnect: true });
   }
+}
+
+function renderSessionListAfterBackgroundUpdate() {
+  if (state.view !== 'sessions' && !isDesktopWorkspaceView()) {
+    return;
+  }
+  rememberSessionListScroll();
+  render();
 }
 
 async function onComposerSubmit(event) {
@@ -2181,6 +2465,10 @@ async function onComposerSubmit(event) {
         settings,
       },
     });
+    if (turn?.type === 'command') {
+      handleCommandResult(turn);
+      return;
+    }
     if (turn.session) {
       upsertSession(turn.session);
       state.sessionId = turn.session.id;
@@ -2210,6 +2498,53 @@ async function onComposerSubmit(event) {
     surfaceTimelineError(state.turnId || `request_${Date.now()}`, error?.payload?.message || error?.message || 'Request failed');
     handleApiError(error, { suppressComposerError: true });
   }
+}
+
+function handleCommandResult(result) {
+  stopStream();
+  state.pendingTurn = false;
+  state.turnId = null;
+  state.lastTurnEventSequence = null;
+  state.streamWasBackgrounded = false;
+  state.lastTurnEventAt = 0;
+  state.status = 'Ready';
+  state.statusTone = 'success';
+  state.error = '';
+  if (result?.session && commandResultSessionHasTimeline(result)) {
+    upsertSession(result.session);
+    if (state.sessionId === result.session.id) {
+      state.currentSession = state.sessions.find((session) => session.id === result.session.id) || result.session;
+      state.cwd = result.session.cwd || state.cwd;
+      hydrateCurrentTimelineFromSession(result.session);
+    }
+    saveCurrentTimeline();
+    renderChatAtLatestIfFollowing(() => {});
+    return;
+  }
+  const command = result?.command || {};
+  const message = String(command.message || 'Command completed.');
+  appendMessage({
+    id: `command_${command.name || 'slash'}_${Date.now()}`,
+    kind: 'message',
+    role: 'system',
+    label: command.name ? `/${command.name}` : 'Command',
+    meta: command.action || 'completed',
+    text: message,
+  });
+  saveCurrentTimeline();
+  renderChatAtLatestIfFollowing(() => {});
+}
+
+function commandResultSessionHasTimeline(result) {
+  const items = normalizeSessionTimeline(result?.session?.timeline);
+  if (!items.length) {
+    return false;
+  }
+  const commandName = String(result?.command?.name || '');
+  const commandMessage = String(result?.command?.message || '').trim();
+  return items.some((item) => item.role === 'system'
+    && (!commandName || item.label === `/${commandName}`)
+    && (!commandMessage || item.text === commandMessage));
 }
 
 async function ensureSession() {
@@ -2854,6 +3189,8 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false, viewport
           scrollTimelineToBottomIfFollowingLatest();
         }
         nextTimelineRestoreSnapshot = null;
+      } else {
+        renderSessionListAfterBackgroundUpdate();
       }
       return session;
     }
@@ -3537,12 +3874,14 @@ function restoreTimelineForSession(session) {
   const fullHistory = fullHydratedTimelineFromSession(session);
   const cached = state.timelineCache.get(session.id);
   if (cached) {
-    state.timeline = cached.timeline.map((item) => ({ ...item }));
     state.batches = new Map(cached.batches);
     state.approvals = new Map(cached.approvals);
     if (fullHistory.length) {
-      const currentStart = visibleStartIndexForTimeline(fullHistory, state.timeline);
+      const currentStart = visibleStartIndexForTimeline(fullHistory, cached.timeline);
       setSessionHistoryWindow(fullHistory, currentStart);
+      state.timeline = state.sessionHistoryItems.slice(currentStart).map((item) => ({ ...item }));
+    } else {
+      state.timeline = cached.timeline.map((item) => ({ ...item }));
     }
     return;
   }
@@ -3692,6 +4031,10 @@ function hydrateTimelineFromSession(session) {
 }
 
 function fullHydratedTimelineFromSession(session) {
+  const storedTimeline = normalizeSessionTimeline(session?.timeline);
+  if (storedTimeline.length) {
+    return storedTimeline;
+  }
   const items = [];
   const turns = Array.isArray(session.thread?.turns) ? session.thread.turns : [];
   for (const turn of turns) {
@@ -3737,6 +4080,34 @@ function fullHydratedTimelineFromSession(session) {
   return items;
 }
 
+function normalizeSessionTimeline(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => normalizeSessionTimelineItem(item))
+    .filter(Boolean);
+}
+
+function normalizeSessionTimelineItem(item) {
+  if (!item || item.kind !== 'message') {
+    return null;
+  }
+  const role = item.role === 'user' || item.role === 'assistant' || item.role === 'system'
+    ? item.role
+    : null;
+  const text = typeof item.text === 'string' ? item.text.trim() : '';
+  if (!role || !text) {
+    return null;
+  }
+  return {
+    id: typeof item.id === 'string' && item.id ? item.id : `timeline_${role}_${text.slice(0, 24)}`,
+    kind: 'message',
+    role,
+    label: typeof item.label === 'string' && item.label ? item.label : role === 'user' ? 'You' : role === 'assistant' ? 'Assistant' : 'System',
+    meta: typeof item.meta === 'string' ? item.meta : '',
+    text,
+    severity: item.severity === 'error' ? 'error' : undefined,
+  };
+}
+
 function selectVisibleHydratedTimelineItems(items) {
   return items.slice(visibleHydratedStartIndex(items));
 }
@@ -3750,10 +4121,22 @@ function currentVisibleHydratedTimelineItems(items) {
 
 function visibleHydratedStartIndex(items) {
   const completeExchangeStarts = findCompleteExchangeStarts(items);
-  if (completeExchangeStarts.length < MIN_HYDRATED_COMPLETE_EXCHANGES) {
-    return 0;
+  const startIndex = completeExchangeStarts.length < MIN_HYDRATED_COMPLETE_EXCHANGES
+    ? 0
+    : completeExchangeStarts[completeExchangeStarts.length - MIN_HYDRATED_COMPLETE_EXCHANGES];
+  return includeAdjacentSystemTimelineItems(items, startIndex);
+}
+
+function includeAdjacentSystemTimelineItems(items, startIndex) {
+  let index = Math.max(0, Number.isFinite(startIndex) ? Math.floor(startIndex) : 0);
+  while (index > 0 && isStandaloneSystemTimelineItem(items[index - 1])) {
+    index -= 1;
   }
-  return completeExchangeStarts[completeExchangeStarts.length - MIN_HYDRATED_COMPLETE_EXCHANGES];
+  return index;
+}
+
+function isStandaloneSystemTimelineItem(item) {
+  return item?.kind === 'message' && item?.role === 'system';
 }
 
 function setSessionHistoryWindow(items, startIndex) {
@@ -3782,7 +4165,7 @@ function visibleStartIndexForTimeline(historyItems, timelineItems) {
 }
 
 function showMoreSessionHistory() {
-  if (state.view !== 'chat' || !state.sessionId) {
+  if ((!isDesktopWorkspaceView() && state.view !== 'chat') || !state.sessionId) {
     return false;
   }
   let historyItems = state.sessionHistoryItems;
@@ -4194,7 +4577,7 @@ function previewInputForSession(session) {
 }
 
 function lastInputAtForSession(session) {
-  return session?.lastInputAt || session?.updatedAt || 0;
+  return Math.max(session?.lastInputAt || 0, session?.updatedAt || 0);
 }
 
 function applyPermissionPreset(preset) {
@@ -4446,6 +4829,10 @@ function appendMessage(entry) {
 function surfaceTimelineError(turnId, message) {
   appendTimelineError(turnId, message);
   state.error = '';
+  if (!state.sessionId) {
+    return;
+  }
+  void persistTimelineError(turnId, message);
 }
 
 function appendTimelineError(turnId, message) {
@@ -4462,6 +4849,27 @@ function appendTimelineError(turnId, message) {
   }, (item) => item.id === id, { moveToEnd: true });
 }
 
+async function persistTimelineError(turnId, message) {
+  try {
+    await apiFetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/timeline`, {
+      method: 'POST',
+      body: {
+        id: `error_${turnId || Date.now()}`,
+        role: 'system',
+        label: 'Error',
+        meta: 'failed',
+        text: String(message || 'Turn failed'),
+        severity: 'error',
+        afterHistoryIndex: currentHydratedHistoryLength(),
+      },
+    });
+  } catch (error) {
+    if (handleMissingSession(error, '')) {
+      return;
+    }
+  }
+}
+
 function appendOrReplace(entry, matcher, options = {}) {
   const index = state.timeline.findIndex(matcher);
   if (index >= 0) {
@@ -4474,6 +4882,15 @@ function appendOrReplace(entry, matcher, options = {}) {
   } else {
     state.timeline.push(entry);
   }
+}
+
+function currentHydratedHistoryLength() {
+  if (!state.currentSession) {
+    return 0;
+  }
+  return fullHydratedTimelineFromSession(state.currentSession)
+    .filter((item) => item?.kind === 'message' && item?.meta === 'history')
+    .length;
 }
 
 function collectSettings() {
@@ -4859,6 +5276,7 @@ function shorten(value, maxLength) {
 
 function renderMarkdown(value) {
   const text = String(value || '').replace(/\r\n?/gu, '\n');
+  const lines = text.split('\n');
   const blocks = [];
   let paragraph = [];
   let listItems = [];
@@ -4897,7 +5315,8 @@ function renderMarkdown(value) {
     flushQuote();
   };
 
-  for (const line of text.split('\n')) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (/^```/u.test(line.trim())) {
       if (inCode) {
         flushCode();
@@ -4915,6 +5334,13 @@ function renderMarkdown(value) {
     }
     if (!line.trim()) {
       flushTextBlocks();
+      continue;
+    }
+    const table = parseMarkdownTable(lines, index);
+    if (table) {
+      flushTextBlocks();
+      blocks.push(renderMarkdownTable(table.header, table.rows, table.alignments));
+      index = table.lastLineIndex;
       continue;
     }
     const heading = line.match(/^(#{1,3})\s+(.+)$/u);
@@ -4948,6 +5374,125 @@ function renderMarkdown(value) {
     flushTextBlocks();
   }
   return blocks.join('');
+}
+
+function parseMarkdownTable(lines, startIndex) {
+  const header = parseMarkdownTableRow(lines[startIndex]);
+  if (!header || startIndex + 1 >= lines.length) {
+    return null;
+  }
+  const alignments = parseMarkdownTableDivider(lines[startIndex + 1], header.length);
+  if (!alignments) {
+    return null;
+  }
+
+  const rows = [];
+  let cursor = startIndex + 2;
+  while (cursor < lines.length) {
+    const row = parseMarkdownTableRow(lines[cursor]);
+    if (!row || row.length !== header.length) {
+      break;
+    }
+    rows.push(row);
+    cursor += 1;
+  }
+
+  return {
+    header,
+    alignments,
+    rows,
+    lastLineIndex: cursor - 1,
+  };
+}
+
+function parseMarkdownTableRow(line) {
+  const trimmed = String(line || '').trim();
+  if (!trimmed || !trimmed.includes('|')) {
+    return null;
+  }
+  const cells = [];
+  let current = '';
+  let index = trimmed.startsWith('|') ? 1 : 0;
+  let codeDelimiterLength = 0;
+  let endedWithDelimiter = false;
+
+  while (index < trimmed.length) {
+    const character = trimmed[index];
+    const nextCharacter = trimmed[index + 1];
+    if (codeDelimiterLength === 0 && character === '\\' && nextCharacter === '|') {
+      current += '|';
+      index += 2;
+      endedWithDelimiter = false;
+      continue;
+    }
+    if (character === '`') {
+      const runLength = countRepeatedCharacter(trimmed, index, '`');
+      if (codeDelimiterLength === 0) {
+        codeDelimiterLength = runLength;
+      } else if (runLength === codeDelimiterLength) {
+        codeDelimiterLength = 0;
+      }
+      current += '`'.repeat(runLength);
+      index += runLength;
+      endedWithDelimiter = false;
+      continue;
+    }
+    if (codeDelimiterLength === 0 && character === '|') {
+      cells.push(current.trim());
+      current = '';
+      index += 1;
+      endedWithDelimiter = true;
+      continue;
+    }
+    current += character;
+    index += 1;
+    endedWithDelimiter = false;
+  }
+  if (!endedWithDelimiter || current.length > 0) {
+    cells.push(current.trim());
+  }
+  if (cells.length < 2) {
+    return null;
+  }
+  return cells;
+}
+
+function countRepeatedCharacter(value, startIndex, character) {
+  let index = startIndex;
+  while (index < value.length && value[index] === character) {
+    index += 1;
+  }
+  return index - startIndex;
+}
+
+function parseMarkdownTableDivider(line, expectedColumns) {
+  const cells = parseMarkdownTableRow(line);
+  if (!cells || cells.length !== expectedColumns) {
+    return null;
+  }
+  const alignments = [];
+  for (const cell of cells) {
+    if (!/^:?-{3,}:?$/u.test(cell)) {
+      return null;
+    }
+    const leftAligned = cell.startsWith(':');
+    const rightAligned = cell.endsWith(':');
+    if (leftAligned && rightAligned) {
+      alignments.push('center');
+    } else if (rightAligned) {
+      alignments.push('right');
+    } else {
+      alignments.push('left');
+    }
+  }
+  return alignments;
+}
+
+function renderMarkdownTable(header, rows, alignments = []) {
+  const getAlignmentStyle = (index) => ` style="text-align: ${escapeAttribute(alignments[index] || 'left')};"`;
+  const headHtml = header.map((cell, index) => `<th${getAlignmentStyle(index)}>${renderInlineMarkdown(cell)}</th>`).join('');
+  const bodyHtml = rows.map((row) => `<tr>${row.map((cell, index) => `<td${getAlignmentStyle(index)}>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`).join('');
+  return `<div class="markdown-table"><table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
 }
 
 function renderInlineMarkdown(value) {

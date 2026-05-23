@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'codex-web-static-2026-05-21-runtime-status-v37';
+const STATIC_CACHE = 'codex-web-static-__CODEX_WEB_BUILD_ID__';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

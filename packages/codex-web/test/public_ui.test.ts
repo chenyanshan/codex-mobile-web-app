@@ -35,7 +35,10 @@ test('mobile UI exposes iOS PWA install metadata and registers a service worker'
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.type), ['image/png', 'image/png']);
   assert.deepEqual(parsedManifest.icons.map((icon) => icon.sizes), ['192x192', '512x512']);
   assert.match(app, /navigator\.serviceWorker\.register\('\/service-worker\.js'\)/u);
-  assert.match(serviceWorker, /codex-web-static-2026-05-21-runtime-status-v37/u);
+  assert.match(app, /const APP_BUILD_ID = '__CODEX_WEB_BUILD_ID__';/u);
+  assert.match(serviceWorker, /codex-web-static-__CODEX_WEB_BUILD_ID__/u);
+  assert.doesNotMatch(app, /runtime-status-v37/u);
+  assert.doesNotMatch(serviceWorker, /runtime-status-v37/u);
   assert.match(serviceWorker, /'\/icon-192\.png'/u);
   assert.match(serviceWorker, /'\/icon-512\.png'/u);
   assert.match(serviceWorker, /'\/apple-touch-icon\.png'/u);
@@ -423,6 +426,216 @@ test('composer can submit a new message while a turn is already running', async 
   assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Follow-up while running/u);
 });
 
+test('composer renders handled goal slash command results without streaming a turn', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/sessions/session_goal/turns') {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({
+            type: 'command',
+            command: {
+              name: 'goal',
+              action: 'resume',
+              message: 'Goal resumed: ship slash goal support',
+              goal: {
+                threadId: 'session_goal',
+                objective: 'ship slash goal support',
+                status: 'active',
+              },
+            },
+            session: {
+              id: 'session_goal',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              timeline: [
+                { id: 'command_user_resume', kind: 'message', role: 'user', label: 'You', meta: 'command', text: '/goal resume' },
+                { id: 'command_goal_resume', kind: 'message', role: 'system', label: '/goal', meta: 'resume', text: 'Goal resumed: ship slash goal support' },
+              ],
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_goal';
+  api.state.currentSession = { id: 'session_goal', cwd: '/repo' };
+  api.state.prompt = '/goal resume';
+
+  await api.onComposerSubmit({
+    preventDefault() {},
+  });
+
+  assert.deepEqual(fetchCalls.map((call) => call.path), ['/api/sessions/session_goal/turns']);
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.turnId, null);
+  assert.equal(api.state.status, 'Ready');
+  assert.deepEqual(api.state.timeline.map((item) => item.text), [
+    '/goal resume',
+    'Goal resumed: ship slash goal support',
+  ]);
+});
+
+test('goal command completion ignores stale stream load failures from a previous running turn', async () => {
+  const fetchCalls = [];
+  let rejectStaleFetch = null;
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions/session_goal/turns') {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({
+            type: 'command',
+            command: {
+              name: 'goal',
+              action: 'resume',
+              message: 'Goal resumed: ship slash goal support',
+              goal: {
+                threadId: 'session_goal',
+                objective: 'ship slash goal support',
+                status: 'active',
+              },
+            },
+            session: {
+              id: 'session_goal',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              timeline: [
+                { id: 'command_user_resume', kind: 'message', role: 'user', label: 'You', meta: 'command', text: '/goal resume' },
+                { id: 'command_goal_resume', kind: 'message', role: 'system', label: '/goal', meta: 'resume', text: 'Goal resumed: ship slash goal support' },
+              ],
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      if (path === '/api/turns/turn_stale/events') {
+        return await new Promise((_resolve, reject) => {
+          rejectStaleFetch = () => reject(new Error('Load failed'));
+        });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_goal';
+  api.state.currentSession = { id: 'session_goal', cwd: '/repo' };
+  api.state.pendingTurn = true;
+  api.state.turnId = 'turn_stale';
+  api.state.status = 'Turn running';
+  api.state.statusTone = 'warn';
+  api.state.prompt = '/goal resume';
+
+  const staleStreamPromise = api.streamTurnEvents('turn_stale');
+
+  await api.onComposerSubmit({
+    preventDefault() {},
+  });
+
+  assert.equal(typeof rejectStaleFetch, 'function');
+  rejectStaleFetch();
+  await staleStreamPromise;
+
+  assert.deepEqual(fetchCalls.slice(0, 2), [
+    '/api/turns/turn_stale/events',
+    '/api/sessions/session_goal/turns',
+  ]);
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.turnId, null);
+  assert.equal(api.state.status, 'Ready');
+  assert.equal(api.state.error, '');
+  assert.doesNotMatch(api.state.timeline.map((item) => item.text || '').join('\n'), /Load failed/u);
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Goal resumed: ship slash goal support/u);
+});
+
+test('composer renders handled help slash command results with report links', async () => {
+  const fetchCalls = [];
+  const reportPath = '/Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md';
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/sessions/session_help/turns') {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({
+            type: 'command',
+            command: {
+              name: 'help',
+              action: 'show',
+              message: [
+                'Supported commands:',
+                '- `/help`',
+                '- `/goal`',
+                `Full guide: [Codex Web help](${reportPath})`,
+              ].join('\n'),
+              goal: null,
+            },
+            session: {
+              id: 'session_help',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              timeline: [
+                { id: 'command_user_help', kind: 'message', role: 'user', label: 'You', meta: 'command', text: '/help' },
+                {
+                  id: 'command_help_show',
+                  kind: 'message',
+                  role: 'system',
+                  label: '/help',
+                  meta: 'show',
+                  text: [
+                    'Supported commands:',
+                    '- `/help`',
+                    '- `/goal`',
+                    `Full guide: [Codex Web help](${reportPath})`,
+                  ].join('\n'),
+                },
+              ],
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_help';
+  api.state.currentSession = { id: 'session_help', cwd: '/repo' };
+  api.state.prompt = '/help';
+
+  await api.onComposerSubmit({
+    preventDefault() {},
+  });
+
+  const latest = api.state.timeline.at(-1);
+  const html = api.renderTimelineItem(latest);
+  assert.deepEqual(fetchCalls.map((call) => call.path), ['/api/sessions/session_help/turns']);
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.turnId, null);
+  assert.equal(latest?.role, 'system');
+  assert.equal(latest?.label, '/help');
+  assert.match(html, /<code>\/help<\/code>/u);
+  assert.match(html, /data-report-path="\/Users\/chenyanshan\/\.codex-web\/reports\/codex-mobile-web-app\/2026-05-22\/codex-web-help\.md"/u);
+});
+
 test('settings drawer exposes runtime reload and posts to the runtime endpoint', async () => {
   const app = await readFile(appUrl, 'utf8');
   const fetchCalls = [];
@@ -615,6 +828,43 @@ test('report viewer uses its own scroll container instead of the outer document'
   };
 
   assert.equal(api.getActiveScrollContainer({}), reportViewer);
+});
+
+test('desktop workspace CSS creates a two-pane layout on computer windows at 820px', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /@media \(min-width:\s*820px\) and \(hover:\s*hover\) and \(pointer:\s*fine\)/u);
+  assert.match(styles, /\.desktop-workspace\s*\{[^}]*display:\s*grid;/su);
+  assert.match(styles, /\.desktop-workspace\s*\{[^}]*grid-template-columns:\s*minmax\(280px,\s*340px\) minmax\(0,\s*1fr\);/su);
+  assert.match(styles, /\.desktop-sidebar\s*\{[^}]*overflow:\s*hidden;/su);
+  assert.match(styles, /\.desktop-session-list\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.match(styles, /\.desktop-chat-pane\s*\{[^}]*position:\s*relative;/su);
+});
+
+test('desktop composer is anchored inside the right chat pane', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /@media \(min-width:\s*820px\) and \(hover:\s*hover\) and \(pointer:\s*fine\)[\s\S]*\.desktop-chat-pane \.composer-wrap\s*\{[^}]*position:\s*absolute;/su);
+  assert.match(styles, /@media \(min-width:\s*820px\) and \(hover:\s*hover\) and \(pointer:\s*fine\)[\s\S]*\.desktop-chat-pane \.composer-wrap\s*\{[^}]*left:\s*0;/su);
+  assert.match(styles, /@media \(min-width:\s*820px\) and \(hover:\s*hover\) and \(pointer:\s*fine\)[\s\S]*\.desktop-chat-pane \.composer-wrap\s*\{[^}]*right:\s*0;/su);
+  assert.match(styles, /@media \(min-width:\s*820px\) and \(hover:\s*hover\) and \(pointer:\s*fine\)[\s\S]*\.desktop-chat-pane \.timeline\s*\{[^}]*padding-bottom:\s*var\(--composer-offset\);/su);
+});
+
+test('mobile session navigation still clears active session when returning to list', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 390 });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Mobile only' }];
+
+  api.showSessionList();
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.sessionId, null);
+  assert.equal(api.state.currentSession, null);
+  assert.equal(api.state.timeline.length, 0);
 });
 
 test('composer bottom gap stays tight above the keyboard safe area', async () => {
@@ -1605,6 +1855,66 @@ test('stream failures render a visible timeline error instead of only composer s
   assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
 });
 
+test('stream failures persist visible errors through the backend session timeline', async () => {
+  const fetchCalls: Array<{ path: string; options: any }> = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/turns/turn_stream_error/events') {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: 'internal_error', message: 'SSE failed hard' }),
+        };
+      }
+      if (path === '/api/sessions/session_1/timeline') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            entry: {
+              id: 'error_turn_stream_error',
+              kind: 'message',
+              role: 'system',
+              label: 'Error',
+              meta: 'failed',
+              text: 'SSE failed hard',
+              severity: 'error',
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.turnId = 'turn_stream_error';
+  api.state.pendingTurn = true;
+  api.state.streamWasBackgrounded = false;
+
+  await api.streamTurnEvents('turn_stream_error');
+  await flushMicrotasks();
+
+  const persistCall = fetchCalls.find((call) => call.path === '/api/sessions/session_1/timeline');
+  assert.ok(persistCall);
+  assert.equal(persistCall?.options.method, 'POST');
+  assert.deepEqual(JSON.parse(persistCall?.options.body), {
+    id: 'error_turn_stream_error',
+    role: 'system',
+    label: 'Error',
+    meta: 'failed',
+    text: 'SSE failed hard',
+    severity: 'error',
+    afterHistoryIndex: 0,
+  });
+  assert.equal(api.state.timeline.find((item) => item.id === 'error_turn_stream_error')?.text, 'SSE failed hard');
+});
+
 test('thread work updates stay off the timeline and surface failures as visible error messages', async () => {
   const { api } = await loadAppHarness();
 
@@ -1690,6 +2000,23 @@ test('composer API failures render a visible timeline error', async () => {
           json: async () => ({ error: 'internal_error', message: 'Codex refused the first turn' }),
         };
       }
+      if (path === '/api/sessions/session_new/timeline') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            entry: {
+              id: 'error_request_session_new',
+              kind: 'message',
+              role: 'system',
+              label: 'Error',
+              meta: 'failed',
+              text: 'Codex refused the first turn',
+              severity: 'error',
+            },
+          }),
+        };
+      }
       return { ok: true, status: 204, json: async () => ({}) };
     },
   });
@@ -1703,7 +2030,7 @@ test('composer API failures render a visible timeline error', async () => {
   await api.onComposerSubmit({ preventDefault() {} });
 
   const errorItem = api.state.timeline.find((item) => item.id.startsWith('error_'));
-  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_new/turns']);
+  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_new/turns', '/api/sessions/session_new/timeline']);
   assert.equal(api.state.pendingTurn, false);
   assert.equal(errorItem?.kind, 'message');
   assert.equal(errorItem?.role, 'system');
@@ -1889,6 +2216,23 @@ test('new first-turn rollout errors report after the recovery delay when history
           }),
         };
       }
+      if (path === '/api/sessions/session_new/timeline') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            entry: {
+              id: 'error_request_session_new',
+              kind: 'message',
+              role: 'system',
+              label: 'Error',
+              meta: 'failed',
+              text: 'failed to read thread: thread-store internal error: rollout at /Users/test/.codex/sessions/rollout.jsonl is empty',
+              severity: 'error',
+            },
+          }),
+        };
+      }
       return { ok: true, status: 204, json: async () => ({}) };
     },
   });
@@ -1904,7 +2248,7 @@ test('new first-turn rollout errors report after the recovery delay when history
   await flushMicrotasks();
 
   const errorItem = api.state.timeline.find((item) => item.id.startsWith('error_'));
-  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_new/turns', '/api/sessions/session_new']);
+  assert.deepEqual(fetchCalls, ['/api/sessions', '/api/sessions/session_new/turns', '/api/sessions/session_new', '/api/sessions/session_new/timeline']);
   assert.equal(api.state.pendingTurn, false);
   assert.equal(errorItem?.kind, 'message');
   assert.equal(errorItem?.role, 'system');
@@ -2163,6 +2507,41 @@ test('history hydration includes recent assistant app-server messages', async ()
   );
 });
 
+test('history hydration prefers backend-managed session timeline entries', async () => {
+  const { api } = await loadAppHarness();
+
+  const timeline = api.hydrateTimelineFromSession({
+    id: 'session_timeline_backend',
+    timeline: [
+      { id: 'history_1', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Earlier question' },
+      { id: 'history_2', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Earlier answer' },
+      { id: 'cmd_user_1', kind: 'message', role: 'user', label: 'You', meta: 'command', text: '/goal resume' },
+      { id: 'cmd_system_1', kind: 'message', role: 'system', label: '/goal', meta: 'resume', text: 'Goal resumed: ship slash goal support' },
+    ],
+    thread: {
+      turns: [
+        {
+          id: 'turn_ignored',
+          items: [
+            { type: 'message', role: 'user', text: 'Stale question' },
+            { type: 'message', role: 'assistant', text: 'Stale answer' },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.equal(
+    JSON.stringify(timeline.map((item) => [item.role, item.text])),
+    JSON.stringify([
+      ['user', 'Earlier question'],
+      ['assistant', 'Earlier answer'],
+      ['user', '/goal resume'],
+      ['system', 'Goal resumed: ship slash goal support'],
+    ]),
+  );
+});
+
 test('history hydration falls back to the full available conversation when fewer than two answered turns exist', async () => {
   const { api } = await loadAppHarness();
 
@@ -2287,6 +2666,359 @@ test('session refresh keeps historical failed turn messages when later turns suc
   assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
 });
 
+test('session refresh preserves backend goal and error messages that are not present in thread history', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_goal') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_goal',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              timeline: [
+                { id: 'history_turn_1_0', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Original question' },
+                { id: 'history_turn_1_1', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Original answer' },
+                { id: 'command_goal_resume', kind: 'message', role: 'system', label: '/goal', meta: 'resume', text: 'Goal resumed: ship slash goal support' },
+                { id: 'error_turn_stale', kind: 'message', role: 'system', severity: 'error', label: 'Error', meta: 'failed', text: 'Load failed' },
+              ],
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Original question' },
+                      { type: 'message', role: 'assistant', text: 'Original answer' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_goal';
+  api.state.currentSession = { id: 'session_goal', cwd: '/repo' };
+
+  await api.refreshCurrentSessionMetadata({ hydrateTimeline: true });
+
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Original answer/u);
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Goal resumed: ship slash goal support/u);
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Load failed/u);
+});
+
+test('session refresh preserves backend goal and error messages when hydrated history adds missing assistant replies', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_goal') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_goal',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              timeline: [
+                { id: 'history_turn_1_0', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Original question' },
+                { id: 'history_turn_1_1', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Original answer' },
+                { id: 'command_goal_resume', kind: 'message', role: 'system', label: '/goal', meta: 'resume', text: 'Goal resumed: ship slash goal support' },
+                { id: 'error_turn_stale', kind: 'message', role: 'system', severity: 'error', label: 'Error', meta: 'failed', text: 'Load failed' },
+              ],
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Original question' },
+                      { type: 'message', role: 'assistant', text: 'Original answer' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_goal';
+  api.state.currentSession = { id: 'session_goal', cwd: '/repo' };
+
+  await api.refreshCurrentSessionMetadata({ hydrateTimeline: true });
+
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Original answer/u);
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Goal resumed: ship slash goal support/u);
+  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Load failed/u);
+});
+
+test('session refresh keeps backend goal and error messages in place instead of pinning them to the bottom', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_goal') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_goal',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              timeline: [
+                { id: 'history_turn_1_0', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Earlier question' },
+                { id: 'history_turn_1_1', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Earlier answer' },
+                { id: 'command_goal_resume', kind: 'message', role: 'system', label: '/goal', meta: 'resume', text: 'Goal resumed: ship slash goal support' },
+                { id: 'error_turn_stale', kind: 'message', role: 'system', severity: 'error', label: 'Error', meta: 'failed', text: 'Load failed' },
+                { id: 'history_turn_2_2', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Later question' },
+                { id: 'history_turn_2_3', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Later answer' },
+              ],
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Earlier question' },
+                      { type: 'message', role: 'assistant', text: 'Earlier answer' },
+                    ],
+                  },
+                  {
+                    id: 'turn_2',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Later question' },
+                      { type: 'message', role: 'assistant', text: 'Later answer' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_goal';
+  api.state.currentSession = { id: 'session_goal', cwd: '/repo' };
+
+  await api.refreshCurrentSessionMetadata({ hydrateTimeline: true });
+
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'Earlier question',
+    'Earlier answer',
+    'Goal resumed: ship slash goal support',
+    'Load failed',
+    'Later question',
+    'Later answer',
+  ]));
+});
+
+test('session refresh preserves backend slash commands before goal resumed system messages', async () => {
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_goal') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_goal',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              timeline: [
+                { id: 'history_turn_1_0', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Earlier question' },
+                { id: 'history_turn_1_1', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Earlier answer' },
+                { id: 'local_user_goal_resume', kind: 'message', role: 'user', label: 'You', meta: 'pending', text: '/goal resume' },
+                { id: 'command_goal_resume', kind: 'message', role: 'system', label: '/goal', meta: 'resume', text: 'Goal resumed: ship slash goal support' },
+              ],
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Earlier question' },
+                      { type: 'message', role: 'assistant', text: 'Earlier answer' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_goal';
+  api.state.currentSession = { id: 'session_goal', cwd: '/repo' };
+
+  await api.refreshCurrentSessionMetadata({ hydrateTimeline: true });
+
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'Earlier question',
+    'Earlier answer',
+    '/goal resume',
+    'Goal resumed: ship slash goal support',
+  ]));
+});
+
+test('expanding session history uses backend help and goal messages in the visible timeline', async () => {
+  const { api } = await loadAppHarness();
+  const session = {
+    id: 'session_history_expand_with_commands',
+    firstUserInput: 'Preview only',
+    thread: {
+      turns: [
+        {
+          id: 'turn_1',
+          items: [
+            { type: 'message', role: 'user', text: 'First user question' },
+            { type: 'message', role: 'assistant', text: 'First assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_2',
+          items: [
+            { type: 'message', role: 'user', text: 'Second user question' },
+            { type: 'message', role: 'assistant', text: 'Second assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_3',
+          items: [
+            { type: 'message', role: 'user', text: 'Third user question' },
+            { type: 'message', role: 'assistant', text: 'Third assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_4',
+          items: [
+            { type: 'message', role: 'user', text: 'Newest user question' },
+            { type: 'message', role: 'assistant', text: 'Newest assistant answer' },
+          ],
+        },
+      ],
+    },
+  };
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = session.id;
+  api.state.currentSession = session;
+  api.restoreTimelineForSession(session);
+  api.state.timeline = [
+    { id: 'history_turn_2_2', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Second user question' },
+    { id: 'history_turn_2_3', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Second assistant answer' },
+    { id: 'history_turn_3_4', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Third user question' },
+    { id: 'history_turn_3_5', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Third assistant answer' },
+    { id: 'history_turn_4_6', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Newest user question' },
+    { id: 'history_turn_4_7', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Newest assistant answer' },
+  ];
+
+  assert.equal(api.showMoreSessionHistory(), true);
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'Second user question',
+    'Second assistant answer',
+    'Third user question',
+    'Third assistant answer',
+    'Newest user question',
+    'Newest assistant answer',
+  ]));
+
+  assert.equal(api.showMoreSessionHistory(), true);
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'First user question',
+    'First assistant answer',
+    'Second user question',
+    'Second assistant answer',
+    'Third user question',
+    'Third assistant answer',
+    'Newest user question',
+    'Newest assistant answer',
+  ]));
+});
+
+test('expanding session history uses backend slash commands before goal resumed system messages', async () => {
+  const { api } = await loadAppHarness();
+  const session = {
+    id: 'session_history_expand_with_goal_resume_command',
+    firstUserInput: 'Preview only',
+    thread: {
+      turns: [
+        {
+          id: 'turn_1',
+          items: [
+            { type: 'message', role: 'user', text: 'First user question' },
+            { type: 'message', role: 'assistant', text: 'First assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_2',
+          items: [
+            { type: 'message', role: 'user', text: 'Second user question' },
+            { type: 'message', role: 'assistant', text: 'Second assistant answer' },
+          ],
+        },
+        {
+          id: 'turn_3',
+          items: [
+            { type: 'message', role: 'user', text: 'Third user question' },
+            { type: 'message', role: 'assistant', text: 'Third assistant answer' },
+          ],
+        },
+      ],
+    },
+  };
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = session.id;
+  api.state.currentSession = session;
+  api.restoreTimelineForSession(session);
+  api.state.timeline = [
+    { id: 'history_turn_2_2', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Second user question' },
+    { id: 'history_turn_2_3', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Second assistant answer' },
+    { id: 'history_turn_3_4', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Third user question' },
+    { id: 'history_turn_3_5', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Third assistant answer' },
+  ];
+
+  assert.equal(api.showMoreSessionHistory(), true);
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'First user question',
+    'First assistant answer',
+    'Second user question',
+    'Second assistant answer',
+    'Third user question',
+    'Third assistant answer',
+  ]));
+});
+
 test('session history defaults to two recent exchanges and expands older history on demand', async () => {
   const { api } = await loadAppHarness();
   const session = {
@@ -2392,6 +3124,364 @@ test('session list defaults to favorites and supports all sessions plus favorite
   assert.match(app, /function toggleSessionFavorite\(sessionId\)/u);
   assert.match(app, /async function archiveSession\(sessionId\)/u);
   assert.match(app, /apiFetch\(`\/api\/sessions\/\$\{encodeURIComponent\(sessionId\)\}`,\s*\{\s*method:\s*'DELETE'/su);
+});
+
+test('layout mode uses desktop workspace on pointer-based computer windows', async () => {
+  const { api, context } = await loadAppHarness({ viewportWidth: 900, desktopPointer: true });
+
+  assert.equal(api.DESKTOP_WORKSPACE_MIN_WIDTH, 820);
+  assert.equal(api.isDesktopLayout(), true);
+
+  context.window.innerWidth = 819;
+  assert.equal(api.isDesktopLayout(), false);
+
+  context.window.innerWidth = 900;
+  context.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  assert.equal(api.isDesktopLayout(), false);
+});
+
+test('desktop resize preserves active session while mobile resize maps back to chat', async () => {
+  const { api, context } = await loadAppHarness({ viewportWidth: 1200, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+
+  api.handleLayoutResize();
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.sessionId, 'session_1');
+
+  context.window.innerWidth = 390;
+  api.handleLayoutResize();
+
+  assert.equal(api.state.view, 'chat');
+  assert.equal(api.state.sessionId, 'session_1');
+  assert.equal(api.state.currentSession?.id, 'session_1');
+});
+
+test('desktop renders a persistent session sidebar and chat pane', async () => {
+  const { api, context } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessions = [
+    { id: 'session_1', cwd: '/repo/a', projectName: 'Repo A', favorite: true, lastUserInput: 'Build feature', updatedAt: 20, settings: { metadata: {} } },
+    { id: 'session_2', cwd: '/repo/b', projectName: 'Repo B', favorite: true, lastUserInput: 'Fix bug', updatedAt: 10, settings: { metadata: {} } },
+  ];
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = api.state.sessions[0];
+  api.state.timeline = [
+    { id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Ready' },
+  ];
+
+  api.render();
+
+  assert.match(context.document.querySelector('#app').innerHTML, /class="desktop-workspace"/u);
+  assert.match(context.document.querySelector('#app').innerHTML, /class="desktop-sidebar"/u);
+  assert.match(context.document.querySelector('#app').innerHTML, /class="desktop-chat-pane"/u);
+  assert.match(context.document.querySelector('#app').innerHTML, /Build feature/u);
+  assert.match(context.document.querySelector('#app').innerHTML, /Ready/u);
+});
+
+test('mobile session view does not render desktop workspace wrappers', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 390 });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.render();
+
+  assert.doesNotMatch(api.context.document.querySelector('#app').innerHTML, /desktop-workspace/u);
+  assert.doesNotMatch(api.context.document.querySelector('#app').innerHTML, /desktop-sidebar/u);
+  assert.doesNotMatch(api.context.document.querySelector('#app').innerHTML, /desktop-chat-pane/u);
+});
+
+test('desktop session selection keeps the workspace view active', async () => {
+  const { api } = await loadAppHarness({
+    viewportWidth: 1280,
+    desktopPointer: true,
+    fetch: async (path) => {
+      assert.equal(path, '/api/sessions/session_2');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: 'session_2',
+            cwd: '/repo/two',
+            settings: { metadata: {} },
+            thread: {
+              turns: [
+                {
+                  id: 'turn_1',
+                  items: [
+                    { type: 'message', role: 'user', text: 'Desktop question' },
+                    { type: 'message', role: 'assistant', text: 'Desktop answer' },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessions = [
+    { id: 'session_1', cwd: '/repo/one', favorite: true, settings: { metadata: {} } },
+    { id: 'session_2', cwd: '/repo/two', favorite: true, settings: { metadata: {} } },
+  ];
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = api.state.sessions[0];
+
+  await api.selectSession('session_2');
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.sessionId, 'session_2');
+  assert.equal(api.state.currentSession?.id, 'session_2');
+  assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-workspace/u);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /Desktop answer/u);
+});
+
+test('desktop session selection stays two-pane on common narrow computer windows', async () => {
+  const { api } = await loadAppHarness({
+    viewportWidth: 900,
+    desktopPointer: true,
+    fetch: async (path) => {
+      assert.equal(path, '/api/sessions/session_2');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          session: {
+            id: 'session_2',
+            cwd: '/repo/two',
+            settings: { metadata: {} },
+            timeline: [
+              { id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Right pane switched' },
+            ],
+            thread: { turns: [] },
+          },
+        }),
+      };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessions = [
+    { id: 'session_1', cwd: '/repo/one', favorite: true, settings: { metadata: {} } },
+    { id: 'session_2', cwd: '/repo/two', favorite: true, settings: { metadata: {} } },
+  ];
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = api.state.sessions[0];
+
+  await api.selectSession('session_2');
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.sessionId, 'session_2');
+  assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-workspace/u);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-sidebar/u);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-chat-pane/u);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /Right pane switched/u);
+  assert.doesNotMatch(api.context.document.querySelector('#app').innerHTML, /chat-back-button/u);
+});
+
+test('desktop showSessionList keeps the active right pane instead of clearing it', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Still visible' }];
+
+  api.showSessionList();
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.sessionId, 'session_1');
+  assert.equal(api.state.currentSession?.id, 'session_1');
+  assert.equal(api.state.timeline.length, 1);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /Still visible/u);
+});
+
+test('desktop composer is larger, hides Send, and submits with Enter while preserving Shift Enter', async () => {
+  const [styles, app] = await Promise.all([
+    readFile(stylesUrl, 'utf8'),
+    readFile(appUrl, 'utf8'),
+  ]);
+
+  assert.match(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.composer\s*\{[^}]*width:\s*min\(100%,\s*960px\);/su);
+  assert.match(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.compact-composer-row textarea\s*\{[^}]*min-height:\s*96px;/su);
+  assert.match(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.compact-composer-row textarea\s*\{[^}]*max-height:\s*220px;/su);
+  assert.match(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.compact-send\s*\{[^}]*display:\s*none;/su);
+  assert.match(app, /function handlePromptKeydown\(event\)/u);
+  assert.match(app, /promptInput\.addEventListener\('keydown', handlePromptKeydown\)/u);
+  assert.match(app, /if \(!isDesktopLayout\(\) \|\| event\.key !== 'Enter' \|\| event\.shiftKey/u);
+  assert.match(app, /document\.querySelector\('#composer-form'\)\?\.requestSubmit\(\)/u);
+});
+
+test('desktop prompt Enter submits while Shift Enter keeps editing', async () => {
+  let submitCount = 0;
+  const { api, context } = await loadAppHarness({ viewportWidth: 900, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.render();
+
+  const composerForm = {
+    requestSubmit() {
+      submitCount += 1;
+    },
+  };
+  context.__elements.set('#composer-form', composerForm);
+
+  const enterEvent = {
+    key: 'Enter',
+    shiftKey: false,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+  };
+  api.handlePromptKeydown(enterEvent);
+
+  assert.equal(enterEvent.prevented, true);
+  assert.equal(submitCount, 1);
+
+  const shiftEnterEvent = {
+    key: 'Enter',
+    shiftKey: true,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+  };
+  api.handlePromptKeydown(shiftEnterEvent);
+
+  assert.equal(shiftEnterEvent.prevented, false);
+  assert.equal(submitCount, 1);
+});
+
+test('desktop new session opens an inline sidebar launcher', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.cwd = '/repo/current';
+  api.openNewSessionPage();
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopNewSessionOpen, true);
+  assert.equal(api.state.newCwd, '/repo/current');
+  assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-new-session-launcher/u);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /id="new-session-form"/u);
+});
+
+test('mobile new session still uses the full-screen new page', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 390 });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.openNewSessionPage();
+
+  assert.equal(api.state.view, 'new');
+  assert.equal(api.state.desktopNewSessionOpen, false);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /class="new-session-page"/u);
+  assert.doesNotMatch(api.context.document.querySelector('#app').innerHTML, /desktop-new-session-launcher/u);
+});
+
+test('desktop new session submit keeps the workspace shell and activates the draft session', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.desktopNewSessionOpen = true;
+  api.state.newCwd = '/repo/new';
+
+  api.onNewSessionSubmit({
+    preventDefault() {},
+  });
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopNewSessionOpen, false);
+  assert.equal(api.state.cwd, '/repo/new');
+  assert.equal(api.state.sessionId, null);
+  assert.equal(api.state.currentSession, null);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-workspace/u);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /No context yet/u);
+});
+
+test('desktop app settings opens as a panel without clearing the active session', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Keep me' }];
+
+  api.openAppSettingsPage();
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopSettingsOpen, true);
+  assert.equal(api.state.sessionId, 'session_1');
+  assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-settings-panel/u);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /Keep me/u);
+});
+
+test('desktop reports open as a right-pane overlay and close back to workspace', async () => {
+  const { api } = await loadAppHarness({
+    viewportWidth: 1280,
+    desktopPointer: true,
+    fetch: async (url) => {
+      if (String(url).startsWith('/api/reports')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [] }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+      };
+    },
+  });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_a';
+  api.state.currentSession = { id: 'session_a', cwd: '/Users/alice/work/project-a', projectName: 'Project A', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Workspace text' }];
+
+  await api.openReportsPage({ project: 'project-a', returnView: 'chat' });
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopOverlay, 'reports');
+  assert.equal(api.state.reportProject, 'project-a');
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-overlay/u);
+
+  api.closeReportsPage();
+
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopOverlay, null);
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.match(api.context.document.querySelector('#app').innerHTML, /Workspace text/u);
 });
 
 test('session topbar shows Sort only on Favorites and keeps New visually neutral', async () => {
@@ -2629,11 +3719,12 @@ test('report viewer renders markdown and sandboxed html reports', async () => {
     kind: 'markdown',
     favorite: false,
   };
-  api.state.currentReportContent = '# Done\n\n- **item**\n';
+  api.state.currentReportContent = '# Done\n\n- **item**\n\n| Col A | Col B | Col C |\n| :--- | :---: | ---: |\n| A \\| B | `x|y` | Gamma |\n';
   let html = api.renderReportViewer().innerHTML;
   assert.match(html, /<div class="report-document markdown-body">/u);
   assert.match(html, /<h1>Done<\/h1>/u);
   assert.match(html, /<strong>item<\/strong>/u);
+  assert.match(html, /<table><thead><tr><th style="text-align: left;">Col A<\/th><th style="text-align: center;">Col B<\/th><th style="text-align: right;">Col C<\/th><\/tr><\/thead><tbody><tr><td style="text-align: left;">A \| B<\/td><td style="text-align: center;"><code>x\|y<\/code><\/td><td style="text-align: right;">Gamma<\/td><\/tr><\/tbody><\/table>/u);
 
   api.state.currentReport = {
     id: 'project-a/2026-05-19/audit.html',
@@ -2645,6 +3736,49 @@ test('report viewer renders markdown and sandboxed html reports', async () => {
   api.state.currentReportContent = '<h1>Audit</h1>';
   html = api.renderReportViewer().innerHTML;
   assert.match(html, /<iframe class="report-frame" sandbox="" srcdoc="&lt;h1&gt;Audit&lt;\/h1&gt;"><\/iframe>/u);
+});
+
+test('report viewer renders the shipped table verification report as real tables', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.currentReport = {
+    id: 'codex-mobile-web-app/2026-05-21/markdown-table-render-report.md',
+    project: 'codex-mobile-web-app',
+    title: 'markdown-table-render-report',
+    kind: 'markdown',
+    favorite: false,
+  };
+  api.state.currentReportContent = [
+    '# Markdown Table Render Report',
+    '',
+    '## What Changed',
+    '',
+    '| Area | Status | Notes |',
+    '| :--- | :---: | ---: |',
+    '| Basic markdown tables | OK | `table`, `thead`, `tbody` render |',
+    '| Alignment syntax | OK | `:---`, `:---:`, `---:` supported |',
+    '| Escaped pipes | OK | `\\|` stays inside the same cell |',
+    '| Inline code pipes | OK | `` `x|y` `` does not split columns |',
+    '',
+    '## Mixed Real-World Example',
+    '',
+    '| Field | Example | Result |',
+    '| :--- | :---: | ---: |',
+    '| Name | `renderMarkdown()` | pass |',
+    '| Escaped text | A \\| B | pass |',
+    '| Code sample | `foo|bar` | pass |',
+    '| Numeric column | 42 | aligned right |',
+  ].join('\n');
+
+  const html = api.renderReportViewer().innerHTML;
+  assert.match(html, /<table>/u);
+  assert.match(html, /<th style="text-align: left;">Area<\/th>/u);
+  assert.match(html, /<td style="text-align: left;">Basic markdown tables<\/td>/u);
+  assert.match(html, /<td style="text-align: right;"><code>table<\/code>, <code>thead<\/code>, <code>tbody<\/code> render<\/td>/u);
+  assert.match(html, /<td style="text-align: left;">Escaped pipes<\/td>/u);
+  assert.match(html, /<td style="text-align: right;"><code>\\\|<\/code> stays inside the same cell<\/td>/u);
+  assert.match(html, /<td style="text-align: center;"><code>renderMarkdown\(\)<\/code><\/td>/u);
+  assert.match(html, /<td style="text-align: center;"><code>foo\|bar<\/code><\/td>/u);
 });
 
 test('assistant report paths open as app report links', async () => {
@@ -2911,6 +4045,177 @@ test('all tab does not show stale favorites while full sessions are loading', as
   assert.equal(api.state.sessionsLoading, false);
   assert.equal(api.state.sessionsScope, 'all');
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session', 'time_session']));
+});
+
+test('all tab rerenders in time order when session detail refresh finishes after returning to list', async () => {
+  let resolveSessionDetail: ((response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void) | null = null;
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_recent') {
+        return await new Promise((resolve) => {
+          resolveSessionDetail = resolve;
+        });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sortMode = 'time';
+  api.state.sessionsScope = 'all';
+  api.state.sessionsLoadedByScope.all = true;
+  api.state.sessions = [
+    { id: 'session_other', cwd: '/repo/other', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
+    { id: 'session_recent', cwd: '/repo/recent', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } },
+  ];
+  api.state.sessionsByScope.all = [...api.state.sessions];
+
+  api.render();
+  const selectPromise = api.selectSession('session_recent');
+  api.showSessionList();
+
+  assert.match(context.document.querySelector('#app').innerHTML, /Other prompt[\s\S]*Old prompt/u);
+
+  assert.equal(typeof resolveSessionDetail, 'function');
+  resolveSessionDetail({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      session: {
+        id: 'session_recent',
+        cwd: '/repo/recent',
+        lastUserInput: 'Newest prompt',
+        lastInputAt: 300,
+        updatedAt: 300,
+        settings: { metadata: {} },
+        thread: { turns: [] },
+      },
+    }),
+  });
+  await selectPromise;
+  await flushMicrotasks();
+
+  assert.equal(api.state.view, 'sessions');
+  assert.match(context.document.querySelector('#app').innerHTML, /Newest prompt[\s\S]*Other prompt/u);
+});
+
+test('all tab rerenders in time order when background session refresh finishes after returning to list', async () => {
+  let resolveSessionRefresh: ((response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void) | null = null;
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_recent') {
+        return await new Promise((resolve) => {
+          resolveSessionRefresh = resolve;
+        });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sortMode = 'time';
+  api.state.sessionsScope = 'all';
+  api.state.sessionsLoadedByScope.all = true;
+  api.state.sessionId = 'session_recent';
+  api.state.currentSession = { id: 'session_recent', cwd: '/repo/recent', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } };
+  api.state.sessions = [
+    { id: 'session_other', cwd: '/repo/other', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
+    api.state.currentSession,
+  ];
+  api.state.sessionsByScope.all = [...api.state.sessions];
+  api.state.timeline = [
+    { id: 'm1', kind: 'message', role: 'user', label: 'You', meta: 'pending', text: 'Old prompt' },
+  ];
+
+  api.render();
+  const refreshPromise = api.refreshCurrentSessionMetadata();
+  api.showSessionList();
+
+  assert.match(context.document.querySelector('#app').innerHTML, /Other prompt[\s\S]*Old prompt/u);
+
+  assert.equal(typeof resolveSessionRefresh, 'function');
+  resolveSessionRefresh({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      session: {
+        id: 'session_recent',
+        cwd: '/repo/recent',
+        lastUserInput: 'Newest prompt',
+        lastInputAt: 300,
+        updatedAt: 300,
+        settings: { metadata: {} },
+        thread: { turns: [] },
+      },
+    }),
+  });
+  await refreshPromise;
+  await flushMicrotasks();
+
+  assert.equal(api.state.view, 'sessions');
+  assert.match(context.document.querySelector('#app').innerHTML, /Newest prompt[\s\S]*Other prompt/u);
+});
+
+test('all tab uses newer updatedAt when refreshed session omits lastInputAt', async () => {
+  let resolveSessionRefresh: ((response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void) | null = null;
+  const { api, context } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_recent') {
+        return await new Promise((resolve) => {
+          resolveSessionRefresh = resolve;
+        });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sortMode = 'time';
+  api.state.sessionsScope = 'all';
+  api.state.sessionsLoadedByScope.all = true;
+  api.state.sessionId = 'session_recent';
+  api.state.currentSession = { id: 'session_recent', cwd: '/repo/recent', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } };
+  api.state.sessions = [
+    { id: 'session_other', cwd: '/repo/other', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
+    api.state.currentSession,
+  ];
+  api.state.sessionsByScope.all = [...api.state.sessions];
+  api.state.timeline = [
+    { id: 'm1', kind: 'message', role: 'user', label: 'You', meta: 'pending', text: 'Old prompt' },
+  ];
+
+  api.render();
+  const refreshPromise = api.refreshCurrentSessionMetadata();
+  api.showSessionList();
+
+  assert.match(context.document.querySelector('#app').innerHTML, /Other prompt[\s\S]*Old prompt/u);
+
+  assert.equal(typeof resolveSessionRefresh, 'function');
+  resolveSessionRefresh({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      session: {
+        id: 'session_recent',
+        cwd: '/repo/recent',
+        lastUserInput: 'Newest prompt',
+        updatedAt: 300,
+        settings: { metadata: {} },
+        thread: { turns: [] },
+      },
+    }),
+  });
+  await refreshPromise;
+  await flushMicrotasks();
+
+  assert.equal(api.state.view, 'sessions');
+  assert.match(context.document.querySelector('#app').innerHTML, /Newest prompt[\s\S]*Other prompt/u);
 });
 
 test('favorite sort mode drafts manual order and saves it explicitly', async () => {
@@ -3180,6 +4485,8 @@ test('archive action requires a confirmation dialog before deleting a session', 
   assert.match(app, /requestArchiveSession\(button\.getAttribute\('data-session-archive-request-id'\) \|\| ''\)/u);
   assert.match(app, /archiveSession\(button\.getAttribute\('data-session-archive-confirm-id'\) \|\| ''\)/u);
   assert.doesNotMatch(app, /archiveSession\(button\.getAttribute\('data-session-archive-id'\) \|\| ''\)/u);
+  assert.match(app, /<button class="ghost compact-button" type="button" id="archive-cancel-button">Cancel<\/button>/u);
+  assert.match(app, /<button class="danger compact-button" type="button" data-session-archive-confirm-id="\$\{escapeAttribute\(session\.id\)\}">Archive<\/button>/u);
   assert.match(styles, /\.modal-backdrop\s*\{/u);
   assert.match(styles, /\.confirm-dialog\s*\{/u);
 });
@@ -3887,6 +5194,74 @@ test('opening a session restores running status when the session has an active t
   assert.ok(fetchCalls.includes('/api/turns/turn_active/events'));
 });
 
+test('opening a session uses backend timeline command messages without dropping them', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions/session_goal') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_goal',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              timeline: [
+                { id: 'history_turn_1_0', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Original question' },
+                { id: 'history_turn_1_1', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Original answer' },
+                { id: 'command_help_show', kind: 'message', role: 'system', label: '/help', meta: 'show', text: 'Supported commands: /help /goal' },
+                { id: 'command_goal_show', kind: 'message', role: 'system', label: '/goal', meta: 'show', text: 'Goal (active): ship slash goal support' },
+                { id: 'history_turn_2_2', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Later question' },
+                { id: 'history_turn_2_3', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Later answer' },
+              ],
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Original question' },
+                      { type: 'message', role: 'assistant', text: 'Original answer' },
+                    ],
+                  },
+                  {
+                    id: 'turn_2',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Later question' },
+                      { type: 'message', role: 'assistant', text: 'Later answer' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessions = [{ id: 'session_goal', cwd: '/repo', settings: { metadata: {} } }];
+
+  await api.selectSession('session_goal');
+
+  assert.ok(fetchCalls.includes('/api/sessions/session_goal'));
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'Original question',
+    'Original answer',
+    'Supported commands: /help /goal',
+    'Goal (active): ship slash goal support',
+    'Later question',
+    'Later answer',
+  ]));
+});
+
 test('backgrounded PWA stream failures keep the active turn recoverable', async () => {
   const { api } = await loadAppHarness({
     fetch: async () => {
@@ -3989,6 +5364,7 @@ async function loadAppHarness(overrides = {}) {
   const context = {
     console,
     __appRenderCount: 0,
+    __elements: elements,
     localStorage: {
       getItem: (key) => storage.get(key) || null,
       setItem: (key, value) => {
@@ -4020,7 +5396,14 @@ async function loadAppHarness(overrides = {}) {
       }),
     },
     window: {
+      innerWidth: overrides.viewportWidth ?? 390,
       addEventListener() {},
+      matchMedia: overrides.matchMedia || ((query: string) => ({
+        matches: Boolean(overrides.desktopPointer) && query === '(hover: hover) and (pointer: fine)',
+        media: query,
+        addEventListener() {},
+        removeEventListener() {},
+      })),
       scrollTo() {},
     },
     navigator: {
@@ -4045,6 +5428,13 @@ globalThis.__codexWebTest = {
   state,
   context: globalThis,
   render: typeof render === 'function' ? render : null,
+  DESKTOP_WORKSPACE_MIN_WIDTH: typeof DESKTOP_WORKSPACE_MIN_WIDTH === 'number' ? DESKTOP_WORKSPACE_MIN_WIDTH : null,
+  isDesktopLayout: typeof isDesktopLayout === 'function' ? isDesktopLayout : null,
+  handleLayoutResize: typeof handleLayoutResize === 'function' ? handleLayoutResize : null,
+  renderDesktopWorkspace: typeof renderDesktopWorkspace === 'function' ? renderDesktopWorkspace : null,
+  renderDesktopSidebar: typeof renderDesktopSidebar === 'function' ? renderDesktopSidebar : null,
+  renderDesktopChatPane: typeof renderDesktopChatPane === 'function' ? renderDesktopChatPane : null,
+  ensureDesktopActiveSession: typeof ensureDesktopActiveSession === 'function' ? ensureDesktopActiveSession : null,
   MAX_TIMELINE_CACHE_MAP_ITEMS: typeof MAX_TIMELINE_CACHE_MAP_ITEMS === 'number' ? MAX_TIMELINE_CACHE_MAP_ITEMS : null,
   MAX_TIMELINE_SUMMARY_TEXT: typeof MAX_TIMELINE_SUMMARY_TEXT === 'number' ? MAX_TIMELINE_SUMMARY_TEXT : null,
   firstInputForSession,
@@ -4075,6 +5465,8 @@ globalThis.__codexWebTest = {
 	  handleReportsBackNavigation: typeof handleReportsBackNavigation === 'function' ? handleReportsBackNavigation : null,
 	  toggleReportFavorite: typeof toggleReportFavorite === 'function' ? toggleReportFavorite : null,
 	  showSessionList: typeof showSessionList === 'function' ? showSessionList : null,
+	  openAppSettingsPage: typeof openAppSettingsPage === 'function' ? openAppSettingsPage : null,
+	  openNewSessionPage: typeof openNewSessionPage === 'function' ? openNewSessionPage : null,
 	  openReportById: typeof openReportById === 'function' ? openReportById : null,
 	  closeReportViewer: typeof closeReportViewer === 'function' ? closeReportViewer : null,
   openReportByPath: typeof openReportByPath === 'function' ? openReportByPath : null,
@@ -4082,6 +5474,8 @@ globalThis.__codexWebTest = {
   setSessionSortMode: typeof setSessionSortMode === 'function' ? setSessionSortMode : null,
   selectSession: typeof selectSession === 'function' ? selectSession : null,
   onComposerSubmit: typeof onComposerSubmit === 'function' ? onComposerSubmit : null,
+  onNewSessionSubmit: typeof onNewSessionSubmit === 'function' ? onNewSessionSubmit : null,
+  handlePromptKeydown: typeof handlePromptKeydown === 'function' ? handlePromptKeydown : null,
   attachTimelineScrollTracking: typeof attachTimelineScrollTracking === 'function' ? attachTimelineScrollTracking : null,
   updateTimelineFollowState: typeof updateTimelineFollowState === 'function' ? updateTimelineFollowState : null,
   scrollTimelineToBottomIfFollowingLatest: typeof scrollTimelineToBottomIfFollowingLatest === 'function' ? scrollTimelineToBottomIfFollowingLatest : null,
