@@ -457,7 +457,11 @@ test('static root is public', async () => {
     const scriptResponse = await fetch(`${server.baseUrl}/app.js`);
     assert.equal(scriptResponse.status, 200);
     assert.match(scriptResponse.headers.get('content-type') ?? '', /^application\/javascript\b/i);
-    assert.match(await scriptResponse.text(), /localStorage|codexWebToken|fetch/u);
+    const script = await scriptResponse.text();
+    assert.match(script, /localStorage|codexWebToken|fetch/u);
+    const buildIdMatch = script.match(/const APP_BUILD_ID = '([^']+)'/u);
+    assert.ok(buildIdMatch?.[1]);
+    assert.notEqual(buildIdMatch?.[1], '__CODEX_WEB_BUILD_ID__');
 
     const styleResponse = await fetch(`${server.baseUrl}/styles.css`);
     assert.equal(styleResponse.status, 200);
@@ -472,7 +476,10 @@ test('static root is public', async () => {
     const serviceWorkerResponse = await fetch(`${server.baseUrl}/service-worker.js`);
     assert.equal(serviceWorkerResponse.status, 200);
     assert.match(serviceWorkerResponse.headers.get('content-type') ?? '', /^application\/javascript\b/i);
-    assert.match(await serviceWorkerResponse.text(), /self\.addEventListener/u);
+    const serviceWorker = await serviceWorkerResponse.text();
+    assert.match(serviceWorker, /self\.addEventListener/u);
+    assert.match(serviceWorker, new RegExp(`codex-web-static-${buildIdMatch?.[1]}`.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    assert.doesNotMatch(serviceWorker, /__CODEX_WEB_BUILD_ID__/u);
 
     const iconResponse = await fetch(`${server.baseUrl}/icon-192.png`);
     assert.equal(iconResponse.status, 200);
@@ -598,6 +605,351 @@ test('POST /api/sessions/:id/turns returns 404 without starting a replacement se
     assert.deepEqual(calls, [
       'startTurn:stale_thread',
     ]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('POST /api/sessions/:id/turns returns handled slash command results', async () => {
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      startTurn: async (sessionId: string, input: { text: string }) => ({
+        type: 'command',
+        command: {
+          name: input.text === '/help' ? 'help' : 'goal',
+          action: input.text === '/help' ? 'show' : 'set',
+          message: input.text === '/help'
+            ? 'Supported commands: /help, /goal. Full guide: /Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md'
+            : `Goal set from ${sessionId}: ${input.text}`,
+          goal: input.text === '/help'
+            ? null
+            : {
+              threadId: sessionId,
+              objective: 'ship goal commands',
+              status: 'active',
+            },
+        },
+        session: {
+          id: sessionId,
+          cwd: '/repo',
+          title: 'Goal Thread',
+          updatedAt: 1,
+          preview: input.text,
+          firstUserInput: input.text,
+          lastUserInput: input.text,
+          lastInputAt: 1,
+          favorite: false,
+          favoriteOrder: null,
+          settings: {},
+          thread: { threadId: sessionId, cwd: '/repo', title: 'Goal Thread', turns: [] },
+          timeline: [
+            { id: `command_user_${input.text === '/help' ? 'help' : 'goal'}`, kind: 'message', role: 'user', label: 'You', meta: 'command', text: input.text },
+            {
+              id: `command_system_${input.text === '/help' ? 'help' : 'goal'}`,
+              kind: 'message',
+              role: 'system',
+              label: input.text === '/help' ? '/help' : '/goal',
+              meta: input.text === '/help' ? 'show' : 'set',
+              text: input.text === '/help'
+                ? 'Supported commands: /help, /goal. Full guide: /Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md'
+                : `Goal set from ${sessionId}: ${input.text}`,
+            },
+          ],
+        },
+      }),
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_goal/turns`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text: '/goal ship goal commands' }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), {
+      type: 'command',
+      command: {
+        name: 'goal',
+        action: 'set',
+        message: 'Goal set from thread_goal: /goal ship goal commands',
+        goal: {
+          threadId: 'thread_goal',
+          objective: 'ship goal commands',
+          status: 'active',
+        },
+      },
+      session: {
+        id: 'thread_goal',
+        cwd: '/repo',
+        title: 'Goal Thread',
+        updatedAt: 1,
+        preview: '/goal ship goal commands',
+        firstUserInput: '/goal ship goal commands',
+        lastUserInput: '/goal ship goal commands',
+        lastInputAt: 1,
+        favorite: false,
+        favoriteOrder: null,
+        settings: {},
+        thread: { threadId: 'thread_goal', cwd: '/repo', title: 'Goal Thread', turns: [] },
+        timeline: [
+          { id: 'command_user_goal', kind: 'message', role: 'user', label: 'You', meta: 'command', text: '/goal ship goal commands' },
+          {
+            id: 'command_system_goal',
+            kind: 'message',
+            role: 'system',
+            label: '/goal',
+            meta: 'set',
+            text: 'Goal set from thread_goal: /goal ship goal commands',
+          },
+        ],
+      },
+    });
+
+    const helpResponse = await fetch(`${server.baseUrl}/api/sessions/thread_goal/turns`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text: '/help' }),
+    });
+    assert.equal(helpResponse.status, 202);
+    assert.deepEqual(await helpResponse.json(), {
+      type: 'command',
+      command: {
+        name: 'help',
+        action: 'show',
+        message: 'Supported commands: /help, /goal. Full guide: /Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md',
+        goal: null,
+      },
+      session: {
+        id: 'thread_goal',
+        cwd: '/repo',
+        title: 'Goal Thread',
+        updatedAt: 1,
+        preview: '/help',
+        firstUserInput: '/help',
+        lastUserInput: '/help',
+        lastInputAt: 1,
+        favorite: false,
+        favoriteOrder: null,
+        settings: {},
+        thread: { threadId: 'thread_goal', cwd: '/repo', title: 'Goal Thread', turns: [] },
+        timeline: [
+          { id: 'command_user_help', kind: 'message', role: 'user', label: 'You', meta: 'command', text: '/help' },
+          {
+            id: 'command_system_help',
+            kind: 'message',
+            role: 'system',
+            label: '/help',
+            meta: 'show',
+            text: 'Supported commands: /help, /goal. Full guide: /Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md',
+          },
+        ],
+      },
+    });
+  } finally {
+    await server.stop();
+  }
+});
+
+test('GET /api/sessions/:id returns backend-managed timeline entries', async () => {
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      readSession: async () => ({
+        id: 'thread_goal',
+        cwd: '/repo',
+        title: 'Goal Thread',
+        updatedAt: 1,
+        preview: '/goal resume',
+        firstUserInput: 'Earlier question',
+        lastUserInput: '/goal resume',
+        lastInputAt: 1,
+        favorite: false,
+        favoriteOrder: null,
+        settings: {},
+        thread: { threadId: 'thread_goal', cwd: '/repo', title: 'Goal Thread', turns: [] },
+        timeline: [
+          { id: 'history_1', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Earlier question' },
+          { id: 'history_2', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Earlier answer' },
+          { id: 'command_user_1', kind: 'message', role: 'user', label: 'You', meta: 'command', text: '/goal resume' },
+          { id: 'command_system_1', kind: 'message', role: 'system', label: '/goal', meta: 'resume', text: 'Goal resumed: ship slash goal support' },
+        ],
+      }),
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_goal`, {
+      headers: { Authorization: 'Bearer cw_token' },
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.deepEqual(payload.session.timeline.map((item: any) => item.text), [
+      'Earlier question',
+      'Earlier answer',
+      '/goal resume',
+      'Goal resumed: ship slash goal support',
+    ]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('POST /api/sessions/:id/timeline appends authenticated system messages', async () => {
+  const calls: Array<{ sessionId: string; entry: any }> = [];
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      readSession: async (sessionId: string) => sessionId === 'thread_goal'
+        ? { id: sessionId, thread: { threadId: sessionId, turns: [] }, timeline: [] }
+        : null,
+      appendSessionTimelineEntry: (sessionId: string, entry: any) => {
+        calls.push({ sessionId, entry });
+        return {
+          id: 'error_turn_1',
+          kind: 'message',
+          role: 'system',
+          label: 'Error',
+          meta: 'failed',
+          text: entry.text,
+          severity: 'error',
+        };
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_goal/timeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'error_turn_1',
+        role: 'system',
+        label: 'Error',
+        meta: 'failed',
+        text: 'Load failed',
+        severity: 'error',
+      }),
+    });
+
+    assert.equal(response.status, 201);
+    assert.deepEqual(await response.json(), {
+      entry: {
+        id: 'error_turn_1',
+        kind: 'message',
+        role: 'system',
+        label: 'Error',
+        meta: 'failed',
+        text: 'Load failed',
+        severity: 'error',
+      },
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.sessionId, 'thread_goal');
+    assert.deepEqual(calls[0]?.entry, {
+      id: 'error_turn_1',
+      role: 'system',
+      label: 'Error',
+      meta: 'failed',
+      text: 'Load failed',
+      severity: 'error',
+    });
+  } finally {
+    await server.stop();
+  }
+});
+
+test('POST /api/sessions/:id/timeline rejects invalid message payloads', async () => {
+  const calls: any[] = [];
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      readSession: async () => ({ id: 'thread_goal', thread: { turns: [] }, timeline: [] }),
+      appendSessionTimelineEntry: (...args: any[]) => {
+        calls.push(args);
+        return null;
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_goal/timeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'error_turn_1',
+        role: 'assistant',
+        text: '',
+      }),
+    });
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: 'invalid_timeline_entry',
+      message: 'A non-empty system message is required.',
+    });
+    assert.deepEqual(calls, []);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('POST /api/sessions/:id/timeline returns 404 for missing sessions', async () => {
+  const calls: any[] = [];
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      readSession: async () => null,
+      appendSessionTimelineEntry: (...args: any[]) => {
+        calls.push(args);
+        return null;
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/missing_thread/timeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'error_turn_1',
+        role: 'system',
+        text: 'Load failed',
+      }),
+    });
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), {
+      error: 'session_not_found',
+      message: 'Selected session was not found.',
+    });
+    assert.deepEqual(calls, []);
   } finally {
     await server.stop();
   }

@@ -203,12 +203,48 @@ test('serve command clears one-time password before creating runtime', async () 
   assert.equal(Object.hasOwn(env, 'CODEX_WEB_PASSWORD'), false);
 });
 
+test('serve command gives the runtime a help report path in the configured report tree', async () => {
+  const observedHelpReportPaths: unknown[] = [];
+
+  await startServeCommand(parseCliArgs(['serve']), {
+    env: {},
+    loadConfig: () => createConfig(),
+    createAuthStore: () => ({
+      isConfigured: async () => true,
+      setPassword: async () => {},
+      login: async () => {
+        throw new Error('unused');
+      },
+      verifyToken: async () => null,
+      logout: async () => {},
+    }),
+    createServer: ({ config, runtime }) => ({
+      baseUrl: `http://${config.host}:${config.port}`,
+      start: async () => {
+        observedHelpReportPaths.push((runtime as any).helpReportPath);
+      },
+      stop: async () => {},
+    }),
+    stdout: { write: () => true },
+  });
+
+  assert.deepEqual(observedHelpReportPaths, [
+    '/tmp/codex-web-state/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md',
+  ]);
+});
+
 test('serve command creates state and log directories before server start', async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-cli-serve-'));
   const stateDir = path.join(tempRoot, 'state');
   const authPath = path.join(stateDir, 'auth.json');
   const logDir = path.join(stateDir, 'logs');
   const reportsDir = path.join(stateDir, 'reports');
+  const helpReportPath = path.join(
+    reportsDir,
+    'codex-mobile-web-app',
+    '2026-05-22',
+    'codex-web-help.md',
+  );
 
   const server = await startServeCommand(parseCliArgs(['serve']), {
     env: {},
@@ -242,9 +278,14 @@ test('serve command creates state and log directories before server start', asyn
   const stateStat = await fs.stat(stateDir);
   const logStat = await fs.stat(logDir);
   const reportsStat = await fs.stat(reportsDir);
+  const helpReport = await fs.readFile(helpReportPath, 'utf8');
   assert.equal(stateStat.isDirectory(), true);
   assert.equal(logStat.isDirectory(), true);
   assert.equal(reportsStat.isDirectory(), true);
+  assert.match(helpReport, /# Codex Web Help/u);
+  assert.match(helpReport, /\| Command \| What It Does \| Starts A Codex Turn \|/u);
+  assert.match(helpReport, /`\/help`/u);
+  assert.match(helpReport, /`\/goal resume`/u);
 });
 
 function spawnProcess(

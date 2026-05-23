@@ -10,6 +10,52 @@ import { loadServiceConfig, type CodexWebConfig } from './config.js';
 import { CodexWebRuntime } from './runtime.js';
 import { createCodexWebServer, type CodexWebAuthLike, type CodexWebServerHandle } from './server.js';
 import { FileSessionSettingsStore } from './session_settings_store.js';
+import { FileSessionTimelineStore } from './session_timeline_store.js';
+
+const HELP_REPORT_PROJECT = 'codex-mobile-web-app';
+const HELP_REPORT_DATE = '2026-05-22';
+const HELP_REPORT_FILENAME = 'codex-web-help.md';
+const HELP_REPORT_CONTENT = `# Codex Web Help
+
+Codex Web handles a small set of app-level slash commands before starting a normal Codex turn. Commands are scoped to the current session. A session has one goal.
+
+## Supported Commands
+
+| Command | What It Does | Starts A Codex Turn |
+| :--- | :--- | :---: |
+| \`/help\` | Shows the supported command list and links back to this guide. | No |
+| \`/goal\` | Shows the current session goal and status. | No |
+| \`/goal <objective>\` | Sets or replaces the current session goal. | No |
+| \`/goal set <objective>\` | Sets or replaces the current session goal explicitly. | No |
+| \`/goal edit <objective>\` | Same as \`/goal set <objective>\`; useful when thinking in edit terms. | No |
+| \`/goal pause\` | Marks the current goal paused. | No |
+| \`/goal resume\` | Marks the current goal active again. | No |
+| \`/goal clear\` | Clears the current session goal. | No |
+
+## How It Works
+
+- The mobile app sends slash-command text through the normal composer endpoint.
+- The web backend detects supported commands before calling Codex turn start.
+- Handled commands return a system message in the timeline.
+- Handled commands do not open \`/api/turns/<turnId>/events\` and do not create a native Codex turn.
+- Unsupported slash-looking input is treated as normal user text.
+
+## Goal Behavior
+
+| Action | Result |
+| :--- | :--- |
+| Set | Stores one objective on the current Codex thread. |
+| Show | Reads the thread goal from the native Codex app-server. |
+| Pause | Keeps the objective but changes status to paused. |
+| Resume | Changes status back to active. |
+| Clear | Removes the goal from the thread. |
+
+## Notes
+
+- Goal state is provided by Codex native app-server RPC: \`thread/goal/get\`, \`thread/goal/set\`, and \`thread/goal/clear\`.
+- Codex Web does not store separate browser-side goal state.
+- The UI deliberately keeps this as text commands instead of adding a complex goal editor.
+`;
 
 export type ParsedCliArgs =
   | {
@@ -133,6 +179,7 @@ export async function startServeCommand(
   };
   const bootstrapPassword = takeOneTimePassword(env);
   await ensureRuntimeDirectories(config);
+  await ensureBundledReports(config);
   const createAuthStoreFn = dependencies.createAuthStore ?? (({ authPath }) => new AuthStore({ authPath }));
   const auth = createAuthStoreFn({ authPath: config.authPath });
 
@@ -145,6 +192,7 @@ export async function startServeCommand(
   const createRuntimeFn = dependencies.createRuntime ?? (({ config: runtimeConfig }) => new CodexWebRuntime({
     codexBin: runtimeConfig.codexBin,
     defaultCwd: runtimeConfig.defaultCwd,
+    helpReportPath: helpReportPath(runtimeConfig),
     logger: runtimeConfig.debug
       ? {
         debug: writeDebugStderrLine,
@@ -155,6 +203,9 @@ export async function startServeCommand(
       : undefined,
     settingsStore: new FileSessionSettingsStore({
       settingsPath: path.join(runtimeConfig.stateDir, 'session-settings.json'),
+    }),
+    timelineStore: new FileSessionTimelineStore({
+      timelinePath: path.join(runtimeConfig.stateDir, 'session-timeline.json'),
     }),
   }));
   const runtime = createRuntimeFn({ config });
@@ -175,6 +226,21 @@ async function ensureRuntimeDirectories(config: CodexWebConfig): Promise<void> {
   await fs.promises.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
   await fs.promises.mkdir(path.join(config.stateDir, 'logs'), { recursive: true, mode: 0o700 });
   await fs.promises.mkdir(config.reportsDir, { recursive: true, mode: 0o700 });
+}
+
+async function ensureBundledReports(config: CodexWebConfig): Promise<void> {
+  const reportPath = helpReportPath(config);
+  await fs.promises.mkdir(path.dirname(reportPath), { recursive: true, mode: 0o700 });
+  await fs.promises.writeFile(reportPath, HELP_REPORT_CONTENT, { mode: 0o600 });
+}
+
+function helpReportPath(config: CodexWebConfig): string {
+  return path.join(
+    config.reportsDir,
+    HELP_REPORT_PROJECT,
+    HELP_REPORT_DATE,
+    HELP_REPORT_FILENAME,
+  );
 }
 
 async function readPasswordFromStdin({

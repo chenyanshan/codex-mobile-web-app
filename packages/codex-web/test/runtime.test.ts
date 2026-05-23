@@ -3,6 +3,7 @@ import test from 'node:test';
 import type {
   ProviderApprovalRequest,
   ProviderThreadListResult,
+  ProviderThreadGoal,
   ProviderThreadStartResult,
   ProviderThreadSummary,
   ProviderTurnResult,
@@ -10,6 +11,7 @@ import type {
 } from '../../codex-native-api/src/index.js';
 import { CodexWebEventBus } from '../src/event_bus.js';
 import { CodexWebRuntime, type CodexWebRuntimeClient } from '../src/runtime.js';
+import { FileSessionTimelineStore } from '../src/session_timeline_store.js';
 
 function createThread(threadId = 'thread_1'): ProviderThreadSummary {
   return {
@@ -1131,6 +1133,438 @@ test('runtime treats missing native threads as absent when opened or used', asyn
     runtime.startTurn('thread_missing', { text: 'hi' }),
     /Unknown session: thread_missing/u,
   );
+});
+
+test('runtime handles goal slash commands without starting a native turn', async () => {
+  let currentGoal: ProviderThreadGoal | null = null;
+  let startTurnCalls = 0;
+  const setCalls: Array<{
+    threadId: string;
+    objective?: string | null;
+    status?: string | null;
+    suppressAutoTurn?: boolean;
+  }> = [];
+  let clearCalls = 0;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_goal')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_goal', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_goal'),
+    writeConfigValue: async () => {},
+    getThreadGoal: async () => currentGoal,
+    setThreadGoal: async ({ threadId, objective = null, status = null, suppressAutoTurn = false }) => {
+      setCalls.push({ threadId, objective, status, suppressAutoTurn });
+      currentGoal = {
+        threadId,
+        objective: objective ?? currentGoal?.objective ?? '',
+        status: status ?? currentGoal?.status ?? 'active',
+        tokenBudget: null,
+        tokensUsed: null,
+        timeUsedSeconds: null,
+      };
+      return currentGoal;
+    },
+    clearThreadGoal: async () => {
+      clearCalls += 1;
+      currentGoal = null;
+      return true;
+    },
+    startTurn: async (): Promise<ProviderTurnResult> => {
+      startTurnCalls += 1;
+      return {
+        outputText: 'should not run',
+        status: 'completed',
+        turnId: 'turn_unexpected',
+        threadId: 'thread_goal',
+      };
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const created = await runtime.startTurn('thread_goal', { text: '/goal improve benchmark coverage' });
+  assert.equal((created as any).type, 'command');
+  assert.equal((created as any).command.name, 'goal');
+  assert.match((created as any).command.message, /Goal set/u);
+  assert.equal((created as any).command.goal.objective, 'improve benchmark coverage');
+
+  const paused = await runtime.startTurn('thread_goal', { text: '/goal pause' });
+  assert.equal((paused as any).command.goal.status, 'paused');
+
+  const resumed = await runtime.startTurn('thread_goal', { text: '/goal resume' });
+  assert.equal((resumed as any).command.goal.status, 'active');
+
+  const reported = await runtime.startTurn('thread_goal', { text: '/goal' });
+  assert.match((reported as any).command.message, /improve benchmark coverage/u);
+
+  const cleared = await runtime.startTurn('thread_goal', { text: '/goal clear' });
+  assert.equal((cleared as any).command.goal, null);
+  assert.match((cleared as any).command.message, /Goal cleared/u);
+
+  assert.equal(startTurnCalls, 0);
+  assert.equal(clearCalls, 1);
+  assert.deepEqual(setCalls, [
+    {
+      threadId: 'thread_goal',
+      objective: 'improve benchmark coverage',
+      status: null,
+      suppressAutoTurn: true,
+    },
+    {
+      threadId: 'thread_goal',
+      objective: null,
+      status: 'paused',
+      suppressAutoTurn: true,
+    },
+    {
+      threadId: 'thread_goal',
+      objective: null,
+      status: 'active',
+      suppressAutoTurn: true,
+    },
+  ]);
+});
+
+test('runtime handles help slash command without starting a native turn', async () => {
+  let startTurnCalls = 0;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_help')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_help', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_help'),
+    writeConfigValue: async () => {},
+    startTurn: async (): Promise<ProviderTurnResult> => {
+      startTurnCalls += 1;
+      return {
+        outputText: 'should not run',
+        status: 'completed',
+        turnId: 'turn_unexpected',
+        threadId: 'thread_help',
+      };
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    helpReportPath: '/tmp/codex-web-state/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md',
+  });
+
+  const result = await runtime.startTurn('thread_help', { text: '/help' });
+
+  assert.equal((result as any).type, 'command');
+  assert.equal((result as any).command.name, 'help');
+  assert.equal((result as any).command.action, 'show');
+  assert.match((result as any).command.message, /Supported commands/u);
+  assert.match((result as any).command.message, /\/goal <objective>/u);
+  assert.match((result as any).command.message, /\/goal set <objective>/u);
+  assert.match((result as any).command.message, /\/goal edit <objective>/u);
+  assert.match((result as any).command.message, /\/goal pause/u);
+  assert.match((result as any).command.message, /\/goal resume/u);
+  assert.match((result as any).command.message, /\/goal clear/u);
+  assert.match((result as any).command.message, /\/goal/u);
+  assert.match((result as any).command.message, /\/help/u);
+  assert.match(
+    (result as any).command.message,
+    /\/tmp\/codex-web-state\/reports\/codex-mobile-web-app\/2026-05-22\/codex-web-help\.md/u,
+  );
+  assert.equal(startTurnCalls, 0);
+});
+
+test('runtime readSession exposes backend-managed slash command timeline entries', async () => {
+  const timelinePath = `/tmp/codex-web-runtime-timeline-${process.pid}-${Date.now()}.json`;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_goal')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_goal', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_goal'),
+      turns: [
+        {
+          id: 'turn_1',
+          status: 'completed',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Earlier question' },
+            { type: 'message', role: 'assistant', phase: null, text: 'Earlier answer' },
+          ],
+        },
+      ],
+    }),
+    resumeThread: async () => {},
+    getThreadGoal: async () => ({
+      threadId: 'thread_goal',
+      objective: 'ship slash goal support',
+      status: 'active',
+    }),
+    setThreadGoal: async () => ({
+      threadId: 'thread_goal',
+      objective: 'ship slash goal support',
+      status: 'active',
+    }),
+    clearThreadGoal: async () => true,
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'should not run',
+      status: 'completed',
+      turnId: 'turn_unexpected',
+      threadId: 'thread_goal',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    timelineStore: new FileSessionTimelineStore({ timelinePath }),
+  });
+
+  await runtime.startTurn('thread_goal', { text: '/goal resume' });
+  const session = await runtime.readSession('thread_goal');
+
+  assert.deepEqual(session?.timeline.map((item) => item.text), [
+    'Earlier question',
+    'Earlier answer',
+    '/goal resume',
+    'Goal resumed: ship slash goal support',
+  ]);
+});
+
+test('runtime readSession exposes backend-managed turn failure timeline entries', async () => {
+  const timelinePath = `/tmp/codex-web-runtime-timeline-${process.pid}-${Date.now()}-failed.json`;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_failed')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_failed', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_failed'),
+      turns: [
+        {
+          id: 'turn_403',
+          status: 'completed',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Trigger auth failure' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_403', threadId: 'thread_failed' });
+      throw new Error('unexpected status 403 Forbidden');
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    timelineStore: new FileSessionTimelineStore({ timelinePath }),
+  });
+
+  const started = await runtime.startTurn('thread_failed', { text: 'Trigger auth failure' });
+  assert.equal(started.turnId, 'turn_403');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const session = await runtime.readSession('thread_failed');
+  assert.deepEqual(session?.timeline.map((item) => item.text), [
+    'Trigger auth failure',
+    'unexpected status 403 Forbidden',
+  ]);
+  const errorEntry = session?.timeline.find((item) => item.id === 'error_turn_403');
+  assert.equal(errorEntry?.severity, 'error');
+});
+
+test('runtime upserts backend-managed session timeline entries by id', async () => {
+  const timelinePath = `/tmp/codex-web-runtime-timeline-${process.pid}-${Date.now()}-upsert.json`;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_timeline')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_timeline', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_timeline'),
+      turns: [
+        {
+          id: 'turn_1',
+          status: 'completed',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Question' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'unused',
+      status: 'completed',
+      turnId: 'turn_unused',
+      threadId: 'thread_timeline',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    timelineStore: new FileSessionTimelineStore({ timelinePath }),
+  });
+
+  const first = runtime.appendSessionTimelineEntry('thread_timeline', {
+    id: 'error_turn_1',
+    kind: 'message',
+    role: 'system',
+    label: 'Error',
+    meta: 'failed',
+    text: 'Load failed',
+    severity: 'error',
+  });
+  const second = runtime.appendSessionTimelineEntry('thread_timeline', {
+    id: 'error_turn_1',
+    kind: 'message',
+    role: 'system',
+    label: 'Error',
+    meta: 'failed',
+    text: 'Load failed again',
+    severity: 'error',
+  });
+
+  const session = await runtime.readSession('thread_timeline');
+
+  assert.equal(first?.text, 'Load failed');
+  assert.equal(second?.text, 'Load failed again');
+  assert.deepEqual(session?.timeline.map((item) => item.text), [
+    'Question',
+    'Load failed again',
+  ]);
+});
+
+test('runtime readSession deduplicates backend failure timeline entries already present in native thread history', async () => {
+  const timelinePath = `/tmp/codex-web-runtime-timeline-${process.pid}-${Date.now()}-dedupe.json`;
+  const timelineStore = new FileSessionTimelineStore({ timelinePath });
+  timelineStore.append('thread_failed', {
+    id: 'error_turn_403',
+    kind: 'message',
+    role: 'system',
+    label: 'Error',
+    meta: 'failed',
+    text: 'unexpected status 403 Forbidden',
+    severity: 'error',
+  });
+
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_failed')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_failed', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_failed'),
+      turns: [
+        {
+          id: 'turn_403',
+          status: 'failed',
+          error: 'unexpected status 403 Forbidden',
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Trigger auth failure' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'unused',
+      status: 'completed',
+      turnId: 'turn_unused',
+      threadId: 'thread_failed',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    timelineStore,
+  });
+
+  const session = await runtime.readSession('thread_failed');
+  assert.deepEqual(session?.timeline.map((item) => item.text), [
+    'Trigger auth failure',
+    'unexpected status 403 Forbidden',
+  ]);
+});
+
+test('runtime archiveSession removes backend-managed session timeline entries', async () => {
+  const timelinePath = `/tmp/codex-web-runtime-timeline-${process.pid}-${Date.now()}-archive.json`;
+  const timelineStore = new FileSessionTimelineStore({ timelinePath });
+  timelineStore.append('thread_archived', {
+    id: 'command_goal_1',
+    kind: 'message',
+    role: 'system',
+    label: '/goal',
+    meta: 'show',
+    text: 'Goal (active): ship slash goal support',
+  });
+
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_archived')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_archived', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_archived'),
+    archiveThread: async () => {},
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'unused',
+      status: 'completed',
+      turnId: 'turn_unused',
+      threadId: 'thread_archived',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    timelineStore,
+  });
+
+  assert.deepEqual(timelineStore.list('thread_archived').map((item) => item.text), [
+    'Goal (active): ship slash goal support',
+  ]);
+  assert.equal(await runtime.archiveSession('thread_archived'), true);
+  assert.deepEqual(timelineStore.list('thread_archived'), []);
 });
 
 test('runtime emits normalized turn and approval events and maps approval decisions', async () => {

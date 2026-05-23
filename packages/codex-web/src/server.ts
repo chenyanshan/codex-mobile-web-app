@@ -11,6 +11,8 @@ import { FileReportStore } from './report_store.js';
 import type { CodexWebReport } from './report_store.js';
 import type {
   CodexWebRuntime,
+  AppendSessionTimelineEntryInput,
+  CodexWebStartTurnResult,
   CreateSessionInput,
   StartTurnInput,
   UpdateSessionSettingsInput,
@@ -49,15 +51,15 @@ const MAX_JSON_BODY_BYTES = 64 * 1024;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 60_000;
 const LOGIN_RATE_LIMIT_PER_CLIENT = 10;
 const LOGIN_RATE_LIMIT_GLOBAL = 100;
-
-const DEFAULT_STATIC_FILES = loadDefaultStaticFiles();
+const BUILD_ID_PLACEHOLDER = '__CODEX_WEB_BUILD_ID__';
 
 export function createCodexWebServer({
   auth,
   runtime,
   config,
-  staticFiles = DEFAULT_STATIC_FILES,
+  staticFiles,
 }: CreateCodexWebServerOptions): CodexWebServerHandle {
+  const resolvedStaticFiles = staticFiles ?? loadDefaultStaticFiles();
   const activeSseClosers = new Set<() => void>();
   const sockets = new Set<Socket>();
   const loginRateLimiter = new FixedWindowRateLimiter({
@@ -71,7 +73,7 @@ export function createCodexWebServer({
       response,
       auth,
       runtime,
-      staticFiles,
+      staticFiles: resolvedStaticFiles,
       config,
       loginRateLimiter,
       registerSseCloser: (close) => {
@@ -132,6 +134,7 @@ export function createCodexWebServer({
 
 function loadDefaultStaticFiles(): Record<string, { body: string | Buffer; contentType: string }> {
   const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
+  const buildId = createBuildId();
   const indexHtml = readFileSync(path.join(publicDir, 'index.html'), 'utf8');
   return {
     '/': {
@@ -143,7 +146,7 @@ function loadDefaultStaticFiles(): Record<string, { body: string | Buffer; conte
       contentType: 'text/html; charset=utf-8',
     },
     '/app.js': {
-      body: readFileSync(path.join(publicDir, 'app.js'), 'utf8'),
+      body: injectBuildId(readFileSync(path.join(publicDir, 'app.js'), 'utf8'), buildId),
       contentType: 'application/javascript; charset=utf-8',
     },
     '/styles.css': {
@@ -159,7 +162,7 @@ function loadDefaultStaticFiles(): Record<string, { body: string | Buffer; conte
       contentType: 'application/manifest+json; charset=utf-8',
     },
     '/service-worker.js': {
-      body: readFileSync(path.join(publicDir, 'service-worker.js'), 'utf8'),
+      body: injectBuildId(readFileSync(path.join(publicDir, 'service-worker.js'), 'utf8'), buildId),
       contentType: 'application/javascript; charset=utf-8',
     },
     '/icon-192.png': {
@@ -175,6 +178,14 @@ function loadDefaultStaticFiles(): Record<string, { body: string | Buffer; conte
       contentType: 'image/png',
     },
   };
+}
+
+function createBuildId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function injectBuildId(source: string, buildId: string): string {
+  return source.replaceAll(BUILD_ID_PLACEHOLDER, buildId);
 }
 
 async function handleRequest({
@@ -349,6 +360,35 @@ async function handleRequest({
       return;
     }
     writeJson(response, 200, { session });
+    return;
+  }
+
+  const sessionTimelineMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/timeline$/u);
+  if (sessionTimelineMatch && method === 'POST') {
+    const sessionId = decodeURIComponent(sessionTimelineMatch[1]!);
+    const session = await runtime.readSession(sessionId);
+    if (!session) {
+      writeSessionNotFound(response);
+      return;
+    }
+    const body = await readJsonBody(request);
+    const entryInput = normalizeSessionTimelineEntryInput(body);
+    if (!entryInput) {
+      writeJson(response, 400, {
+        error: 'invalid_timeline_entry',
+        message: 'A non-empty system message is required.',
+      });
+      return;
+    }
+    const entry = runtime.appendSessionTimelineEntry(sessionId, entryInput);
+    if (!entry) {
+      writeJson(response, 400, {
+        error: 'invalid_timeline_entry',
+        message: 'A non-empty system message is required.',
+      });
+      return;
+    }
+    writeJson(response, 201, { entry });
     return;
   }
 
@@ -609,7 +649,7 @@ async function startSessionTurn({
   sessionId: string;
   input: StartTurnInput;
   response: ServerResponse;
-}): Promise<{ turnId: string } | null> {
+}): Promise<CodexWebStartTurnResult | null> {
   try {
     return await runtime.startTurn(sessionId, input);
   } catch (error) {
@@ -634,6 +674,29 @@ function writeSessionNotFound(response: ServerResponse): void {
     error: 'session_not_found',
     message: 'Selected session was not found.',
   });
+}
+
+function normalizeSessionTimelineEntryInput(value: unknown): AppendSessionTimelineEntryInput | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  const role = entry.role === 'user' || entry.role === 'assistant' || entry.role === 'system'
+    ? entry.role
+    : null;
+  const text = typeof entry.text === 'string' ? entry.text.trim() : '';
+  if (role !== 'system' || !text) {
+    return null;
+  }
+  return {
+    id: typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : null,
+    role,
+    label: typeof entry.label === 'string' && entry.label.trim() ? entry.label.trim() : null,
+    meta: typeof entry.meta === 'string' && entry.meta.trim() ? entry.meta.trim() : null,
+    text,
+    severity: entry.severity === 'error' ? 'error' : null,
+    ...(Number.isFinite(entry.afterHistoryIndex) ? { afterHistoryIndex: Number(entry.afterHistoryIndex) } : {}),
+  };
 }
 
 async function resolveReportForResponse(
