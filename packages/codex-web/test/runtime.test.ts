@@ -1347,6 +1347,101 @@ test('runtime readSession exposes backend-managed slash command timeline entries
   ]);
 });
 
+test('runtime readSession exposes the current thread goal as session state', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_goal_state')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_goal_state', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_goal_state'),
+    getThreadGoal: async () => ({
+      threadId: 'thread_goal_state',
+      objective: 'ship goal status indicator',
+      status: 'paused',
+      tokensUsed: 1200,
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async () => ({
+      outputText: 'done',
+      status: 'completed',
+      turnId: 'turn_1',
+      threadId: 'thread_goal_state',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+  });
+
+  const session = await runtime.readSession('thread_goal_state');
+
+  assert.deepEqual(session?.goal, {
+    threadId: 'thread_goal_state',
+    objective: 'ship goal status indicator',
+    status: 'paused',
+    tokensUsed: 1200,
+  });
+});
+
+test('runtime readSession exposes only process-active turn state', async () => {
+  let resolveTurn: ((result: ProviderTurnResult) => void) | null = null;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_active_state')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_active_state', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_active_state'),
+      turns: [
+        {
+          id: 'turn_active_state',
+          status: 'in_progress',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Still working' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_active_state', threadId: 'thread_active_state' });
+      return new Promise<ProviderTurnResult>((resolve) => {
+        resolveTurn = resolve;
+      });
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  assert.equal((await runtime.readSession('thread_active_state'))?.activeTurnId, null);
+  const started = await runtime.startTurn('thread_active_state', { text: 'hi' });
+
+  assert.deepEqual(started, { turnId: 'turn_active_state' });
+  assert.equal((await runtime.readSession('thread_active_state'))?.activeTurnId, 'turn_active_state');
+
+  resolveTurn?.({
+    outputText: 'done',
+    status: 'completed',
+    turnId: 'turn_active_state',
+    threadId: 'thread_active_state',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal((await runtime.readSession('thread_active_state'))?.activeTurnId, null);
+});
+
 test('runtime readSession exposes backend-managed turn failure timeline entries', async () => {
   const timelinePath = `/tmp/codex-web-runtime-timeline-${process.pid}-${Date.now()}-failed.json`;
   const client: CodexWebRuntimeClient = {

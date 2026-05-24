@@ -58,6 +58,8 @@ export interface CodexWebSession {
   lastInputAt: number | null;
   favorite: boolean;
   favoriteOrder: number | null;
+  goal: ProviderThreadGoal | null;
+  activeTurnId: string | null;
   settings: CodexWebStoredSessionSettings;
   thread: ProviderThreadSummary;
   timeline: CodexWebTimelineMessage[];
@@ -321,7 +323,7 @@ export class CodexWebRuntime {
     if (!thread) {
       return null;
     }
-    return this.toSession(thread);
+    return this.withThreadGoal(this.toSession(thread));
   }
 
   async updateSessionSettings(
@@ -755,6 +757,10 @@ export class CodexWebRuntime {
     return this.eventBus.list(turnId, afterId);
   }
 
+  hasActiveTurn(turnId: string): boolean {
+    return this.activeTurns.has(turnId);
+  }
+
   subscribeToTurn(turnId: string, listener: (entry: { event: CodexWebEvent; sequence: number }) => void) {
     return this.eventBus.subscribe(turnId, listener);
   }
@@ -865,6 +871,8 @@ export class CodexWebRuntime {
       lastInputAt: updatedAt,
       favorite: current.favorite === true,
       favoriteOrder: current.favoriteOrder ?? null,
+      goal: null,
+      activeTurnId: this.activeTurnIdForThread(thread.threadId),
       settings: current,
       thread,
       timeline: composeSessionTimeline(thread, this.timelineStore?.list(thread.threadId) ?? []),
@@ -896,9 +904,30 @@ export class CodexWebRuntime {
       lastInputAt: updatedAt,
       favorite: settings.favorite === true,
       favoriteOrder: settings.favoriteOrder ?? null,
+      goal: null,
+      activeTurnId: null,
       settings,
       thread,
       timeline: this.timelineStore?.list(sessionId) ?? [],
+    };
+  }
+
+  private activeTurnIdForThread(threadId: string): string | null {
+    for (const [turnId] of this.activeTurns) {
+      if (this.turnToThread.get(turnId) === threadId) {
+        return turnId;
+      }
+    }
+    return null;
+  }
+
+  private async withThreadGoal(session: CodexWebSession): Promise<CodexWebSession> {
+    if (typeof this.client.getThreadGoal !== 'function') {
+      return session;
+    }
+    return {
+      ...session,
+      goal: await this.client.getThreadGoal(session.id),
     };
   }
 

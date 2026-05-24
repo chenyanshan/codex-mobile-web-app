@@ -772,7 +772,10 @@ function renderChatContent({ desktop = false } = {}) {
       <header class="topbar chat-topbar${desktop ? ' desktop-chat-topbar' : ''}">
         <div class="chat-nav">
           ${desktop ? '<div class="chat-nav-spacer" aria-hidden="true"></div>' : '<button class="ghost chat-back-button" type="button" id="back-to-list-button" aria-label="Sessions">&lt;</button>'}
-          <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
+          <div class="chat-title-stack">
+            <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
+            ${renderGoalStatus()}
+          </div>
           ${sessionReportsProject
             ? `<button class="ghost compact-button session-report-button" type="button" data-session-reports-project="${escapeAttribute(sessionReportsProject)}">Reports</button>`
             : '<div class="chat-nav-spacer" aria-hidden="true"></div>'}
@@ -791,6 +794,55 @@ function renderChatContent({ desktop = false } = {}) {
         </form>
       </div>
   `;
+}
+
+function renderGoalStatus() {
+  const goal = state.currentSession?.goal;
+  const objective = String(goal?.objective || '').trim();
+  if (!objective) {
+    return '';
+  }
+  const { status, label } = goalStatusDisplay(goal.status);
+  return `
+    <div class="goal-status" data-status="${escapeAttribute(status)}">
+      <span>${escapeHtml(label)}</span>
+      <span class="goal-objective">${escapeHtml(objective)}</span>
+    </div>
+  `;
+}
+
+function goalStatusDisplay(status) {
+  const normalized = normalizeGoalStatus(status);
+  if (normalized === 'paused') {
+    return { status: 'paused', label: 'Goal paused' };
+  }
+  if (normalized === 'done') {
+    return { status: 'done', label: 'Goal done' };
+  }
+  if (normalized === 'blocked') {
+    return { status: 'blocked', label: 'Goal blocked' };
+  }
+  if (normalized === 'active') {
+    return { status: 'active', label: 'Goal active' };
+  }
+  return { status: 'unknown', label: `Goal ${String(status || '').trim() || 'set'}` };
+}
+
+function normalizeGoalStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase().replace(/[\s_-]+/gu, '');
+  if (!normalized || normalized === 'active' || normalized === 'running' || normalized === 'inprogress') {
+    return 'active';
+  }
+  if (normalized === 'pause' || normalized === 'paused') {
+    return 'paused';
+  }
+  if (['done', 'complete', 'completed', 'success', 'succeeded', 'finished'].includes(normalized)) {
+    return 'done';
+  }
+  if (['blocked', 'failed', 'cancelled', 'canceled'].includes(normalized)) {
+    return 'blocked';
+  }
+  return 'unknown';
 }
 
 function renderPageNav(title, options = {}) {
@@ -3535,7 +3587,7 @@ function syncRuntimeStatusFromSession(session, { source = 'detail' } = {}) {
       return setRuntimeStatus('Turn stopped', 'warn', { activeTurnId: null, terminalTurnId: latestTurn.id || null });
     }
     clearRuntimeTurnState();
-    return setRuntimeStatus(`Turn ${latestTurn.status || 'completed'}`, 'warn', { activeTurnId: null, terminalTurnId: latestTurn.id || null });
+    return setRuntimeStatus('Ready', 'success', { activeTurnId: null, terminalTurnId: latestTurn.id || null });
   }
   state.pendingTurn = true;
   state.turnId = activeTurn.id;
@@ -3674,14 +3726,18 @@ function latestRuntimeTurn(turns) {
 }
 
 function findActiveTurn(session) {
+  const activeTurnId = String(session?.activeTurnId || '').trim();
+  if (!activeTurnId) {
+    return null;
+  }
   const turns = sessionTurns(session);
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index];
-    if (turn?.id && isActiveTurnStatus(turn.status)) {
+    if (turn?.id === activeTurnId && isActiveTurnStatus(turn.status)) {
       return turn;
     }
   }
-  return null;
+  return { id: activeTurnId, status: 'in_progress' };
 }
 
 function isActiveTurnStatus(status) {
@@ -3753,18 +3809,24 @@ function normalizeSessions(payload) {
   const items = Array.isArray(payload?.items) ? payload.items : [];
   return items
     .filter((session) => session && typeof session.id === 'string' && session.id)
-    .map((session) => ({
-      ...session,
-      cwd: typeof session.cwd === 'string' ? session.cwd : '',
-      projectName: typeof session.projectName === 'string' ? session.projectName : '',
-      title: typeof session.title === 'string' ? session.title : '',
-      preview: typeof session.preview === 'string' ? session.preview : '',
-      firstUserInput: typeof session.firstUserInput === 'string' ? session.firstUserInput : '',
-      lastUserInput: typeof session.lastUserInput === 'string' ? session.lastUserInput : '',
-      lastInputAt: typeof session.lastInputAt === 'number' ? session.lastInputAt : null,
-      updatedAt: typeof session.updatedAt === 'number' ? session.updatedAt : null,
-      settings: session.settings && typeof session.settings === 'object' ? session.settings : null,
-    }));
+    .map((session) => {
+      const normalized = {
+        ...session,
+        cwd: typeof session.cwd === 'string' ? session.cwd : '',
+        projectName: typeof session.projectName === 'string' ? session.projectName : '',
+        title: typeof session.title === 'string' ? session.title : '',
+        preview: typeof session.preview === 'string' ? session.preview : '',
+        firstUserInput: typeof session.firstUserInput === 'string' ? session.firstUserInput : '',
+        lastUserInput: typeof session.lastUserInput === 'string' ? session.lastUserInput : '',
+        lastInputAt: typeof session.lastInputAt === 'number' ? session.lastInputAt : null,
+        updatedAt: typeof session.updatedAt === 'number' ? session.updatedAt : null,
+        settings: session.settings && typeof session.settings === 'object' ? session.settings : null,
+      };
+      if (Object.prototype.hasOwnProperty.call(session, 'goal')) {
+        normalized.goal = session.goal && typeof session.goal === 'object' ? session.goal : null;
+      }
+      return normalized;
+    });
 }
 
 function syncCurrentSessionFromList() {

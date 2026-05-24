@@ -1165,6 +1165,114 @@ test('composer status renders a small bottom status separator', async () => {
   assert.match(api.renderComposerStatus(), /<span>Done<\/span>/u);
 });
 
+test('chat header renders current goal state under the project title', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.currentSession = {
+    id: 'session_goal',
+    cwd: '/repo',
+    goal: {
+      threadId: 'session_goal',
+      objective: 'ship goal status indicator',
+      status: 'paused',
+    },
+  };
+
+  const html = api.renderChatContent();
+
+  assert.match(html, /<div class="goal-status" data-status="paused">/u);
+  assert.match(html, /Goal paused/u);
+  assert.match(html, /ship goal status indicator/u);
+});
+
+test('chat header renders active, pause, and done goal statuses without calling them running', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.currentSession = {
+    id: 'session_goal',
+    cwd: '/repo',
+    goal: {
+      threadId: 'session_goal',
+      objective: 'ship goal status indicator',
+      status: 'active',
+    },
+  };
+
+  const activeHtml = api.renderChatContent();
+
+  assert.match(activeHtml, /data-status="active"/u);
+  assert.match(activeHtml, /Goal active/u);
+  assert.doesNotMatch(activeHtml, /Goal running/u);
+
+  api.state.currentSession.goal.status = 'pause';
+
+  const pausedHtml = api.renderChatContent();
+
+  assert.match(pausedHtml, /data-status="paused"/u);
+  assert.match(pausedHtml, /Goal paused/u);
+  assert.doesNotMatch(pausedHtml, /Goal running/u);
+
+  api.state.currentSession.goal.status = 'done';
+
+  const doneHtml = api.renderChatContent();
+
+  assert.match(doneHtml, /data-status="done"/u);
+  assert.match(doneHtml, /Goal done/u);
+  assert.doesNotMatch(doneHtml, /Goal running/u);
+});
+
+test('goal status colors are distinct for each state', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.goal-status\[data-status="active"\]\s*\{[^}]*color:\s*var\(--success\);/su);
+  assert.match(styles, /\.goal-status\[data-status="paused"\]\s*\{[^}]*color:\s*var\(--warn\);/su);
+  assert.match(styles, /\.goal-status\[data-status="done"\]\s*\{[^}]*color:\s*var\(--info\);/su);
+  assert.match(styles, /\.goal-status\[data-status="blocked"\]\s*\{[^}]*color:\s*var\(--danger\);/su);
+  assert.match(styles, /\.goal-status\[data-status="unknown"\]\s*\{[^}]*color:\s*var\(--muted\);/su);
+});
+
+test('session summary updates do not clear a detailed current goal', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sessionId = 'session_goal';
+  api.state.currentSession = {
+    id: 'session_goal',
+    cwd: '/repo',
+    goal: {
+      threadId: 'session_goal',
+      objective: 'ship goal status indicator',
+      status: 'active',
+    },
+  };
+  api.state.sessions = [api.state.currentSession];
+
+  api.upsertSession({ id: 'session_goal', cwd: '/repo', lastUserInput: 'new prompt' });
+
+  assert.equal(api.state.currentSession.goal.objective, 'ship goal status indicator');
+});
+
+test('session detail updates can clear the current goal', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sessionId = 'session_goal';
+  api.state.currentSession = {
+    id: 'session_goal',
+    cwd: '/repo',
+    goal: {
+      threadId: 'session_goal',
+      objective: 'ship goal status indicator',
+      status: 'active',
+    },
+  };
+  api.state.sessions = [api.state.currentSession];
+
+  api.upsertSession({ id: 'session_goal', cwd: '/repo', goal: null });
+
+  assert.equal(api.state.currentSession.goal, null);
+});
+
 test('composer status separator uses continuous css rules outside the message box', async () => {
   const styles = await readFile(stylesUrl, 'utf8');
 
@@ -4620,6 +4728,7 @@ test('foreground recovery keeps the latest chat message visible after browser re
             session: {
               id: 'session_1',
               cwd: '/repo',
+              activeTurnId: 'turn_active',
               settings: { metadata: {} },
               thread: {
                 turns: [
@@ -5073,7 +5182,7 @@ test('PWA history refresh clears stale running state from the latest terminal tu
   assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="success"><span>Done</span></div>');
 });
 
-test('session refresh restores running status when history reports an active turn', async () => {
+test('session refresh restores running status when backend reports an active turn', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
     fetch: async (path) => {
@@ -5086,6 +5195,7 @@ test('session refresh restores running status when history reports an active tur
             session: {
               id: 'session_1',
               cwd: '/repo',
+              activeTurnId: 'turn_active',
               settings: { metadata: {} },
               thread: {
                 turns: [
@@ -5135,6 +5245,59 @@ test('session refresh restores running status when history reports an active tur
   assert.ok(fetchCalls.includes('/api/turns/turn_active/events'));
 });
 
+test('session refresh ignores stale in-progress history without a backend active turn', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              activeTurnId: null,
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_stale',
+                    status: 'in_progress',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Old question before service restart' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.pendingTurn = false;
+  api.state.status = 'Ready';
+  api.state.statusTone = 'success';
+
+  await api.refreshCurrentView();
+
+  assert.equal(api.state.pendingTurn, false);
+  assert.equal(api.state.turnId, null);
+  assert.equal(api.state.status, 'Ready');
+  assert.equal(api.state.statusTone, 'success');
+  assert.equal(api.renderComposerStatus(), '<div class="composer-status" data-tone="success"><span>Done</span></div>');
+  assert.deepEqual(fetchCalls, ['/api/sessions/session_1']);
+});
+
 test('opening a session restores running status when the session has an active turn', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
@@ -5148,6 +5311,7 @@ test('opening a session restores running status when the session has an active t
             session: {
               id: 'session_active',
               cwd: '/repo',
+              activeTurnId: 'turn_active',
               settings: { metadata: {} },
               thread: {
                 turns: [
@@ -5441,15 +5605,17 @@ globalThis.__codexWebTest = {
   previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
   renderSessionCards: typeof renderSessionCards === 'function' ? renderSessionCards : null,
   renderSessionList: typeof renderSessionList === 'function' ? renderSessionList : null,
-	  renderChat: typeof renderChat === 'function' ? renderChat : null,
-	  renderReportsPage: typeof renderReportsPage === 'function' ? renderReportsPage : null,
-	  renderReportViewer: typeof renderReportViewer === 'function' ? renderReportViewer : null,
-	  renderTimelineItem: typeof renderTimelineItem === 'function' ? renderTimelineItem : null,
-	  renderComposerStatus: typeof renderComposerStatus === 'function' ? renderComposerStatus : null,
-	  applyMessageFontSize: typeof applyMessageFontSize === 'function' ? applyMessageFontSize : null,
-	  setMessageFontSize: typeof setMessageFontSize === 'function' ? setMessageFontSize : null,
-	  updateComposerExpansionState: typeof updateComposerExpansionState === 'function' ? updateComposerExpansionState : null,
-	  hydrateTimelineFromSession,
+  upsertSession: typeof upsertSession === 'function' ? upsertSession : null,
+  renderChat: typeof renderChat === 'function' ? renderChat : null,
+  renderChatContent: typeof renderChatContent === 'function' ? renderChatContent : null,
+  renderReportsPage: typeof renderReportsPage === 'function' ? renderReportsPage : null,
+  renderReportViewer: typeof renderReportViewer === 'function' ? renderReportViewer : null,
+  renderTimelineItem: typeof renderTimelineItem === 'function' ? renderTimelineItem : null,
+  renderComposerStatus: typeof renderComposerStatus === 'function' ? renderComposerStatus : null,
+  applyMessageFontSize: typeof applyMessageFontSize === 'function' ? applyMessageFontSize : null,
+  setMessageFontSize: typeof setMessageFontSize === 'function' ? setMessageFontSize : null,
+  updateComposerExpansionState: typeof updateComposerExpansionState === 'function' ? updateComposerExpansionState : null,
+  hydrateTimelineFromSession,
   restoreTimelineForSession: typeof restoreTimelineForSession === 'function' ? restoreTimelineForSession : null,
   showMoreSessionHistory: typeof showMoreSessionHistory === 'function' ? showMoreSessionHistory : null,
   applySessionSettings: typeof applySessionSettings === 'function' ? applySessionSettings : null,

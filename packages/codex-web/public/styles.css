@@ -7,6 +7,7 @@
   --muted: #96a2bb;
   --accent: #66b3ff;
   --accent-2: #1d6fd1;
+  --info: #76a9ff;
   --success: #3fb68b;
   --warn: #ffbf69;
   --danger: #ff7d7d;
@@ -27,6 +28,7 @@
   --muted: #687386;
   --accent: #266fb5;
   --accent-2: #1d5e9f;
+  --info: #315fc4;
   --success: #238668;
   --warn: #b97819;
   --danger: #c84c4c;
@@ -43,6 +45,7 @@
   --muted: #76694e;
   --accent: #177c78;
   --accent-2: #b86c10;
+  --info: #326fbd;
   --success: #2f855a;
   --warn: #a45f0b;
   --danger: #b94e48;
@@ -59,6 +62,7 @@
   --muted: #9dafaa;
   --accent: #7bc8a4;
   --accent-2: #2b7c68;
+  --info: #8aaef2;
   --success: #65bd8f;
   --warn: #e3bd65;
   --danger: #ec8383;
@@ -179,8 +183,52 @@ button:disabled {
   line-height: 1;
 }
 
+.chat-title-stack {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  text-align: center;
+}
+
 .chat-nav .project-title {
   text-align: center;
+}
+
+.goal-status {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.goal-status[data-status="active"] {
+  color: var(--success);
+}
+
+.goal-status[data-status="paused"] {
+  color: var(--warn);
+}
+
+.goal-status[data-status="done"] {
+  color: var(--info);
+}
+
+.goal-status[data-status="blocked"] {
+  color: var(--danger);
+}
+
+.goal-status[data-status="unknown"] {
+  color: var(--muted);
+}
+
+.goal-objective {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-nav-spacer {
