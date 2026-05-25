@@ -15,46 +15,46 @@ import { FileSessionTimelineStore } from './session_timeline_store.js';
 const HELP_REPORT_PROJECT = 'codex-mobile-web-app';
 const HELP_REPORT_DATE = '2026-05-22';
 const HELP_REPORT_FILENAME = 'codex-web-help.md';
-const HELP_REPORT_CONTENT = `# Codex Web Help
+const HELP_REPORT_CONTENT = `# Codex Web 帮助
 
-Codex Web handles a small set of app-level slash commands before starting a normal Codex turn. Commands are scoped to the current session. A session has one goal.
+Codex Web 会在启动正常的 Codex turn 之前，先处理少量应用层 slash 命令。命令只作用于当前会话。每个会话维护一个目标。
 
-## Supported Commands
+## 支持的命令
 
-| Command | What It Does | Starts A Codex Turn |
+| 命令 | 作用 | 会启动 Codex turn |
 | :--- | :--- | :---: |
-| \`/help\` | Shows the supported command list and links back to this guide. | No |
-| \`/goal\` | Shows the current session goal and status. | No |
-| \`/goal <objective>\` | Sets or replaces the current session goal. | No |
-| \`/goal set <objective>\` | Sets or replaces the current session goal explicitly. | No |
-| \`/goal edit <objective>\` | Same as \`/goal set <objective>\`; useful when thinking in edit terms. | No |
-| \`/goal pause\` | Marks the current goal paused. | No |
-| \`/goal resume\` | Marks the current goal active again. | No |
-| \`/goal clear\` | Clears the current session goal. | No |
+| \`/help\` | 显示支持的命令列表，并返回本说明链接。 | 否 |
+| \`/goal\` | 显示当前会话的目标和状态。 | 否 |
+| \`/goal <objective>\` | 设置或替换当前会话目标。 | 否 |
+| \`/goal set <objective>\` | 显式设置或替换当前会话目标。 | 否 |
+| \`/goal edit <objective>\` | 与 \`/goal set <objective>\` 相同；适合以编辑目标的方式思考时使用。 | 否 |
+| \`/goal pause\` | 将当前目标标记为已暂停。 | 否 |
+| \`/goal resume\` | 将当前目标重新标记为进行中。 | 否 |
+| \`/goal clear\` | 清除当前会话目标。 | 否 |
 
-## How It Works
+## 工作方式
 
-- The mobile app sends slash-command text through the normal composer endpoint.
-- The web backend detects supported commands before calling Codex turn start.
-- Handled commands return a system message in the timeline.
-- Handled commands do not open \`/api/turns/<turnId>/events\` and do not create a native Codex turn.
-- Unsupported slash-looking input is treated as normal user text.
+- 移动端应用通过正常的输入框接口发送 slash 命令文本。
+- Web 后端会在调用 Codex turn start 之前识别这些受支持的命令。
+- 已处理的命令会以系统消息的形式写入时间线。
+- 已处理的命令不会打开 \`/api/turns/<turnId>/events\`，也不会创建原生 Codex turn。
+- 看起来像 slash 命令但不受支持的输入，会按普通用户文本处理。
 
-## Goal Behavior
+## 目标行为
 
-| Action | Result |
+| 操作 | 结果 |
 | :--- | :--- |
-| Set | Stores one objective on the current Codex thread. |
-| Show | Reads the thread goal from the native Codex app-server. |
-| Pause | Keeps the objective but changes status to paused. |
-| Resume | Changes status back to active. |
-| Clear | Removes the goal from the thread. |
+| 设置 | 在当前 Codex 线程上保存一个目标。 |
+| 查看 | 从原生 Codex app-server 读取线程目标。 |
+| 暂停 | 保留目标内容，但把状态改为 paused。 |
+| 恢复 | 把状态改回 active。 |
+| 清除 | 从线程中移除目标。 |
 
-## Notes
+## 说明
 
-- Goal state is provided by Codex native app-server RPC: \`thread/goal/get\`, \`thread/goal/set\`, and \`thread/goal/clear\`.
-- Codex Web does not store separate browser-side goal state.
-- The UI deliberately keeps this as text commands instead of adding a complex goal editor.
+- 目标状态由 Codex 原生 app-server RPC 提供：\`thread/goal/get\`、\`thread/goal/set\` 和 \`thread/goal/clear\`。
+- Codex Web 不会额外保存一份浏览器侧目标状态。
+- UI 故意保留为文本命令方式，而不是再做一个复杂的目标编辑器。
 `;
 
 export type ParsedCliArgs =

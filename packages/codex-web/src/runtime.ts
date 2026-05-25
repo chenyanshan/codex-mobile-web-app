@@ -182,6 +182,11 @@ export interface CodexWebCommandResult {
 
 export type CodexWebStartTurnResult = { turnId: string } | CodexWebCommandResult;
 
+interface CodexWebTurnConflictError extends Error {
+  code: 'turn_conflict';
+  activeTurnId: string;
+}
+
 export interface ListSessionsOptions {
   favorite?: boolean;
 }
@@ -476,6 +481,10 @@ export class CodexWebRuntime {
         ...result,
         session: await this.readSession(sessionId),
       };
+    }
+    const conflictingTurnId = this.conflictingActiveTurnId(session);
+    if (conflictingTurnId) {
+      throw createTurnConflictError(sessionId, conflictingTurnId);
     }
     const settings = this.mergeSettings(sessionId, input.settings);
     this.persistSessionSettings(sessionId, settings);
@@ -917,6 +926,21 @@ export class CodexWebRuntime {
       if (this.turnToThread.get(turnId) === threadId) {
         return turnId;
       }
+    }
+    return null;
+  }
+
+  private conflictingActiveTurnId(session: CodexWebSession): string | null {
+    const processActiveTurnId = this.activeTurnIdForThread(session.id);
+    const activeTurns = (session.thread.turns ?? []).filter((turn) => isActiveTurnStatus(turn?.status));
+    if (activeTurns.length <= 1) {
+      return null;
+    }
+    for (const turn of activeTurns) {
+      if (turn.id && turn.id === processActiveTurnId) {
+        continue;
+      }
+      return turn.id || processActiveTurnId || 'unknown';
     }
     return null;
   }
@@ -1424,11 +1448,34 @@ function isFailureTurnStatus(status: string | null | undefined): boolean {
   return ['failed', 'error', 'timedout', 'timeout'].includes(normalizeTurnStatus(status));
 }
 
+function isSuccessTurnStatus(status: string | null | undefined): boolean {
+  return ['completed', 'complete', 'succeeded', 'success', 'finished'].includes(normalizeTurnStatus(status));
+}
+
+function isInterruptedTurnStatus(status: string | null | undefined): boolean {
+  return ['interrupted', 'cancelled', 'canceled', 'aborted'].includes(normalizeTurnStatus(status));
+}
+
 function normalizeTurnStatus(status: string | null | undefined): string {
   return String(status || '')
     .trim()
     .toLowerCase()
     .replace(/[\s_-]+/g, '');
+}
+
+function isActiveTurnStatus(status: string | null | undefined): boolean {
+  const normalized = normalizeTurnStatus(status);
+  return Boolean(normalized)
+    && !isSuccessTurnStatus(normalized)
+    && !isFailureTurnStatus(normalized)
+    && !isInterruptedTurnStatus(normalized);
+}
+
+function createTurnConflictError(sessionId: string, activeTurnId: string): CodexWebTurnConflictError {
+  const error = new Error(`Session ${sessionId} already has an active turn (${activeTurnId}).`) as CodexWebTurnConflictError;
+  error.code = 'turn_conflict';
+  error.activeTurnId = activeTurnId;
+  return error;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1437,22 +1484,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function createHelpCommandResult(helpReportPath: string | null): CodexWebCommandResult {
   const guideLine = helpReportPath
-    ? `Full guide: [Codex Web help](${helpReportPath})`
-    : 'Full guide: open the Codex Web help report from the Reports page.';
+    ? `完整说明：[Codex Web 帮助文档](${helpReportPath})`
+    : '完整说明：请在 Reports 页面打开 Codex Web 帮助文档。';
   return {
     type: 'command',
     command: {
       name: 'help',
       action: 'show',
       message: [
-        'Supported commands:',
-        '- `/help` - show this command list.',
-        '- `/goal` - show the current session goal.',
-        '- `/goal <objective>` - set the session goal.',
-        '- `/goal set <objective>` or `/goal edit <objective>` - replace the session goal.',
-        '- `/goal pause` - pause the current goal.',
-        '- `/goal resume` - resume the current goal.',
-        '- `/goal clear` - clear the current goal.',
+        '支持的命令：',
+        '- `/help` - 显示这份命令列表。',
+        '- `/goal` - 显示当前会话的目标。',
+        '- `/goal <objective>` - 设置当前会话目标。',
+        '- `/goal set <objective>` 或 `/goal edit <objective>` - 替换当前会话目标。',
+        '- `/goal pause` - 暂停当前目标。',
+        '- `/goal resume` - 恢复当前目标。',
+        '- `/goal clear` - 清除当前会话目标。',
         '',
         guideLine,
       ].join('\n'),

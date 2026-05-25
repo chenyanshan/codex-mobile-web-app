@@ -2490,14 +2490,15 @@ async function onComposerSubmit(event) {
   state.streamWasBackgrounded = false;
   state.status = 'Starting turn';
   state.statusTone = 'warn';
-  appendMessage({
+  const optimisticUserEntry = {
     id: `local_user_${Date.now()}`,
     kind: 'message',
     role: 'user',
     label: 'You',
     meta: 'pending',
     text,
-  });
+  };
+  appendMessage(optimisticUserEntry);
   const promptToSend = text;
   state.prompt = '';
   renderChatAtLatestIfFollowing(() => {});
@@ -2538,6 +2539,12 @@ async function onComposerSubmit(event) {
     if (handleMissingSession(error, promptToSend)) {
       return;
     }
+    if (handleTurnConflict(error, {
+      promptText: promptToSend,
+      optimisticEntryId: optimisticUserEntry.id,
+    })) {
+      return;
+    }
     if (scheduleFirstTurnRecovery({
       error,
       promptText: promptToSend,
@@ -2550,6 +2557,28 @@ async function onComposerSubmit(event) {
     surfaceTimelineError(state.turnId || `request_${Date.now()}`, error?.payload?.message || error?.message || 'Request failed');
     handleApiError(error, { suppressComposerError: true });
   }
+}
+
+function handleTurnConflict(error, {
+  promptText,
+  optimisticEntryId,
+} = {}) {
+  if (error?.status !== 409 || error?.payload?.error !== 'turn_conflict') {
+    return false;
+  }
+  removeTimelineEntryById(optimisticEntryId);
+  const activeTurnId = String(error?.payload?.activeTurnId || '').trim();
+  state.prompt = promptText || state.prompt;
+  state.pendingTurn = Boolean(activeTurnId);
+  state.turnId = activeTurnId || state.turnId;
+  state.status = activeTurnId ? 'Turn running' : 'Request blocked';
+  state.statusTone = 'warn';
+  state.error = '';
+  renderChatAtLatestIfFollowing(() => {});
+  if (activeTurnId) {
+    void streamTurnEvents(activeTurnId, { forceReconnect: true });
+  }
+  return true;
 }
 
 function handleCommandResult(result) {
@@ -4886,6 +4915,16 @@ async function updateSessionSettings(patch = {}) {
 
 function appendMessage(entry) {
   state.timeline.push(entry);
+}
+
+function removeTimelineEntryById(entryId) {
+  if (!entryId) {
+    return;
+  }
+  const index = state.timeline.findIndex((item) => item?.id === entryId);
+  if (index >= 0) {
+    state.timeline.splice(index, 1);
+  }
 }
 
 function surfaceTimelineError(turnId, message) {

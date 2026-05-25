@@ -282,8 +282,8 @@ test('serve command creates state and log directories before server start', asyn
   assert.equal(stateStat.isDirectory(), true);
   assert.equal(logStat.isDirectory(), true);
   assert.equal(reportsStat.isDirectory(), true);
-  assert.match(helpReport, /# Codex Web Help/u);
-  assert.match(helpReport, /\| Command \| What It Does \| Starts A Codex Turn \|/u);
+  assert.match(helpReport, /# Codex Web 帮助/u);
+  assert.match(helpReport, /\| 命令 \| 作用 \| 会启动 Codex turn \|/u);
   assert.match(helpReport, /`\/help`/u);
   assert.match(helpReport, /`\/goal resume`/u);
 });

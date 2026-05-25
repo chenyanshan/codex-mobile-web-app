@@ -1268,7 +1268,7 @@ test('runtime handles help slash command without starting a native turn', async 
   assert.equal((result as any).type, 'command');
   assert.equal((result as any).command.name, 'help');
   assert.equal((result as any).command.action, 'show');
-  assert.match((result as any).command.message, /Supported commands/u);
+  assert.match((result as any).command.message, /支持的命令/u);
   assert.match((result as any).command.message, /\/goal <objective>/u);
   assert.match((result as any).command.message, /\/goal set <objective>/u);
   assert.match((result as any).command.message, /\/goal edit <objective>/u);
@@ -1440,6 +1440,125 @@ test('runtime readSession exposes only process-active turn state', async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal((await runtime.readSession('thread_active_state'))?.activeTurnId, null);
+});
+
+test('runtime rejects new non-command turns when thread history shows multiple active turns', async () => {
+  let startTurnCalls = 0;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_busy')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_busy', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_busy'),
+      turns: [
+        {
+          id: 'turn_existing_active_1',
+          status: 'in_progress',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Still working' },
+          ],
+        },
+        {
+          id: 'turn_existing_active_2',
+          status: 'in_progress',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Still also working' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async (): Promise<ProviderTurnResult> => {
+      startTurnCalls += 1;
+      return {
+        outputText: 'should not start',
+        status: 'completed',
+        turnId: 'turn_unexpected',
+        threadId: 'thread_busy',
+      };
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  await assert.rejects(
+    runtime.startTurn('thread_busy', { text: 'new question' }),
+    (error: unknown) => {
+      assert.equal(error instanceof Error, true);
+      assert.equal((error as Error & { code?: string }).code, 'turn_conflict');
+      assert.equal((error as Error & { activeTurnId?: string }).activeTurnId, 'turn_existing_active_1');
+      assert.match((error as Error).message, /already has an active turn/u);
+      return true;
+    },
+  );
+  assert.equal(startTurnCalls, 0);
+});
+
+test('runtime still allows slash commands while thread history shows an active turn', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_busy_command')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_busy_command', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_busy_command'),
+      turns: [
+        {
+          id: 'turn_existing_active_1',
+          status: 'in_progress',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Still working' },
+          ],
+        },
+        {
+          id: 'turn_existing_active_2',
+          status: 'in_progress',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Still also working' },
+          ],
+        },
+      ],
+    }),
+    getThreadGoal: async () => ({
+      threadId: 'thread_busy_command',
+      objective: 'ship slash goal support',
+      status: 'active',
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async (): Promise<ProviderTurnResult> => ({
+      outputText: 'should not start',
+      status: 'completed',
+      turnId: 'turn_unexpected',
+      threadId: 'thread_busy_command',
+    }),
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const result = await runtime.startTurn('thread_busy_command', { text: '/goal' });
+
+  assert.equal(result.type, 'command');
+  assert.equal(result.command.name, 'goal');
+  assert.match(result.command.message, /ship slash goal support/u);
 });
 
 test('runtime readSession exposes backend-managed turn failure timeline entries', async () => {

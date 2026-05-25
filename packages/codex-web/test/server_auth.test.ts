@@ -610,6 +610,46 @@ test('POST /api/sessions/:id/turns returns 404 without starting a replacement se
   }
 });
 
+test('POST /api/sessions/:id/turns returns 409 when the session already has an active turn', async () => {
+  const calls: string[] = [];
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      startTurn: async (sessionId: string) => {
+        calls.push(`startTurn:${sessionId}`);
+        const error = new Error('Session thread_busy already has an active turn (turn_active).');
+        (error as Error & { code?: string }).code = 'turn_conflict';
+        (error as Error & { activeTurnId?: string }).activeTurnId = 'turn_active';
+        throw error;
+      },
+    } as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_busy/turns`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text: 'hi' }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: 'turn_conflict',
+      message: 'Session thread_busy already has an active turn (turn_active).',
+      activeTurnId: 'turn_active',
+    });
+    assert.deepEqual(calls, [
+      'startTurn:thread_busy',
+    ]);
+  } finally {
+    await server.stop();
+  }
+});
+
 test('POST /api/sessions/:id/turns returns handled slash command results', async () => {
   const server = createCodexWebServer({
     auth: createAcceptingAuth(),
@@ -621,7 +661,7 @@ test('POST /api/sessions/:id/turns returns handled slash command results', async
           name: input.text === '/help' ? 'help' : 'goal',
           action: input.text === '/help' ? 'show' : 'set',
           message: input.text === '/help'
-            ? 'Supported commands: /help, /goal. Full guide: /Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md'
+            ? '支持的命令：/help、/goal。完整说明：/Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md'
             : `Goal set from ${sessionId}: ${input.text}`,
           goal: input.text === '/help'
             ? null
@@ -653,7 +693,7 @@ test('POST /api/sessions/:id/turns returns handled slash command results', async
               label: input.text === '/help' ? '/help' : '/goal',
               meta: input.text === '/help' ? 'show' : 'set',
               text: input.text === '/help'
-                ? 'Supported commands: /help, /goal. Full guide: /Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md'
+                ? '支持的命令：/help、/goal。完整说明：/Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md'
                 : `Goal set from ${sessionId}: ${input.text}`,
             },
           ],
@@ -726,7 +766,7 @@ test('POST /api/sessions/:id/turns returns handled slash command results', async
       command: {
         name: 'help',
         action: 'show',
-        message: 'Supported commands: /help, /goal. Full guide: /Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md',
+        message: '支持的命令：/help、/goal。完整说明：/Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md',
         goal: null,
       },
       session: {
@@ -750,7 +790,7 @@ test('POST /api/sessions/:id/turns returns handled slash command results', async
             role: 'system',
             label: '/help',
             meta: 'show',
-            text: 'Supported commands: /help, /goal. Full guide: /Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md',
+            text: '支持的命令：/help、/goal。完整说明：/Users/chenyanshan/.codex-web/reports/codex-mobile-web-app/2026-05-22/codex-web-help.md',
           },
         ],
       },

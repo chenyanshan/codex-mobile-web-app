@@ -426,6 +426,61 @@ test('composer can submit a new message while a turn is already running', async 
   assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Follow-up while running/u);
 });
 
+test('composer restores the prompt and reconnects when backend reports an active turn conflict', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/sessions/session_1/turns') {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            error: 'turn_conflict',
+            message: 'Session session_1 already has an active turn (turn_active).',
+            activeTurnId: 'turn_active',
+          }),
+        };
+      }
+      if (path === '/api/turns/turn_active/events') {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => ({ done: true }),
+            }),
+          },
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.pendingTurn = true;
+  api.state.turnId = 'turn_old';
+  api.state.prompt = 'Follow-up while running';
+
+  await api.onComposerSubmit({
+    preventDefault() {},
+  });
+
+  assert.deepEqual(fetchCalls.map((call) => call.path), [
+    '/api/sessions/session_1/turns',
+    '/api/turns/turn_active/events',
+  ]);
+  assert.equal(api.state.pendingTurn, true);
+  assert.equal(api.state.turnId, 'turn_active');
+  assert.equal(api.state.prompt, 'Follow-up while running');
+  assert.equal(api.state.error, '');
+  assert.doesNotMatch(api.state.timeline.map((item) => item.text || '').join('\n'), /Follow-up while running/u);
+});
+
 test('composer renders handled goal slash command results without streaming a turn', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
@@ -578,10 +633,10 @@ test('composer renders handled help slash command results with report links', as
               name: 'help',
               action: 'show',
               message: [
-                'Supported commands:',
+                '支持的命令：',
                 '- `/help`',
                 '- `/goal`',
-                `Full guide: [Codex Web help](${reportPath})`,
+                `完整说明：[Codex Web 帮助文档](${reportPath})`,
               ].join('\n'),
               goal: null,
             },
@@ -598,10 +653,10 @@ test('composer renders handled help slash command results with report links', as
                   label: '/help',
                   meta: 'show',
                   text: [
-                    'Supported commands:',
+                    '支持的命令：',
                     '- `/help`',
                     '- `/goal`',
-                    `Full guide: [Codex Web help](${reportPath})`,
+                    `完整说明：[Codex Web 帮助文档](${reportPath})`,
                   ].join('\n'),
                 },
               ],
@@ -3846,6 +3901,15 @@ test('report viewer renders markdown and sandboxed html reports', async () => {
   assert.match(html, /<iframe class="report-frame" sandbox="" srcdoc="&lt;h1&gt;Audit&lt;\/h1&gt;"><\/iframe>/u);
 });
 
+test('markdown reports wrap long text within the mobile viewport', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.report-document\s*\{[^}]*overflow-wrap:\s*anywhere;/su);
+  assert.match(styles, /\.markdown-body p,\s*\.markdown-body li,\s*\.markdown-body blockquote,\s*\.markdown-body h1,\s*\.markdown-body h2,\s*\.markdown-body h3,\s*\.markdown-body td,\s*\.markdown-body th\s*\{[^}]*overflow-wrap:\s*anywhere;/su);
+  assert.match(styles, /\.markdown-body pre,\s*\.markdown-body code\s*\{[^}]*white-space:\s*pre-wrap;/su);
+  assert.doesNotMatch(styles, /\.markdown-body\s*\{[^}]*white-space:\s*nowrap;/su);
+});
+
 test('report viewer renders the shipped table verification report as real tables', async () => {
   const { api } = await loadAppHarness();
 
@@ -5375,7 +5439,7 @@ test('opening a session uses backend timeline command messages without dropping 
               timeline: [
                 { id: 'history_turn_1_0', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Original question' },
                 { id: 'history_turn_1_1', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Original answer' },
-                { id: 'command_help_show', kind: 'message', role: 'system', label: '/help', meta: 'show', text: 'Supported commands: /help /goal' },
+                { id: 'command_help_show', kind: 'message', role: 'system', label: '/help', meta: 'show', text: '支持的命令：/help /goal' },
                 { id: 'command_goal_show', kind: 'message', role: 'system', label: '/goal', meta: 'show', text: 'Goal (active): ship slash goal support' },
                 { id: 'history_turn_2_2', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Later question' },
                 { id: 'history_turn_2_3', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Later answer' },
@@ -5419,7 +5483,7 @@ test('opening a session uses backend timeline command messages without dropping 
   assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
     'Original question',
     'Original answer',
-    'Supported commands: /help /goal',
+    '支持的命令：/help /goal',
     'Goal (active): ship slash goal support',
     'Later question',
     'Later answer',

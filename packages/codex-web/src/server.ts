@@ -665,6 +665,23 @@ async function startSessionTurn({
       writeSessionNotFound(response);
       return null;
     }
+    if (isTurnConflictError(error)) {
+      const activeTurnId = extractActiveTurnId(error);
+      writeRequestLog({
+        level: 'warn',
+        method: 'POST',
+        path: `/api/sessions/${encodeURIComponent(sessionId)}/turns`,
+        status: 409,
+        code: 'turn_conflict',
+        message: error instanceof Error ? error.message : String(error),
+      });
+      writeJson(response, 409, {
+        error: 'turn_conflict',
+        message: error instanceof Error ? error.message : String(error),
+        ...(activeTurnId ? { activeTurnId } : {}),
+      });
+      return null;
+    }
     throw error;
   }
 }
@@ -773,6 +790,20 @@ function isSessionNotFoundError(error: unknown): boolean {
     || /thread not found/i.test(message)
     || /session not found/i.test(message)
     || /unknown thread/i.test(message);
+}
+
+function isTurnConflictError(error: unknown): boolean {
+  return error instanceof Error
+    && (error as Error & { code?: string }).code === 'turn_conflict';
+}
+
+function extractActiveTurnId(error: unknown): string | null {
+  const activeTurnId = error instanceof Error
+    ? (error as Error & { activeTurnId?: unknown }).activeTurnId
+    : null;
+  return typeof activeTurnId === 'string' && activeTurnId.trim()
+    ? activeTurnId.trim()
+    : null;
 }
 
 function extractBearerToken(request: IncomingMessage): string | null {
