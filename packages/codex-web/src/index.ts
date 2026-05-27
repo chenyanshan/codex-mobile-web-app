@@ -1,4 +1,12 @@
 export { AuthStore, type AuthSession, type AuthState, type PublicAuthSession } from './auth_store.js';
+export {
+  canCreateProjectSession,
+  canReadAppSession,
+  canWriteAppSession,
+  effectiveProjectGrant,
+  localAdminPrincipal,
+  type CodexWebPrincipal,
+} from './access_control.js';
 export { loadServiceConfig, readEnvFile, type CodexWebConfig } from './config.js';
 export {
   CodexWebEventBus,
@@ -19,6 +27,17 @@ export {
   normalizeTurnStartedEvent,
   type CodexWebEvent,
 } from './event_model.js';
+export { HybridAuthStore } from './hybrid_auth_store.js';
+export {
+  FileIdentityStore,
+  type CodexWebAppSession,
+  type CodexWebIdentityState,
+  type CodexWebProject,
+  type CodexWebProjectGrant,
+  type CodexWebRole,
+  type CodexWebShare,
+  type CodexWebUser,
+} from './identity_store.js';
 export {
   createCodexWebServer,
   type CodexWebAuthLike,

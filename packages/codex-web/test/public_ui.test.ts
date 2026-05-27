@@ -157,6 +157,239 @@ test('repeat opens with a stored token render the app shell before auth verifica
   assert.doesNotMatch(app, /form\.get\('deviceName'\)/u);
 });
 
+test('login form supports optional username for multi-user mode', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /name="username"/u);
+  assert.match(app, /autocomplete="username"/u);
+  assert.match(app, /const username = String\(form\.get\('username'\) \|\| ''\);/u);
+  assert.match(app, /body: \{ username, password \}/u);
+});
+
+test('admin principals see a management entry in settings', async () => {
+  const app = await readFile(appUrl, 'utf8');
+
+  assert.match(app, /function isAdminPrincipal\(\)/u);
+  assert.match(app, /id="open-admin-settings-button"/u);
+  assert.match(app, /Admin Console/u);
+});
+
+test('restore auth also loads project display names for new sessions', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/auth/me') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ session: { id: 'auth_1', principal: { userId: 'user_1', isAdmin: false } } }),
+        };
+      }
+      if (path === '/api/models') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/projects') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [{ id: 'project_a', displayName: 'Project Alpha' }] }),
+        };
+      }
+      if (path === '/api/sessions?favorite=true') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/reports') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+
+  await api.restoreAuth();
+
+  assert.equal(fetchCalls.includes('/api/projects'), true);
+  assert.equal(JSON.stringify(api.state.projects), JSON.stringify([{ id: 'project_a', displayName: 'Project Alpha' }]));
+  assert.equal(api.state.projectsLoaded, true);
+});
+
+test('new session form uses project display names and posts selected project id', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/sessions') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            session: {
+              id: 'session_project',
+              projectId: 'project_a',
+              projectDisplayName: 'Project Alpha',
+              settings: {},
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.projects = [
+    { id: 'project_a', displayName: 'Project Alpha' },
+    { id: 'project_b', displayName: 'Project Beta' },
+  ];
+  api.state.projectsLoaded = true;
+  api.state.newProjectId = 'project_b';
+
+  const html = api.renderNewSession().innerHTML;
+  assert.match(html, /<label for="new-project-select">Project<\/label>/u);
+  assert.match(html, /<option value="project_a"/u);
+  assert.match(html, />Project Alpha<\/option>/u);
+  assert.doesNotMatch(html, /new-cwd-input/u);
+
+  await api.ensureSession();
+
+  assert.equal(fetchCalls[0]?.path, '/api/sessions');
+  assert.equal(JSON.stringify(JSON.parse(fetchCalls[0]?.options.body)), JSON.stringify({
+    projectId: 'project_b',
+    settings: api.collectSettings(),
+  }));
+});
+
+test('admin console opens from settings and loads management overview', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/admin/settings') {
+        return { ok: true, status: 200, json: async () => ({ settings: { multiUserEnabled: true } }) };
+      }
+      if (path === '/api/admin/projects') {
+        return { ok: true, status: 200, json: async () => ({ items: [{ id: 'project_a', displayName: 'Project Alpha' }] }) };
+      }
+      if (path === '/api/admin/users') {
+        return { ok: true, status: 200, json: async () => ({ items: [{ id: 'user_1', username: 'alice', enabled: true }] }) };
+      }
+      if (path === '/api/admin/roles') {
+        return { ok: true, status: 200, json: async () => ({ items: [{ id: 'role_user', name: 'User' }] }) };
+      }
+      if (path === '/api/admin/sessions') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [{ id: 'session_1', userId: 'user_1', projectDisplayName: 'Project Alpha' }] }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+
+  await api.openAdminConsole();
+
+  assert.equal(api.state.view, 'admin');
+  assert.deepEqual(fetchCalls, [
+    '/api/admin/settings',
+    '/api/admin/projects',
+    '/api/admin/users',
+    '/api/admin/roles',
+    '/api/admin/sessions',
+  ]);
+  const html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /Admin Console/u);
+  assert.match(html, /Project Alpha/u);
+  assert.match(html, /alice/u);
+  assert.match(html, /session_1/u);
+});
+
+test('observer sessions and share sessions render read-only chat without composer actions', async () => {
+  const [styles, { api }] = await Promise.all([
+    readFile(stylesUrl, 'utf8'),
+    loadAppHarness(),
+  ]);
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_observed';
+  api.state.currentSession = {
+    id: 'session_observed',
+    projectDisplayName: 'Project Alpha',
+    mode: 'observer',
+    readOnly: true,
+  };
+
+  const html = api.renderChat().innerHTML;
+
+  assert.match(html, /read-only-banner/u);
+  assert.match(html, /Observer mode/u);
+  assert.doesNotMatch(html, /id="prompt-input"/u);
+  assert.doesNotMatch(html, /id="send-button"/u);
+  assert.doesNotMatch(html, /id="settings-toggle"/u);
+  assert.match(styles, /\.read-only-banner\s*\{[^}]*display:\s*flex;/su);
+  assert.match(styles, /\.read-only-banner\s*\{[^}]*border:\s*1px solid var\(--border\);/su);
+});
+
+test('share routes load public session history without auth and render read-only', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    pathname: '/share/cws_public_token',
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/share/cws_public_token/session') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'share',
+            session: {
+              id: 'session_shared',
+              projectDisplayName: 'Project Alpha',
+              timeline: [
+                { id: 'm1', kind: 'message', role: 'user', label: 'User', meta: 'history', text: 'Shared question' },
+                { id: 'm2', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Shared answer' },
+              ],
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  await api.loadSharedSessionFromLocation();
+
+  assert.deepEqual(fetchCalls, ['/api/share/cws_public_token/session']);
+  assert.equal(api.state.authSession?.principal?.mode, 'share');
+  assert.equal(api.state.token, '');
+  assert.equal(api.state.view, 'chat');
+  assert.equal(api.state.currentSession.readOnly, true);
+  const html = api.renderChat().innerHTML;
+  assert.match(html, /Shared answer/u);
+  assert.match(html, /Shared link/u);
+  assert.doesNotMatch(html, /id="prompt-input"/u);
+});
+
+test('admin console uses dense mobile-safe management rows', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.admin-console-page\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.match(styles, /\.admin-list\s*\{[^}]*display:\s*grid;/su);
+  assert.match(styles, /\.admin-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/su);
+  assert.match(styles, /\.admin-row-main\s*\{[^}]*overflow-wrap:\s*anywhere;/su);
+  assert.match(styles, /\.admin-session-open\s*\{[^}]*text-align:\s*left;/su);
+});
+
+
 test('session home opens a settings page and keeps logout inside settings', async () => {
   const app = await readFile(appUrl, 'utf8');
 
@@ -4112,7 +4345,7 @@ test('session restore renders favorites first and preloads all sessions in the b
   });
   await flushMicrotasks();
 
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/reports']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions?favorite=true', '/api/reports']);
   pending[1]?.resolve({
     ok: true,
     status: 200,
@@ -4121,11 +4354,16 @@ test('session restore renders favorites first and preloads all sessions in the b
   pending[2]?.resolve({
     ok: true,
     status: 200,
+    json: async () => ({ items: [] }),
+  });
+  pending[3]?.resolve({
+    ok: true,
+    status: 200,
     json: async () => ({
       items: [{ id: 'favorite_session', favorite: true, updatedAt: 20, settings: { metadata: {} } }],
     }),
   });
-  pending[3]?.resolve({
+  pending[4]?.resolve({
     ok: true,
     status: 200,
     json: async () => ({ items: [] }),
@@ -4136,9 +4374,9 @@ test('session restore renders favorites first and preloads all sessions in the b
   assert.equal(api.state.sortMode, 'favorites');
   assert.equal(api.state.sessionsScope, 'favorites');
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session']));
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
 
-  pending[4]?.resolve({
+  pending[5]?.resolve({
     ok: true,
     status: 200,
     json: async () => ({
@@ -4157,7 +4395,7 @@ test('session restore renders favorites first and preloads all sessions in the b
 
   await api.setSessionSortMode('time');
 
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session', 'all_session']));
 });
 
@@ -5625,6 +5863,10 @@ async function loadAppHarness(overrides = {}) {
     },
     window: {
       innerWidth: overrides.viewportWidth ?? 390,
+      location: {
+        pathname: overrides.pathname || '/',
+        reload() {},
+      },
       addEventListener() {},
       matchMedia: overrides.matchMedia || ((query: string) => ({
         matches: Boolean(overrides.desktopPointer) && query === '(hover: hover) and (pointer: fine)',
@@ -5669,6 +5911,8 @@ globalThis.__codexWebTest = {
   previewInputForSession: typeof previewInputForSession === 'function' ? previewInputForSession : null,
   renderSessionCards: typeof renderSessionCards === 'function' ? renderSessionCards : null,
   renderSessionList: typeof renderSessionList === 'function' ? renderSessionList : null,
+  renderNewSession: typeof renderNewSession === 'function' ? renderNewSession : null,
+  renderAdminConsole: typeof renderAdminConsole === 'function' ? renderAdminConsole : null,
   upsertSession: typeof upsertSession === 'function' ? upsertSession : null,
   renderChat: typeof renderChat === 'function' ? renderChat : null,
   renderChatContent: typeof renderChatContent === 'function' ? renderChatContent : null,
@@ -5689,6 +5933,9 @@ globalThis.__codexWebTest = {
   refreshSessionsList: typeof refreshSessionsList === 'function' ? refreshSessionsList : null,
   refreshCurrentView: typeof refreshCurrentView === 'function' ? refreshCurrentView : null,
   restoreAuth: typeof restoreAuth === 'function' ? restoreAuth : null,
+  loadSharedSessionFromLocation: typeof loadSharedSessionFromLocation === 'function' ? loadSharedSessionFromLocation : null,
+  ensureSession: typeof ensureSession === 'function' ? ensureSession : null,
+  refreshProjectsList: typeof refreshProjectsList === 'function' ? refreshProjectsList : null,
 	  refreshReportsList: typeof refreshReportsList === 'function' ? refreshReportsList : null,
 	  openReportsPage: typeof openReportsPage === 'function' ? openReportsPage : null,
 	  closeReportsPage: typeof closeReportsPage === 'function' ? closeReportsPage : null,
@@ -5696,6 +5943,7 @@ globalThis.__codexWebTest = {
 	  toggleReportFavorite: typeof toggleReportFavorite === 'function' ? toggleReportFavorite : null,
 	  showSessionList: typeof showSessionList === 'function' ? showSessionList : null,
 	  openAppSettingsPage: typeof openAppSettingsPage === 'function' ? openAppSettingsPage : null,
+	  openAdminConsole: typeof openAdminConsole === 'function' ? openAdminConsole : null,
 	  openNewSessionPage: typeof openNewSessionPage === 'function' ? openNewSessionPage : null,
 	  openReportById: typeof openReportById === 'function' ? openReportById : null,
 	  closeReportViewer: typeof closeReportViewer === 'function' ? closeReportViewer : null,

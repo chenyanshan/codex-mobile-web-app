@@ -2227,3 +2227,110 @@ test('runtime publishes live work update summaries to subscribers', async () => 
     JSON.stringify({ command: 'rg TODO', cwd: '/workspace', output: 'src/app.ts:12: TODO', exitCode: 0 }),
   ]);
 });
+
+test('runtime exposes owning thread ids for active turns and approvals', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_guard')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_guard', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_guard'),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted, onApprovalRequest }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_guard', threadId: 'thread_guard' });
+      await onApprovalRequest?.({
+        requestId: 'approval_guard',
+        turnId: 'turn_guard',
+        itemId: 'approval_item',
+        kind: 'command',
+        command: 'npm test',
+        reason: 'test',
+        summary: {},
+      } as ProviderApprovalRequest);
+      return {
+        outputText: 'Final answer',
+        status: 'completed',
+        turnId: 'turn_guard',
+        threadId: 'thread_guard',
+      };
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  await runtime.startTurn('thread_guard', { text: 'hi' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(runtime.threadIdForTurn('turn_guard'), 'thread_guard');
+  assert.equal(runtime.threadIdForApproval('approval_guard'), 'thread_guard');
+  assert.equal(runtime.threadIdForTurn('missing_turn'), null);
+  assert.equal(runtime.threadIdForApproval('missing_approval'), null);
+});
+
+test('runtime guarded interrupt and approval helpers reject mismatched threads', async () => {
+  const calls: string[] = [];
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_guard')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_guard', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_guard'),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted, onApprovalRequest }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_guard', threadId: 'thread_guard' });
+      await onApprovalRequest?.({
+        requestId: 'approval_guard',
+        turnId: 'turn_guard',
+        itemId: 'approval_item',
+        kind: 'command',
+        command: 'npm test',
+        reason: 'test',
+        summary: {},
+      } as ProviderApprovalRequest);
+      return {
+        outputText: 'Final answer',
+        status: 'completed',
+        turnId: 'turn_guard',
+        threadId: 'thread_guard',
+      };
+    },
+    interruptTurn: async ({ threadId, turnId }) => {
+      calls.push(`interrupt:${threadId}:${turnId}`);
+    },
+    respondToApproval: async ({ requestId, option }) => {
+      calls.push(`approval:${requestId}:${option}`);
+    },
+  };
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  await runtime.startTurn('thread_guard', { text: 'hi' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  await assert.rejects(
+    runtime.interruptTurnForThread('thread_other', 'turn_guard'),
+    /does not belong to thread/u,
+  );
+  await assert.rejects(
+    runtime.resolveApprovalForThread('thread_other', 'approval_guard', 'accept'),
+    /does not belong to thread/u,
+  );
+
+  await runtime.interruptTurnForThread('thread_guard', 'turn_guard');
+  await runtime.resolveApprovalForThread('thread_guard', 'approval_guard', 'accept');
+
+  assert.deepEqual(calls, [
+    'interrupt:thread_guard:turn_guard',
+    'approval:approval_guard:1',
+  ]);
+});

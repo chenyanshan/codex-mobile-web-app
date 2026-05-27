@@ -454,6 +454,10 @@ test('static root is public', async () => {
     assert.equal(indexResponse.status, 200);
     assert.equal(await indexResponse.text(), html);
 
+    const shareResponse = await fetch(`${server.baseUrl}/share/cws_public_token`);
+    assert.equal(shareResponse.status, 200);
+    assert.equal(await shareResponse.text(), html);
+
     const scriptResponse = await fetch(`${server.baseUrl}/app.js`);
     assert.equal(scriptResponse.status, 200);
     assert.match(scriptResponse.headers.get('content-type') ?? '', /^application\/javascript\b/i);

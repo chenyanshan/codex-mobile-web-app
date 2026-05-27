@@ -738,6 +738,23 @@ export class CodexWebRuntime {
     await this.client.interruptTurn({ threadId: sessionId, turnId });
   }
 
+  threadIdForTurn(turnId: string): string | null {
+    return this.turnToThread.get(turnId) ?? null;
+  }
+
+  threadIdForApproval(approvalId: string): string | null {
+    const turnId = this.approvalToTurn.get(approvalId);
+    return turnId ? this.threadIdForTurn(turnId) : null;
+  }
+
+  async interruptTurnForThread(threadId: string, turnId: string): Promise<void> {
+    const ownerThreadId = this.threadIdForTurn(turnId);
+    if (ownerThreadId !== threadId) {
+      throw new Error(`Turn ${turnId} does not belong to thread ${threadId}.`);
+    }
+    await this.client.interruptTurn({ threadId, turnId });
+  }
+
   async resolveApproval(
     approvalId: string,
     decision: 'accept' | 'accept_for_session' | 'deny',
@@ -760,6 +777,18 @@ export class CodexWebRuntime {
     }));
     this.approvalToTurn.delete(approvalId);
     this.approvalToBatch.delete(approvalId);
+  }
+
+  async resolveApprovalForThread(
+    threadId: string,
+    approvalId: string,
+    decision: 'accept' | 'accept_for_session' | 'deny',
+  ): Promise<void> {
+    const ownerThreadId = this.threadIdForApproval(approvalId);
+    if (ownerThreadId !== threadId) {
+      throw new Error(`Approval ${approvalId} does not belong to thread ${threadId}.`);
+    }
+    await this.resolveApproval(approvalId, decision);
   }
 
   getTurnEvents(turnId: string, afterId?: string | number | null) {

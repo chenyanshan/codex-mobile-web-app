@@ -7,6 +7,8 @@ import { stdin as defaultStdin, stdout as defaultStdout, stderr as defaultStderr
 import { fileURLToPath } from 'node:url';
 import { AuthStore, type PublicAuthSession } from './auth_store.js';
 import { loadServiceConfig, type CodexWebConfig } from './config.js';
+import { HybridAuthStore } from './hybrid_auth_store.js';
+import { FileIdentityStore } from './identity_store.js';
 import { CodexWebRuntime } from './runtime.js';
 import { createCodexWebServer, type CodexWebAuthLike, type CodexWebServerHandle } from './server.js';
 import { FileSessionSettingsStore } from './session_settings_store.js';
@@ -152,7 +154,13 @@ export async function runAuthSetPasswordCommand(
   const env = dependencies.env ?? process.env;
   const loadConfigFn = dependencies.loadConfig ?? ((options?: { env?: NodeJS.ProcessEnv }) => loadServiceConfig(options));
   const config = loadConfigFn({ env });
-  const createAuthStoreFn = dependencies.createAuthStore ?? (({ authPath }) => new AuthStore({ authPath }));
+  const identityStore = new FileIdentityStore({
+    identityPath: path.join(config.stateDir, 'identity.json'),
+  });
+  const createAuthStoreFn = dependencies.createAuthStore ?? (({ authPath }) => new HybridAuthStore({
+    legacyAuth: new AuthStore({ authPath }),
+    identityStore,
+  }));
   const promptForPassword = dependencies.promptForPassword ?? (() => readPasswordFromStdin({
     stdin: defaultStdin,
     stdout: defaultStdout,
@@ -180,7 +188,13 @@ export async function startServeCommand(
   const bootstrapPassword = takeOneTimePassword(env);
   await ensureRuntimeDirectories(config);
   await ensureBundledReports(config);
-  const createAuthStoreFn = dependencies.createAuthStore ?? (({ authPath }) => new AuthStore({ authPath }));
+  const identityStore = new FileIdentityStore({
+    identityPath: path.join(config.stateDir, 'identity.json'),
+  });
+  const createAuthStoreFn = dependencies.createAuthStore ?? (({ authPath }) => new HybridAuthStore({
+    legacyAuth: new AuthStore({ authPath }),
+    identityStore,
+  }));
   const auth = createAuthStoreFn({ authPath: config.authPath });
 
   if (!(await auth.isConfigured())) {
@@ -209,7 +223,10 @@ export async function startServeCommand(
     }),
   }));
   const runtime = createRuntimeFn({ config });
-  const createServerFn = dependencies.createServer ?? ((args) => createCodexWebServer(args));
+  const createServerFn = dependencies.createServer ?? ((args) => createCodexWebServer({
+    ...args,
+    identityStore,
+  }));
   const server = createServerFn({ auth, runtime, config });
   const stdout = dependencies.stdout ?? defaultStdout;
 
