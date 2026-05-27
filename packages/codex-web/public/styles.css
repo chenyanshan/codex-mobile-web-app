@@ -534,6 +534,18 @@ button:disabled {
   align-content: start;
 }
 
+.admin-console-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 12px;
+}
+
 .new-session-page .panel {
   width: 100%;
 }
@@ -564,6 +576,49 @@ button:disabled {
 
 .full-width-button {
   width: 100%;
+}
+
+.admin-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-row {
+  min-width: 0;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.admin-session-open {
+  min-width: 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+}
+
+.admin-row-main,
+.admin-row-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-row-main {
+  font-size: 13px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.admin-row-meta {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .session-card,
@@ -1140,6 +1195,36 @@ button:disabled {
 
 .composer-status[data-tone="danger"] {
   color: var(--danger);
+}
+
+.read-only-composer-wrap {
+  padding-top: 0;
+}
+
+.read-only-banner {
+  width: min(100%, 720px);
+  min-height: 44px;
+  margin: 0 auto;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.read-only-banner strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .controls {

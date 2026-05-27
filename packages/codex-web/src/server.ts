@@ -1,12 +1,28 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
+import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Socket } from 'node:net';
 import path from 'node:path';
 import { URL } from 'node:url';
 import { fileURLToPath } from 'node:url';
+import {
+  canCreateProjectSession,
+  canReadAppSession,
+  canWriteAppSession,
+  localAdminPrincipal,
+  type CodexWebPrincipal,
+} from './access_control.js';
 import type { PublicAuthSession } from './auth_store.js';
 import type { CodexWebConfig } from './config.js';
 import type { CodexWebStoredEvent } from './event_bus.js';
+import type {
+  CodexWebAppSession,
+  CodexWebIdentityState,
+  CodexWebProject,
+  CodexWebRole,
+  CodexWebUser,
+  FileIdentityStore,
+} from './identity_store.js';
 import { FileReportStore } from './report_store.js';
 import type { CodexWebReport } from './report_store.js';
 import type {
@@ -21,6 +37,7 @@ import type {
 export interface CodexWebAuthLike {
   isConfigured(): Promise<boolean>;
   login(args: {
+    username?: string | null;
     password: string;
     deviceName?: string | null;
   }): Promise<{ token: string; session: PublicAuthSession; configuredNow: boolean }>;
@@ -32,6 +49,7 @@ export interface CreateCodexWebServerOptions {
   auth: CodexWebAuthLike;
   runtime: CodexWebRuntime;
   config: CodexWebConfig;
+  identityStore?: CodexWebIdentityStoreLike | null;
   staticFiles?: Record<string, { body: string | Buffer; contentType: string }>;
 }
 
@@ -46,6 +64,25 @@ interface AuthenticatedRequestContext {
   session: PublicAuthSession;
 }
 
+interface CodexWebIdentityStoreLike {
+  readState(): Promise<CodexWebIdentityState>;
+  setMultiUserEnabled?(enabled: boolean): Promise<CodexWebIdentityState>;
+  upsertProject?(project: CodexWebProject): Promise<CodexWebProject>;
+  upsertRole?(role: CodexWebRole): Promise<CodexWebRole>;
+  upsertUserWithPassword?(input: {
+    id: string;
+    username: string;
+    password: string;
+    enabled?: boolean;
+    roleIds?: string[];
+    directProjectGrants?: any[];
+  }): Promise<CodexWebUser>;
+  upsertSession(session: CodexWebAppSession): Promise<CodexWebAppSession>;
+  deleteSession?(sessionId: string): Promise<void>;
+  createShare?(args: { sessionId: string; createdByUserId: string }): ReturnType<FileIdentityStore['createShare']>;
+  findShareByToken?(token: string): Promise<string | null>;
+}
+
 const SETUP_REQUIRED_MESSAGE = 'Password not configured. Run codex-web auth set-password.';
 const MAX_JSON_BODY_BYTES = 64 * 1024;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 60_000;
@@ -57,6 +94,7 @@ export function createCodexWebServer({
   auth,
   runtime,
   config,
+  identityStore = null,
   staticFiles,
 }: CreateCodexWebServerOptions): CodexWebServerHandle {
   const resolvedStaticFiles = staticFiles ?? loadDefaultStaticFiles();
@@ -73,6 +111,7 @@ export function createCodexWebServer({
       response,
       auth,
       runtime,
+      identityStore,
       staticFiles: resolvedStaticFiles,
       config,
       loginRateLimiter,
@@ -193,6 +232,7 @@ async function handleRequest({
   response,
   auth,
   runtime,
+  identityStore,
   staticFiles,
   config,
   loginRateLimiter,
@@ -202,6 +242,7 @@ async function handleRequest({
   response: ServerResponse;
   auth: CodexWebAuthLike;
   runtime: CodexWebRuntime;
+  identityStore: CodexWebIdentityStoreLike | null;
   staticFiles: Record<string, { body: string | Buffer; contentType: string }>;
   config: CodexWebConfig;
   loginRateLimiter: FixedWindowRateLimiter;
@@ -217,7 +258,7 @@ async function handleRequest({
       writeSetupRequiredPage(response);
       return;
     }
-    const asset = staticFiles[pathname];
+    const asset = staticFiles[pathname] ?? (isShareAppRoute(pathname) ? staticFiles['/'] : undefined);
     if (!asset) {
       writeJson(response, 404, { error: 'Not found' });
       return;
@@ -249,6 +290,7 @@ async function handleRequest({
     const body = await readJsonBody(request);
     const login = await loginWithPassword({
       auth,
+      username: typeof body.username === 'string' ? body.username : null,
       password: String(body.password ?? ''),
       deviceName: typeof body.deviceName === 'string' ? body.deviceName : null,
       response,
@@ -265,6 +307,20 @@ async function handleRequest({
     return;
   }
 
+  const shareHandled = await handlePublicShareRequest({
+    pathname,
+    method,
+    response,
+    identityStore,
+    runtime,
+    registerSseCloser,
+    request,
+    url,
+  });
+  if (shareHandled) {
+    return;
+  }
+
   const authContext = await authenticateRequest({ auth, request });
   if (!authContext) {
     response.writeHead(401, {
@@ -273,6 +329,26 @@ async function handleRequest({
     });
     response.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
+  }
+
+  const identityState = identityStore ? await identityStore.readState() : null;
+  if (identityStore && identityState?.settings.multiUserEnabled === true) {
+    const handled = await handleMultiUserRequest({
+      request,
+      response,
+      pathname,
+      method,
+      url,
+      authContext,
+      principal: authContext.session.principal ?? localAdminPrincipal(),
+      identityStore,
+      identityState,
+      runtime,
+      registerSseCloser,
+    });
+    if (handled) {
+      return;
+    }
   }
 
   if (pathname === '/api/auth/me' && method === 'GET') {
@@ -610,28 +686,598 @@ async function authenticateRequest({
   return { token, session };
 }
 
+async function handlePublicShareRequest({
+  pathname,
+  method,
+  response,
+  identityStore,
+  runtime,
+  registerSseCloser,
+  request,
+  url,
+}: {
+  pathname: string;
+  method: string;
+  response: ServerResponse;
+  identityStore: CodexWebIdentityStoreLike | null;
+  runtime: CodexWebRuntime;
+  registerSseCloser: (close: () => void) => () => void;
+  request: IncomingMessage;
+  url: URL;
+}): Promise<boolean> {
+  const shareSessionMatch = pathname.match(/^\/api\/share\/([^/]+)\/session$/u);
+  const shareEventsMatch = pathname.match(/^\/api\/share\/([^/]+)\/turns\/([^/]+)\/events$/u);
+  if (!shareSessionMatch && !shareEventsMatch) {
+    if (pathname.startsWith('/api/share/')) {
+      writeJson(response, 404, { error: 'Not found' });
+      return true;
+    }
+    return false;
+  }
+  if (!identityStore?.findShareByToken) {
+    writeSessionNotFound(response);
+    return true;
+  }
+  if (method !== 'GET') {
+    writeJson(response, 404, { error: 'Not found' });
+    return true;
+  }
+  const token = decodeURIComponent((shareSessionMatch?.[1] ?? shareEventsMatch?.[1])!);
+  const shareId = await identityStore.findShareByToken(token);
+  if (!shareId) {
+    writeSessionNotFound(response);
+    return true;
+  }
+  const state = await identityStore.readState();
+  const share = state.shares.find((item) => item.id === shareId && item.enabled !== false);
+  const appSession = share ? state.sessions.find((item) => item.id === share.sessionId) : null;
+  if (!share || !appSession) {
+    writeSessionNotFound(response);
+    return true;
+  }
+  if (shareEventsMatch) {
+    const turnId = decodeURIComponent(shareEventsMatch[2]!);
+    const threadId = runtime.threadIdForTurn?.(turnId);
+    if (threadId !== appSession.codexThreadId) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    await streamTurnEvents({
+      request,
+      response,
+      runtime,
+      turnId,
+      afterId: normalizeLastEventId(url.searchParams.get('after'), request.headers['last-event-id']),
+      registerSseCloser,
+    });
+    return true;
+  }
+  const session = await runtime.readSession(appSession.codexThreadId);
+  if (!session) {
+    writeSessionNotFound(response);
+    return true;
+  }
+  writeJson(response, 200, {
+    mode: 'share',
+    session: presentSessionForUser({
+      runtimeSession: session,
+      appSession,
+      project: state.projects.find((item) => item.id === appSession.projectId) ?? null,
+      includeCwd: false,
+    }),
+  });
+  return true;
+}
+
+function isShareAppRoute(pathname: string): boolean {
+  return /^\/share\/[^/]+$/u.test(pathname);
+}
+
+async function handleMultiUserRequest({
+  request,
+  response,
+  pathname,
+  method,
+  url,
+  authContext,
+  principal,
+  identityStore,
+  identityState,
+  runtime,
+  registerSseCloser,
+}: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  pathname: string;
+  method: string;
+  url: URL;
+  authContext: AuthenticatedRequestContext;
+  principal: CodexWebPrincipal;
+  identityStore: CodexWebIdentityStoreLike;
+  identityState: CodexWebIdentityState;
+  runtime: CodexWebRuntime;
+  registerSseCloser: (close: () => void) => () => void;
+}): Promise<boolean> {
+  if (pathname === '/api/auth/me' || pathname === '/api/auth/logout') {
+    return false;
+  }
+
+  if (pathname === '/api/projects' && method === 'GET') {
+    const items = identityState.projects
+      .filter((project) => project.enabled !== false && canCreateProjectSession(identityState, principal, project.id))
+      .map((project) => ({
+        id: project.id,
+        displayName: project.displayName,
+      }));
+    writeJson(response, 200, { items });
+    return true;
+  }
+
+  if (pathname === '/api/sessions' && method === 'GET') {
+    const items = [];
+    for (const appSession of identityState.sessions) {
+      if (!canReadAppSession(identityState, principal, appSession)) {
+        continue;
+      }
+      const runtimeSession = await runtime.readSession(appSession.codexThreadId);
+      if (!runtimeSession) {
+        continue;
+      }
+      items.push(presentSessionForUser({
+        runtimeSession,
+        appSession,
+        project: findProject(identityState, appSession.projectId),
+        includeCwd: false,
+      }));
+    }
+    writeJson(response, 200, { items });
+    return true;
+  }
+
+  if (pathname === '/api/sessions' && method === 'POST') {
+    const body = await readJsonBody(request);
+    const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : '';
+    const project = findProject(identityState, projectId);
+    if (!project || project.enabled === false || !canCreateProjectSession(identityState, principal, project.id)) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    const runtimeSession = await runtime.createSession({
+      ...(body as CreateSessionInput),
+      cwd: project.cwd,
+    });
+    const now = new Date().toISOString();
+    const appSession = await identityStore.upsertSession({
+      id: crypto.randomUUID(),
+      codexThreadId: runtimeSession.id,
+      projectId: project.id,
+      ownerUserId: principal.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+    writeJson(response, 201, {
+      session: presentSessionForUser({
+        runtimeSession,
+        appSession,
+        project,
+        includeCwd: false,
+      }),
+    });
+    return true;
+  }
+
+  const adminSessionsMatch = pathname.match(/^\/api\/admin\/sessions(?:\/([^/]+))?$/u);
+  if (pathname.startsWith('/api/admin/')) {
+    if (!principal.isAdmin) {
+      writeJson(response, 403, { error: 'forbidden' });
+      return true;
+    }
+    const handledAdmin = await handleAdminManagementRequest({
+      request,
+      response,
+      pathname,
+      method,
+      identityStore,
+      identityState,
+    });
+    if (handledAdmin) {
+      return true;
+    }
+  }
+
+  if (adminSessionsMatch) {
+    if (!principal.isAdmin) {
+      writeJson(response, 403, { error: 'forbidden' });
+      return true;
+    }
+    const sessionId = adminSessionsMatch[1] ? decodeURIComponent(adminSessionsMatch[1]) : null;
+    if (!sessionId && method === 'GET') {
+      const userId = url.searchParams.get('userId');
+      const projectId = url.searchParams.get('projectId');
+      const items = identityState.sessions
+        .filter((session) => !userId || session.ownerUserId === userId)
+        .filter((session) => !projectId || session.projectId === projectId)
+        .map((session) => presentAppSessionAudit(identityState, session));
+      writeJson(response, 200, { items });
+      return true;
+    }
+    if (sessionId && method === 'GET') {
+      const appSession = identityState.sessions.find((session) => session.id === sessionId);
+      if (!appSession) {
+        writeSessionNotFound(response);
+        return true;
+      }
+      const runtimeSession = await runtime.readSession(appSession.codexThreadId);
+      if (!runtimeSession) {
+        writeSessionNotFound(response);
+        return true;
+      }
+      writeJson(response, 200, {
+        mode: 'observer',
+        session: presentSessionForUser({
+          runtimeSession,
+          appSession,
+          project: findProject(identityState, appSession.projectId),
+          includeCwd: true,
+        }),
+      });
+      return true;
+    }
+  }
+
+  const shareCreateMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/share$/u);
+  if (shareCreateMatch && method === 'POST') {
+    const resolved = resolveReadableAppSession(identityState, principal, decodeURIComponent(shareCreateMatch[1]!));
+    if (!resolved || !identityStore.createShare) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    const created = await identityStore.createShare({
+      sessionId: resolved.appSession.id,
+      createdByUserId: principal.userId,
+    });
+    writeJson(response, 201, {
+      token: created.token,
+      shareUrl: `/share/${encodeURIComponent(created.token)}`,
+    });
+    return true;
+  }
+
+  const sessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/u);
+  if (sessionMatch && method === 'GET') {
+    const resolved = resolveReadableAppSession(identityState, principal, decodeURIComponent(sessionMatch[1]!));
+    if (!resolved) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    const runtimeSession = await runtime.readSession(resolved.appSession.codexThreadId);
+    if (!runtimeSession) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    writeJson(response, 200, {
+      session: presentSessionForUser({
+        runtimeSession,
+        appSession: resolved.appSession,
+        project: resolved.project,
+        includeCwd: false,
+      }),
+    });
+    return true;
+  }
+
+  const startTurnMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/turns$/u);
+  if (startTurnMatch && method === 'POST') {
+    const resolved = resolveWritableAppSession(identityState, principal, decodeURIComponent(startTurnMatch[1]!));
+    if (!resolved) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    const body = await readJsonBody(request);
+    if (typeof body.text !== 'string' || !body.text.trim()) {
+      writeJson(response, 400, { error: 'text is required' });
+      return true;
+    }
+    const turn = await startSessionTurn({
+      runtime,
+      sessionId: resolved.appSession.codexThreadId,
+      input: body as unknown as StartTurnInput,
+      response,
+    });
+    if (!turn) {
+      return true;
+    }
+    writeJson(response, 202, turn);
+    return true;
+  }
+
+  const sessionSettingsMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/settings$/u);
+  if (sessionSettingsMatch && method === 'PATCH') {
+    const resolved = resolveWritableAppSession(identityState, principal, decodeURIComponent(sessionSettingsMatch[1]!));
+    if (!resolved) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    const body = await readJsonBody(request);
+    const runtimeSession = await runtime.updateSessionSettings(resolved.appSession.codexThreadId, body as UpdateSessionSettingsInput);
+    if (!runtimeSession) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    writeJson(response, 200, {
+      session: presentSessionForUser({
+        runtimeSession,
+        appSession: resolved.appSession,
+        project: resolved.project,
+        includeCwd: false,
+      }),
+    });
+    return true;
+  }
+
+  const interruptMatch = pathname.match(/^\/api\/turns\/([^/]+)\/interrupt$/u);
+  if (interruptMatch && method === 'POST') {
+    const turnId = decodeURIComponent(interruptMatch[1]!);
+    const threadId = runtime.threadIdForTurn?.(turnId);
+    const appSession = threadId ? identityState.sessions.find((session) => session.codexThreadId === threadId) : null;
+    if (!appSession || !canWriteAppSession(identityState, principal, appSession)) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    if (typeof runtime.interruptTurnForThread === 'function') {
+      await runtime.interruptTurnForThread(threadId!, turnId);
+    } else {
+      await runtime.interruptTurn(turnId);
+    }
+    writeJson(response, 200, { ok: true });
+    return true;
+  }
+
+  const approvalMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/(accept|accept-for-session|deny)$/u);
+  if (approvalMatch && method === 'POST') {
+    const approvalId = decodeURIComponent(approvalMatch[1]!);
+    const threadId = runtime.threadIdForApproval?.(approvalId);
+    const appSession = threadId ? identityState.sessions.find((session) => session.codexThreadId === threadId) : null;
+    if (!appSession || !canWriteAppSession(identityState, principal, appSession)) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    const action = approvalMatch[2]!;
+    const decision = action === 'accept'
+      ? 'accept'
+      : action === 'accept-for-session'
+        ? 'accept_for_session'
+        : 'deny';
+    if (typeof runtime.resolveApprovalForThread === 'function') {
+      await runtime.resolveApprovalForThread(threadId!, approvalId, decision);
+    } else {
+      await runtime.resolveApproval(approvalId, decision);
+    }
+    writeJson(response, 200, { ok: true });
+    return true;
+  }
+
+  const eventsMatch = pathname.match(/^\/api\/turns\/([^/]+)\/events$/u);
+  if (eventsMatch && method === 'GET') {
+    const turnId = decodeURIComponent(eventsMatch[1]!);
+    const threadId = runtime.threadIdForTurn?.(turnId);
+    const appSession = threadId ? identityState.sessions.find((session) => session.codexThreadId === threadId) : null;
+    if (!appSession || !canReadAppSession(identityState, principal, appSession)) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    await streamTurnEvents({
+      request,
+      response,
+      runtime,
+      turnId,
+      afterId: normalizeLastEventId(url.searchParams.get('after'), request.headers['last-event-id']),
+      registerSseCloser,
+    });
+    return true;
+  }
+
+  return false;
+}
+
+async function handleAdminManagementRequest({
+  request,
+  response,
+  pathname,
+  method,
+  identityStore,
+  identityState,
+}: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  pathname: string;
+  method: string;
+  identityStore: CodexWebIdentityStoreLike;
+  identityState: CodexWebIdentityState;
+}): Promise<boolean> {
+  if (pathname === '/api/admin/settings' && method === 'GET') {
+    writeJson(response, 200, { settings: identityState.settings });
+    return true;
+  }
+  if (pathname === '/api/admin/settings' && method === 'PATCH') {
+    if (typeof identityStore.setMultiUserEnabled !== 'function') {
+      writeJson(response, 501, { error: 'not_supported' });
+      return true;
+    }
+    const body = await readJsonBody(request);
+    const state = await identityStore.setMultiUserEnabled(body.multiUserEnabled === true);
+    writeJson(response, 200, { settings: state.settings });
+    return true;
+  }
+  if (pathname === '/api/admin/projects' && method === 'GET') {
+    writeJson(response, 200, { items: identityState.projects });
+    return true;
+  }
+  if (pathname === '/api/admin/projects' && method === 'POST') {
+    if (typeof identityStore.upsertProject !== 'function') {
+      writeJson(response, 501, { error: 'not_supported' });
+      return true;
+    }
+    const body = await readJsonBody(request);
+    const project = await identityStore.upsertProject({
+      id: String(body.id ?? ''),
+      internalName: String(body.internalName ?? ''),
+      cwd: String(body.cwd ?? ''),
+      displayName: String(body.displayName ?? ''),
+      enabled: body.enabled !== false,
+    });
+    writeJson(response, 201, { project });
+    return true;
+  }
+  if (pathname === '/api/admin/roles' && method === 'GET') {
+    writeJson(response, 200, { items: identityState.roles });
+    return true;
+  }
+  if (pathname === '/api/admin/roles' && method === 'POST') {
+    if (typeof identityStore.upsertRole !== 'function') {
+      writeJson(response, 501, { error: 'not_supported' });
+      return true;
+    }
+    const body = await readJsonBody(request);
+    const role = await identityStore.upsertRole({
+      id: String(body.id ?? ''),
+      name: String(body.name ?? ''),
+      isAdmin: body.isAdmin === true,
+      projectGrants: Array.isArray(body.projectGrants) ? body.projectGrants as any[] : [],
+    });
+    writeJson(response, 201, { role });
+    return true;
+  }
+  if (pathname === '/api/admin/users' && method === 'GET') {
+    writeJson(response, 200, { items: identityState.users.map(presentAdminUser) });
+    return true;
+  }
+  if (pathname === '/api/admin/users' && method === 'POST') {
+    if (typeof identityStore.upsertUserWithPassword !== 'function') {
+      writeJson(response, 501, { error: 'not_supported' });
+      return true;
+    }
+    const body = await readJsonBody(request);
+    const user = await identityStore.upsertUserWithPassword({
+      id: String(body.id ?? ''),
+      username: String(body.username ?? ''),
+      password: String(body.password ?? ''),
+      enabled: body.enabled !== false,
+      roleIds: Array.isArray(body.roleIds) ? body.roleIds.filter((item): item is string => typeof item === 'string') : [],
+      directProjectGrants: Array.isArray(body.directProjectGrants) ? body.directProjectGrants as any[] : [],
+    });
+    writeJson(response, 201, { user: presentAdminUser(user) });
+    return true;
+  }
+  return false;
+}
+
+function presentAdminUser(user: CodexWebUser): Record<string, unknown> {
+  return {
+    id: user.id,
+    username: user.username,
+    enabled: user.enabled,
+    roleIds: user.roleIds,
+    directProjectGrants: user.directProjectGrants,
+  };
+}
+
+function resolveReadableAppSession(
+  state: CodexWebIdentityState,
+  principal: CodexWebPrincipal,
+  sessionId: string,
+): { appSession: CodexWebAppSession; project: CodexWebProject | null } | null {
+  const appSession = state.sessions.find((session) => session.id === sessionId);
+  if (!appSession || !canReadAppSession(state, principal, appSession)) {
+    return null;
+  }
+  return {
+    appSession,
+    project: findProject(state, appSession.projectId),
+  };
+}
+
+function resolveWritableAppSession(
+  state: CodexWebIdentityState,
+  principal: CodexWebPrincipal,
+  sessionId: string,
+): { appSession: CodexWebAppSession; project: CodexWebProject | null } | null {
+  const appSession = state.sessions.find((session) => session.id === sessionId);
+  if (!appSession || !canWriteAppSession(state, principal, appSession)) {
+    return null;
+  }
+  return {
+    appSession,
+    project: findProject(state, appSession.projectId),
+  };
+}
+
+function findProject(state: CodexWebIdentityState, projectId: string): CodexWebProject | null {
+  return state.projects.find((project) => project.id === projectId) ?? null;
+}
+
+function presentAppSessionAudit(
+  state: CodexWebIdentityState,
+  appSession: CodexWebAppSession,
+): Record<string, unknown> {
+  const project = findProject(state, appSession.projectId);
+  return {
+    id: appSession.id,
+    projectId: appSession.projectId,
+    projectDisplayName: project?.displayName ?? appSession.projectId,
+    ownerUserId: appSession.ownerUserId,
+    codexThreadId: appSession.codexThreadId,
+    createdAt: appSession.createdAt,
+    updatedAt: appSession.updatedAt,
+  };
+}
+
+function presentSessionForUser({
+  runtimeSession,
+  appSession,
+  project,
+  includeCwd,
+}: {
+  runtimeSession: any;
+  appSession: CodexWebAppSession;
+  project: CodexWebProject | null;
+  includeCwd: boolean;
+}): Record<string, unknown> {
+  const { cwd, projectName, ...rest } = runtimeSession ?? {};
+  return {
+    ...rest,
+    id: appSession.id,
+    projectId: appSession.projectId,
+    projectDisplayName: project?.displayName ?? appSession.projectId,
+    ownerUserId: appSession.ownerUserId,
+    ...(includeCwd ? { cwd, projectName } : {}),
+  };
+}
+
 function getClientAddress(request: IncomingMessage): string {
   return request.socket.remoteAddress || 'unknown';
 }
 
 async function loginWithPassword({
   auth,
+  username,
   password,
   deviceName,
   response,
 }: {
   auth: CodexWebAuthLike;
+  username: string | null;
   password: string;
   deviceName: string | null;
   response: ServerResponse;
 }): Promise<{ token: string; session: PublicAuthSession; configuredNow: boolean } | null> {
   try {
-    return await auth.login({ password, deviceName });
+    return await auth.login({ username, password, deviceName });
   } catch (error) {
-    if (error instanceof Error && error.message === 'Invalid password') {
+    if (error instanceof Error && (error.message === 'Invalid password' || error.message === 'Invalid username or password')) {
       writeJson(response, 401, {
         error: 'invalid_password',
-        message: 'Invalid password',
+        message: error.message,
       });
       return null;
     }

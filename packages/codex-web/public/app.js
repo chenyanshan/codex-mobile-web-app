@@ -61,6 +61,19 @@ const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
   authSession: null,
   models: [],
+  projects: [],
+  projectsLoaded: false,
+  newProjectId: '',
+  admin: {
+    loading: false,
+    loaded: false,
+    settings: null,
+    projects: [],
+    users: [],
+    roles: [],
+    sessions: [],
+    filterUserId: '',
+  },
   sessions: [],
   sessionsByScope: {
     favorites: [],
@@ -144,6 +157,7 @@ let chatTimelineReturnSnapshot = null;
 let chatTimelineForegroundSnapshot = null;
 let chatTimelineViewportSnapshot = null;
 let nextTimelineRestoreSnapshot = null;
+let sharedSessionLoadPromise = null;
 
 bootstrap();
 applyTheme(state.theme, { persist: false });
@@ -161,6 +175,11 @@ window.addEventListener('pageshow', onPageResume);
 window.addEventListener('focus', onPageResume);
 
 function bootstrap() {
+  if (isShareRoute()) {
+    render();
+    void loadSharedSessionFromLocation();
+    return;
+  }
   if (!state.token) {
     render();
     setLoggedOut();
@@ -174,6 +193,74 @@ function bootstrap() {
   void restoreAuth();
 }
 
+function isShareRoute() {
+  return /^\/share\/[^/]+$/u.test(window.location?.pathname || '');
+}
+
+function shareTokenFromLocation() {
+  const match = String(window.location?.pathname || '').match(/^\/share\/([^/]+)$/u);
+  return match?.[1] ? decodeURIComponent(match[1]) : '';
+}
+
+async function loadSharedSessionFromLocation() {
+  if (sharedSessionLoadPromise) {
+    return sharedSessionLoadPromise;
+  }
+  sharedSessionLoadPromise = loadSharedSessionFromLocationOnce().catch((error) => {
+    sharedSessionLoadPromise = null;
+    throw error;
+  });
+  return sharedSessionLoadPromise;
+}
+
+async function loadSharedSessionFromLocationOnce() {
+  const token = shareTokenFromLocation();
+  if (!token) {
+    setLoggedOut('Shared session not found');
+    return null;
+  }
+  state.token = '';
+  localStorage.removeItem(TOKEN_KEY);
+  state.authSession = {
+    id: 'share',
+    createdAt: '',
+    lastSeenAt: '',
+    principal: {
+      mode: 'share',
+      isAdmin: false,
+    },
+  };
+  state.status = 'Loading session';
+  state.statusTone = 'warn';
+  state.view = 'chat';
+  render();
+  try {
+    const payload = await apiFetch(`/api/share/${encodeURIComponent(token)}/session`, { skipAuth: true });
+    const session = {
+      ...(payload?.session || {}),
+      mode: payload?.mode || 'share',
+      readOnly: true,
+    };
+    state.sessionId = session.id;
+    state.currentSession = session;
+    state.cwd = '';
+    state.timelineCache = new Map();
+    applySessionSettings(session);
+    restoreTimelineForSession(session);
+    syncRuntimeStatusFromSession(session);
+    state.status = 'Ready';
+    state.statusTone = 'success';
+    state.error = '';
+    render();
+    scrollTimelineToBottom();
+    return session;
+  } catch (error) {
+    state.authSession = null;
+    handleApiError(error, { auth: true });
+    return null;
+  }
+}
+
 async function restoreAuth() {
   try {
     state.status = 'Restoring session';
@@ -185,6 +272,7 @@ async function restoreAuth() {
     render();
     const [modelsPayload] = await Promise.all([
       apiFetch('/api/models').catch(() => ({ items: [] })),
+      refreshProjectsList({ renderAfter: false }).catch(() => []),
       refreshSessionsList({ renderAfter: false, scope: 'favorites' }).catch(() => null),
       refreshReportsList({ renderAfter: false }).catch(() => null),
     ]);
@@ -228,6 +316,20 @@ function setLoggedOut(message = '') {
   state.sessionsRequestId += 1;
   allSessionsPreloadPromise = null;
   state.reports = [];
+  state.projects = [];
+  state.projectsLoaded = false;
+  state.newProjectId = '';
+  resetAdminState();
+  state.admin = {
+    loading: false,
+    loaded: false,
+    settings: null,
+    projects: [],
+    users: [],
+    roles: [],
+    sessions: [],
+    filterUserId: '',
+  };
   state.reportsLoading = false;
   state.reportsLoaded = false;
   state.reportsRequestId += 1;
@@ -336,6 +438,10 @@ function renderLogin() {
           <p class="meta">Password login for this device.</p>
         </div>
         <div class="field">
+          <label for="username">Username</label>
+          <input id="username" name="username" type="text" autocomplete="username">
+        </div>
+        <div class="field">
           <label for="password">Password</label>
           <input id="password" name="password" type="password" autocomplete="current-password" required>
         </div>
@@ -355,6 +461,9 @@ function renderMain() {
   }
   if (state.view === 'settings') {
     return renderAppSettings();
+  }
+  if (state.view === 'admin') {
+    return renderAdminConsole();
   }
   if (state.view === 'reports') {
     return renderReportsPage();
@@ -702,15 +811,129 @@ function renderAppSettingsSections() {
             </div>
           </div>
         </section>
+        ${isAdminPrincipal() ? `
+          <section class="settings-section">
+            <div class="settings-section-title">Admin</div>
+            <button class="ghost compact-button full-width-button" type="button" id="open-admin-settings-button">Admin Console</button>
+          </section>
+        ` : ''}
         <section class="settings-section">
           <button class="danger compact-button full-width-button" type="button" id="settings-logout-button">Log out</button>
         </section>
   `;
 }
 
+function renderAdminConsole() {
+  const shell = document.createElement('div');
+  shell.className = 'shell';
+  shell.innerHTML = `
+    <div class="screen page-screen">
+      ${renderPageNav('Admin Console', { backId: 'back-to-settings-button' })}
+      <main class="admin-console-page">
+        ${renderAdminSections()}
+      </main>
+    </div>
+  `;
+  return shell;
+}
+
+function renderAdminSections() {
+  if (state.admin.loading && !state.admin.loaded) {
+    return '<div class="empty-state">Loading admin console...</div>';
+  }
+  return `
+        <section class="settings-section admin-summary-section">
+          <div class="settings-section-title">System</div>
+          <label class="settings-action-row admin-toggle-row">
+            <span class="meta">Multi-user mode</span>
+            <input id="admin-multi-user-toggle" type="checkbox"${state.admin.settings?.multiUserEnabled === true ? ' checked' : ''}>
+          </label>
+        </section>
+        <section class="settings-section">
+          <div class="settings-section-title">Projects</div>
+          <div class="admin-list">${renderAdminProjects()}</div>
+        </section>
+        <section class="settings-section">
+          <div class="settings-section-title">Users</div>
+          <div class="admin-list">${renderAdminUsers()}</div>
+        </section>
+        <section class="settings-section">
+          <div class="settings-section-title">Roles</div>
+          <div class="admin-list">${renderAdminRoles()}</div>
+        </section>
+        <section class="settings-section">
+          <div class="settings-section-title">Sessions</div>
+          <div class="field">
+            <label for="admin-session-user-filter">User</label>
+            <select id="admin-session-user-filter" name="adminUserFilter">
+              <option value="">All users</option>
+              ${state.admin.users.map((user) => `
+                <option value="${escapeAttribute(user.id)}"${state.admin.filterUserId === user.id ? ' selected' : ''}>${escapeHtml(user.username || user.id)}</option>
+              `).join('')}
+            </select>
+          </div>
+          <div class="admin-list">${renderAdminSessions()}</div>
+        </section>
+  `;
+}
+
+function renderAdminProjects() {
+  if (!state.admin.projects.length) {
+    return '<div class="meta">No projects configured.</div>';
+  }
+  return state.admin.projects.map((project) => `
+    <article class="admin-row">
+      <span class="admin-row-main">${escapeHtml(project.displayName || project.id)}</span>
+      <span class="admin-row-meta">${escapeHtml(project.id || '')}</span>
+    </article>
+  `).join('');
+}
+
+function renderAdminUsers() {
+  if (!state.admin.users.length) {
+    return '<div class="meta">No users configured.</div>';
+  }
+  return state.admin.users.map((user) => `
+    <article class="admin-row">
+      <span class="admin-row-main">${escapeHtml(user.username || user.id)}</span>
+      <span class="admin-row-meta">${escapeHtml(user.enabled === false ? 'disabled' : user.id || '')}</span>
+    </article>
+  `).join('');
+}
+
+function renderAdminRoles() {
+  if (!state.admin.roles.length) {
+    return '<div class="meta">No roles configured.</div>';
+  }
+  return state.admin.roles.map((role) => `
+    <article class="admin-row">
+      <span class="admin-row-main">${escapeHtml(role.name || role.id)}</span>
+      <span class="admin-row-meta">${role.isAdmin ? 'admin' : escapeHtml(role.id || '')}</span>
+    </article>
+  `).join('');
+}
+
+function renderAdminSessions() {
+  if (!state.admin.sessions.length) {
+    return '<div class="meta">No sessions found.</div>';
+  }
+  return state.admin.sessions.map((session) => {
+    const owner = adminUserName(session.ownerUserId || session.userId);
+    return `
+      <article class="admin-row admin-session-row">
+        <button class="admin-session-open" type="button" data-admin-session-id="${escapeAttribute(session.id)}">
+          <span class="admin-row-main">${escapeHtml(session.projectDisplayName || session.projectId || session.id)}</span>
+          <span class="admin-row-meta">${escapeHtml(`${owner} · ${session.id}`)}</span>
+        </button>
+      </article>
+    `;
+  }).join('');
+}
+
 function renderNewSession() {
   const shell = document.createElement('div');
   shell.className = 'shell';
+  const projectPicker = renderNewSessionProjectPicker();
   shell.innerHTML = `
     <div class="screen page-screen">
       <header class="topbar page-topbar">
@@ -721,11 +944,7 @@ function renderNewSession() {
       </header>
       <main class="new-session-page">
         <form class="panel stack" id="new-session-form">
-          <div class="field">
-            <label for="new-cwd-input">Project path</label>
-            <textarea id="new-cwd-input" name="cwd" rows="3" placeholder="Use server default">${escapeHtml(state.newCwd || state.cwd)}</textarea>
-          </div>
-          ${renderPathChoices()}
+          ${projectPicker || renderNewSessionPathPicker()}
           <div class="actions">
             <button class="primary primary-action" type="submit">Start</button>
           </div>
@@ -737,20 +956,45 @@ function renderNewSession() {
 }
 
 function renderDesktopNewSessionLauncher() {
+  const projectPicker = renderNewSessionProjectPicker();
   return `
     <section class="desktop-new-session-launcher">
       <form class="panel stack" id="new-session-form">
-        <div class="field">
-          <label for="new-cwd-input">Project path</label>
-          <textarea id="new-cwd-input" name="cwd" rows="3" placeholder="Use server default">${escapeHtml(state.newCwd || state.cwd)}</textarea>
-        </div>
-        ${renderPathChoices()}
+        ${projectPicker || renderNewSessionPathPicker()}
         <div class="actions">
           <button class="ghost compact-button" type="button" id="desktop-new-session-cancel-button">Cancel</button>
           <button class="primary compact-button" type="submit">Start</button>
         </div>
       </form>
     </section>
+  `;
+}
+
+function renderNewSessionProjectPicker() {
+  const projects = availableProjects();
+  if (!projects.length) {
+    return '';
+  }
+  const currentProjectId = state.newProjectId || projects[0]?.id || '';
+  return `
+        <div class="field">
+          <label for="new-project-select">Project</label>
+          <select id="new-project-select" name="projectId">
+            ${projects.map((project) => `
+              <option value="${escapeAttribute(project.id)}"${project.id === currentProjectId ? ' selected' : ''}>${escapeHtml(project.displayName)}</option>
+            `).join('')}
+          </select>
+        </div>
+  `;
+}
+
+function renderNewSessionPathPicker() {
+  return `
+        <div class="field">
+          <label for="new-cwd-input">Project path</label>
+          <textarea id="new-cwd-input" name="cwd" rows="3" placeholder="Use server default">${escapeHtml(state.newCwd || state.cwd)}</textarea>
+        </div>
+        ${renderPathChoices()}
   `;
 }
 
@@ -768,6 +1012,7 @@ function renderChat() {
 function renderChatContent({ desktop = false } = {}) {
   const sessionReportsProject = reportProjectForSession(state.currentSession);
   const composerClassName = composerStateClassName();
+  const readOnly = isReadOnlySession(state.currentSession);
   return `
       <header class="topbar chat-topbar${desktop ? ' desktop-chat-topbar' : ''}">
         <div class="chat-nav">
@@ -782,6 +1027,12 @@ function renderChatContent({ desktop = false } = {}) {
         </div>
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
+      ${readOnly ? renderReadOnlyComposerNotice(state.currentSession) : renderComposer(composerClassName)}
+  `;
+}
+
+function renderComposer(composerClassName) {
+  return `
       <div class="composer-wrap ${composerClassName}">
         ${state.composerExpanded ? '' : renderComposerStatus()}
         <form class="composer ${composerClassName}" id="composer-form">
@@ -792,6 +1043,18 @@ function renderChatContent({ desktop = false } = {}) {
             ${renderMessageEditor()}
           </div>
         </form>
+      </div>
+  `;
+}
+
+function renderReadOnlyComposerNotice(session) {
+  const mode = session?.mode === 'share' ? 'Shared link' : 'Observer mode';
+  return `
+      <div class="composer-wrap read-only-composer-wrap">
+        <div class="read-only-banner">
+          <strong>${escapeHtml(mode)}</strong>
+          <span>Read only</span>
+        </div>
       </div>
   `;
 }
@@ -1420,6 +1683,13 @@ function bindGlobalEvents() {
     });
   }
 
+  const openAdminSettingsButton = document.querySelector('#open-admin-settings-button');
+  if (openAdminSettingsButton) {
+    openAdminSettingsButton.addEventListener('click', () => {
+      void openAdminConsole();
+    });
+  }
+
   const stopButton = document.querySelector('#stop-button');
   if (stopButton) {
     stopButton.addEventListener('click', onStopTurn);
@@ -1548,6 +1818,13 @@ function bindGlobalEvents() {
     });
   }
 
+  const backToSettingsButton = document.querySelector('#back-to-settings-button');
+  if (backToSettingsButton) {
+    backToSettingsButton.addEventListener('click', () => {
+      openAppSettingsPage();
+    });
+  }
+
   for (const button of document.querySelectorAll('[data-session-id]')) {
     button.addEventListener('click', () => {
       rememberSessionListScroll();
@@ -1604,6 +1881,33 @@ function bindGlobalEvents() {
   if (newCwdInput) {
     newCwdInput.addEventListener('input', (event) => {
       state.newCwd = event.target.value;
+    });
+  }
+
+  const newProjectSelect = document.querySelector('#new-project-select');
+  if (newProjectSelect) {
+    newProjectSelect.addEventListener('change', (event) => {
+      state.newProjectId = event.target.value;
+    });
+  }
+
+  const adminMultiUserToggle = document.querySelector('#admin-multi-user-toggle');
+  if (adminMultiUserToggle) {
+    adminMultiUserToggle.addEventListener('change', (event) => {
+      void updateAdminSettings({ multiUserEnabled: event.target.checked });
+    });
+  }
+
+  const adminSessionUserFilter = document.querySelector('#admin-session-user-filter');
+  if (adminSessionUserFilter) {
+    adminSessionUserFilter.addEventListener('change', (event) => {
+      void refreshAdminSessions({ userId: event.target.value, renderAfter: true });
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-admin-session-id]')) {
+    button.addEventListener('click', () => {
+      void openAdminObservedSession(button.getAttribute('data-admin-session-id') || '');
     });
   }
 
@@ -2161,6 +2465,7 @@ function scrollTimelineToBottomIfFollowingLatest() {
 async function onLoginSubmit(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
+  const username = String(form.get('username') || '');
   const password = String(form.get('password') || '');
   state.loginError = '';
   state.status = 'Logging in';
@@ -2170,7 +2475,7 @@ async function onLoginSubmit(event) {
     const payload = await apiFetch('/api/auth/login', {
       method: 'POST',
       skipAuth: true,
-      body: { password },
+      body: { username, password },
     });
     state.token = payload.token;
     localStorage.setItem(TOKEN_KEY, payload.token);
@@ -2345,8 +2650,30 @@ function openAppSettingsPage() {
   render();
 }
 
+async function openAdminConsole() {
+  if (!isAdminPrincipal()) {
+    return;
+  }
+  saveCurrentTimeline();
+  stopStream();
+  state.view = 'admin';
+  state.sessionId = null;
+  state.currentSession = null;
+  state.currentReport = null;
+  state.currentReportContent = '';
+  state.currentReportLoading = false;
+  resetTurnState();
+  state.error = '';
+  render();
+  await refreshAdminConsole({ renderAfter: true });
+}
+
 function openNewSessionPage() {
   saveCurrentTimeline();
+  if (!state.projectsLoaded) {
+    void refreshProjectsList({ renderAfter: true });
+  }
+  initializeNewProjectSelection();
   if (isDesktopLayout()) {
     applyDefaultSettings();
     state.favoriteSortMode = false;
@@ -2359,7 +2686,7 @@ function openNewSessionPage() {
     state.currentReport = null;
     state.currentReportContent = '';
     state.currentReportLoading = false;
-    state.newCwd = state.cwd || '';
+    state.newCwd = hasProjectChoices() ? '' : state.cwd || '';
     state.error = '';
     render();
     return;
@@ -2375,7 +2702,7 @@ function openNewSessionPage() {
   state.currentReport = null;
   state.currentReportContent = '';
   state.currentReportLoading = false;
-  state.newCwd = state.cwd || '';
+  state.newCwd = hasProjectChoices() ? '' : state.cwd || '';
   resetTurnState();
   state.error = '';
   render();
@@ -2383,6 +2710,8 @@ function openNewSessionPage() {
 
 function onNewSessionSubmit(event) {
   event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const selectedProjectId = String(form.get('projectId') || state.newProjectId || '').trim();
   saveCurrentTimeline();
   stopStream();
   applyDefaultSettings();
@@ -2393,7 +2722,8 @@ function onNewSessionSubmit(event) {
   state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
-  state.cwd = state.newCwd.trim();
+  state.newProjectId = selectedProjectId || state.newProjectId;
+  state.cwd = selectedProjectId ? '' : state.newCwd.trim();
   state.prompt = '';
   state.composerExpanded = false;
   state.settingsOpen = false;
@@ -2634,18 +2964,29 @@ async function ensureSession() {
   }
   state.status = 'Starting session';
   render();
+  const projectId = currentNewProjectId();
+  const body = projectId
+    ? {
+        projectId,
+        settings: collectSettings(),
+      }
+    : {
+        cwd: state.cwd.trim() || null,
+        settings: collectSettings(),
+      };
   const payload = await apiFetch('/api/sessions', {
     method: 'POST',
-    body: {
-      cwd: state.cwd.trim() || null,
-      settings: collectSettings(),
-    },
+    body,
   });
   state.currentSession = payload.session;
   state.sessionId = payload.session.id;
   state.cwd = payload.session.cwd || state.cwd;
   upsertSession(payload.session);
   return state.sessionId;
+}
+
+function isAdminPrincipal() {
+  return state.authSession?.principal?.isAdmin === true;
 }
 
 function requestArchiveSession(sessionId) {
@@ -3368,6 +3709,132 @@ async function refreshReportsList({ renderAfter = true } = {}) {
   }
 }
 
+async function refreshProjectsList({ renderAfter = true } = {}) {
+  try {
+    const payload = await apiFetch('/api/projects');
+    state.projects = normalizeProjects(payload);
+    state.projectsLoaded = true;
+    initializeNewProjectSelection();
+    return state.projects;
+  } finally {
+    if (renderAfter) {
+      render();
+    }
+  }
+}
+
+async function refreshAdminConsole({ renderAfter = true } = {}) {
+  if (!isAdminPrincipal()) {
+    return null;
+  }
+  state.admin.loading = true;
+  if (renderAfter) {
+    render();
+  }
+  try {
+    const [settingsPayload, projectsPayload, usersPayload, rolesPayload, sessionsPayload] = await Promise.all([
+      apiFetch('/api/admin/settings'),
+      apiFetch('/api/admin/projects'),
+      apiFetch('/api/admin/users'),
+      apiFetch('/api/admin/roles'),
+      apiFetch(adminSessionsPath(state.admin.filterUserId)),
+    ]);
+    state.admin.settings = settingsPayload?.settings || null;
+    state.admin.projects = normalizeAdminItems(projectsPayload);
+    state.admin.users = normalizeAdminItems(usersPayload);
+    state.admin.roles = normalizeAdminItems(rolesPayload);
+    state.admin.sessions = normalizeAdminItems(sessionsPayload);
+    state.admin.loaded = true;
+    state.error = '';
+    return state.admin;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  } finally {
+    state.admin.loading = false;
+    if (renderAfter) {
+      render();
+    }
+  }
+}
+
+async function refreshAdminSessions({ userId = state.admin.filterUserId, renderAfter = true } = {}) {
+  if (!isAdminPrincipal()) {
+    return [];
+  }
+  state.admin.filterUserId = String(userId || '');
+  state.admin.loading = true;
+  if (renderAfter) {
+    render();
+  }
+  try {
+    const payload = await apiFetch(adminSessionsPath(state.admin.filterUserId));
+    state.admin.sessions = normalizeAdminItems(payload);
+    state.error = '';
+    return state.admin.sessions;
+  } catch (error) {
+    handleApiError(error);
+    return [];
+  } finally {
+    state.admin.loading = false;
+    if (renderAfter) {
+      render();
+    }
+  }
+}
+
+async function updateAdminSettings(patch = {}) {
+  if (!isAdminPrincipal()) {
+    return null;
+  }
+  try {
+    const payload = await apiFetch('/api/admin/settings', {
+      method: 'PATCH',
+      body: patch,
+    });
+    state.admin.settings = payload?.settings || state.admin.settings;
+    state.error = '';
+    render();
+    return state.admin.settings;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
+async function openAdminObservedSession(sessionId) {
+  if (!sessionId || !isAdminPrincipal()) {
+    return;
+  }
+  saveCurrentTimeline();
+  stopStream();
+  state.status = 'Loading session';
+  state.statusTone = 'warn';
+  state.error = '';
+  render();
+  try {
+    const payload = await apiFetch(`/api/admin/sessions/${encodeURIComponent(sessionId)}`);
+    const session = {
+      ...(payload?.session || {}),
+      mode: payload?.mode || payload?.session?.mode || 'observer',
+      readOnly: true,
+    };
+    state.sessionId = session.id;
+    state.currentSession = session;
+    state.cwd = session.cwd || '';
+    applySessionSettings(session);
+    restoreTimelineForSession(session);
+    syncRuntimeStatusFromSession(session);
+    state.view = 'chat';
+    state.status = 'Ready';
+    state.statusTone = 'success';
+    render();
+    scrollTimelineToBottom();
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 async function openReportById(reportId, { returnView = state.view } = {}) {
   if (!reportId) {
     return;
@@ -3851,11 +4318,49 @@ function normalizeSessions(payload) {
         updatedAt: typeof session.updatedAt === 'number' ? session.updatedAt : null,
         settings: session.settings && typeof session.settings === 'object' ? session.settings : null,
       };
+      if (typeof session.projectId === 'string') {
+        normalized.projectId = session.projectId;
+      }
+      if (typeof session.projectDisplayName === 'string') {
+        normalized.projectDisplayName = session.projectDisplayName;
+      }
+      if (typeof session.ownerUserId === 'string') {
+        normalized.ownerUserId = session.ownerUserId;
+      }
+      if (typeof session.mode === 'string') {
+        normalized.mode = session.mode;
+      }
+      if (session.readOnly === true) {
+        normalized.readOnly = true;
+      }
       if (Object.prototype.hasOwnProperty.call(session, 'goal')) {
         normalized.goal = session.goal && typeof session.goal === 'object' ? session.goal : null;
       }
       return normalized;
     });
+}
+
+function normalizeProjects(payload) {
+  return (Array.isArray(payload?.items) ? payload.items : [])
+    .map((project) => {
+      const id = typeof project?.id === 'string' ? project.id.trim() : '';
+      const displayName = typeof project?.displayName === 'string' && project.displayName.trim()
+        ? project.displayName.trim()
+        : id;
+      if (!id || !displayName) {
+        return null;
+      }
+      return {
+        ...project,
+        id,
+        displayName,
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeAdminItems(payload) {
+  return Array.isArray(payload?.items) ? payload.items.filter((item) => item && typeof item === 'object') : [];
 }
 
 function syncCurrentSessionFromList() {
@@ -4450,8 +4955,57 @@ function uniqueSessionPaths() {
   return paths;
 }
 
+function availableProjects() {
+  return Array.isArray(state.projects) ? state.projects.filter((project) => project?.id && project?.displayName) : [];
+}
+
+function hasProjectChoices() {
+  return availableProjects().length > 0;
+}
+
+function initializeNewProjectSelection() {
+  const projects = availableProjects();
+  if (!projects.length) {
+    state.newProjectId = '';
+    return;
+  }
+  if (!projects.some((project) => project.id === state.newProjectId)) {
+    state.newProjectId = projects[0]?.id || '';
+  }
+}
+
+function currentNewProjectId() {
+  initializeNewProjectSelection();
+  return state.newProjectId || '';
+}
+
+function isReadOnlySession(session) {
+  return session?.readOnly === true || session?.mode === 'observer' || session?.mode === 'share';
+}
+
+function resetAdminState() {
+  state.admin.loading = false;
+  state.admin.loaded = false;
+  state.admin.settings = null;
+  state.admin.projects = [];
+  state.admin.users = [];
+  state.admin.roles = [];
+  state.admin.sessions = [];
+  state.admin.filterUserId = '';
+}
+
+function adminSessionsPath(userId = '') {
+  const value = String(userId || '').trim();
+  return value ? `/api/admin/sessions?userId=${encodeURIComponent(value)}` : '/api/admin/sessions';
+}
+
+function adminUserName(userId) {
+  const value = String(userId || '');
+  return state.admin.users.find((user) => user.id === value)?.username || value || 'unknown';
+}
+
 function projectNameForSession(session, fallbackCwd = '') {
-  return cwdLeafName(session?.cwd || fallbackCwd) || session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || session?.title || 'New Session';
+  return session?.projectDisplayName || cwdLeafName(session?.cwd || fallbackCwd) || session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || session?.title || 'New Session';
 }
 
 function isFavoriteSession(session) {

@@ -26,6 +26,13 @@ export interface PublicAuthSession {
   deviceName: string;
   createdAt: string;
   lastSeenAt: string;
+  principal?: {
+    userId: string;
+    username: string;
+    roleIds: string[];
+    isAdmin: boolean;
+    mode: 'single' | 'multi';
+  };
 }
 
 export interface AuthStoreError extends Error {
