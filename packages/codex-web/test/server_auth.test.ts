@@ -493,6 +493,39 @@ test('static root is public', async () => {
   }
 });
 
+test('static asset resolvers are evaluated per request', async () => {
+  let version = 'v1';
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: createRuntimeStub() as any,
+    config: createConfig(),
+    staticFiles: {
+      '/': {
+        body: '<!doctype html><script src="/app.js"></script>',
+        contentType: 'text/html; charset=utf-8',
+      },
+      '/app.js': () => ({
+        body: `console.log('${version}')`,
+        contentType: 'application/javascript; charset=utf-8',
+      }),
+    },
+  });
+  await server.start();
+  try {
+    const first = await fetch(`${server.baseUrl}/app.js`);
+    assert.equal(first.status, 200);
+    assert.equal(await first.text(), "console.log('v1')");
+
+    version = 'v2';
+
+    const second = await fetch(`${server.baseUrl}/app.js`);
+    assert.equal(second.status, 200);
+    assert.equal(await second.text(), "console.log('v2')");
+  } finally {
+    await server.stop();
+  }
+});
+
 test('GET / shows setup-required page when password is not configured', async () => {
   const server = createCodexWebServer({
     auth: {

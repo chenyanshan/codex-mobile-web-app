@@ -33,6 +33,9 @@
 
     function isAtTop(target = null) {
       const container = currentScrollContainer(target);
+      if (container === false) {
+        return false;
+      }
       return !container || container.scrollTop <= 0;
     }
 

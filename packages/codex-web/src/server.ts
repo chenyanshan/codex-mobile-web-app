@@ -27,6 +27,7 @@ import { FileReportStore } from './report_store.js';
 import type { CodexWebReport } from './report_store.js';
 import type {
   CodexWebRuntime,
+  CodexWebSession,
   AppendSessionTimelineEntryInput,
   CodexWebStartTurnResult,
   CreateSessionInput,
@@ -43,6 +44,7 @@ export interface CodexWebAuthLike {
   }): Promise<{ token: string; session: PublicAuthSession; configuredNow: boolean }>;
   verifyToken(token: string | null | undefined): Promise<PublicAuthSession | null>;
   logout(token: string | null | undefined): Promise<void>;
+  setMultiUserEnabled?(enabled: boolean): Promise<CodexWebIdentityState>;
 }
 
 export interface CreateCodexWebServerOptions {
@@ -50,7 +52,7 @@ export interface CreateCodexWebServerOptions {
   runtime: CodexWebRuntime;
   config: CodexWebConfig;
   identityStore?: CodexWebIdentityStoreLike | null;
-  staticFiles?: Record<string, { body: string | Buffer; contentType: string }>;
+  staticFiles?: StaticFilesRecord;
 }
 
 export interface CodexWebServerHandle {
@@ -67,6 +69,7 @@ interface AuthenticatedRequestContext {
 interface CodexWebIdentityStoreLike {
   readState(): Promise<CodexWebIdentityState>;
   setMultiUserEnabled?(enabled: boolean): Promise<CodexWebIdentityState>;
+  ensureBootstrapAdminFromPasswordHash?: FileIdentityStore['ensureBootstrapAdminFromPasswordHash'];
   upsertProject?(project: CodexWebProject): Promise<CodexWebProject>;
   upsertRole?(role: CodexWebRole): Promise<CodexWebRole>;
   upsertUserWithPassword?(input: {
@@ -74,9 +77,18 @@ interface CodexWebIdentityStoreLike {
     username: string;
     password: string;
     enabled?: boolean;
+    canNewSession?: boolean;
     roleIds?: string[];
     directProjectGrants?: any[];
   }): Promise<CodexWebUser>;
+  updateUserAccess?(input: {
+    id: string;
+    enabled?: boolean;
+    canNewSession?: boolean;
+    roleIds?: string[];
+    directProjectGrants?: any[];
+  }): Promise<CodexWebUser>;
+  deleteUser?(userId: string): Promise<void>;
   upsertSession(session: CodexWebAppSession): Promise<CodexWebAppSession>;
   deleteSession?(sessionId: string): Promise<void>;
   createShare?(args: { sessionId: string; createdByUserId: string }): ReturnType<FileIdentityStore['createShare']>;
@@ -89,6 +101,9 @@ const LOGIN_RATE_LIMIT_WINDOW_MS = 60_000;
 const LOGIN_RATE_LIMIT_PER_CLIENT = 10;
 const LOGIN_RATE_LIMIT_GLOBAL = 100;
 const BUILD_ID_PLACEHOLDER = '__CODEX_WEB_BUILD_ID__';
+type StaticFileAsset = { body: string | Buffer; contentType: string };
+type StaticFileEntry = StaticFileAsset | (() => StaticFileAsset);
+type StaticFilesRecord = Record<string, StaticFileEntry>;
 
 export function createCodexWebServer({
   auth,
@@ -171,51 +186,50 @@ export function createCodexWebServer({
   };
 }
 
-function loadDefaultStaticFiles(): Record<string, { body: string | Buffer; contentType: string }> {
+function loadDefaultStaticFiles(): StaticFilesRecord {
   const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
   const buildId = createBuildId();
-  const indexHtml = readFileSync(path.join(publicDir, 'index.html'), 'utf8');
+  const readText = (relativePath: string) => readFileSync(path.join(publicDir, relativePath), 'utf8');
+  const readBinary = (relativePath: string) => readFileSync(path.join(publicDir, relativePath));
+  const indexAsset = (): StaticFileAsset => ({
+    body: readText('index.html'),
+    contentType: 'text/html; charset=utf-8',
+  });
   return {
-    '/': {
-      body: indexHtml,
-      contentType: 'text/html; charset=utf-8',
-    },
-    '/index.html': {
-      body: indexHtml,
-      contentType: 'text/html; charset=utf-8',
-    },
-    '/app.js': {
-      body: injectBuildId(readFileSync(path.join(publicDir, 'app.js'), 'utf8'), buildId),
+    '/': indexAsset,
+    '/index.html': indexAsset,
+    '/app.js': () => ({
+      body: injectBuildId(readText('app.js'), buildId),
       contentType: 'application/javascript; charset=utf-8',
-    },
-    '/styles.css': {
-      body: readFileSync(path.join(publicDir, 'styles.css'), 'utf8'),
+    }),
+    '/styles.css': () => ({
+      body: readText('styles.css'),
       contentType: 'text/css; charset=utf-8',
-    },
-    '/pwa-pull-refresh.js': {
-      body: readFileSync(path.join(publicDir, 'pwa-pull-refresh.js'), 'utf8'),
+    }),
+    '/pwa-pull-refresh.js': () => ({
+      body: readText('pwa-pull-refresh.js'),
       contentType: 'application/javascript; charset=utf-8',
-    },
-    '/manifest.webmanifest': {
-      body: readFileSync(path.join(publicDir, 'manifest.webmanifest'), 'utf8'),
+    }),
+    '/manifest.webmanifest': () => ({
+      body: readText('manifest.webmanifest'),
       contentType: 'application/manifest+json; charset=utf-8',
-    },
-    '/service-worker.js': {
-      body: injectBuildId(readFileSync(path.join(publicDir, 'service-worker.js'), 'utf8'), buildId),
+    }),
+    '/service-worker.js': () => ({
+      body: injectBuildId(readText('service-worker.js'), buildId),
       contentType: 'application/javascript; charset=utf-8',
-    },
-    '/icon-192.png': {
-      body: readFileSync(path.join(publicDir, 'icon-192.png')),
+    }),
+    '/icon-192.png': () => ({
+      body: readBinary('icon-192.png'),
       contentType: 'image/png',
-    },
-    '/icon-512.png': {
-      body: readFileSync(path.join(publicDir, 'icon-512.png')),
+    }),
+    '/icon-512.png': () => ({
+      body: readBinary('icon-512.png'),
       contentType: 'image/png',
-    },
-    '/apple-touch-icon.png': {
-      body: readFileSync(path.join(publicDir, 'apple-touch-icon.png')),
+    }),
+    '/apple-touch-icon.png': () => ({
+      body: readBinary('apple-touch-icon.png'),
       contentType: 'image/png',
-    },
+    }),
   };
 }
 
@@ -243,7 +257,7 @@ async function handleRequest({
   auth: CodexWebAuthLike;
   runtime: CodexWebRuntime;
   identityStore: CodexWebIdentityStoreLike | null;
-  staticFiles: Record<string, { body: string | Buffer; contentType: string }>;
+  staticFiles: StaticFilesRecord;
   config: CodexWebConfig;
   loginRateLimiter: FixedWindowRateLimiter;
   registerSseCloser: (close: () => void) => () => void;
@@ -258,7 +272,7 @@ async function handleRequest({
       writeSetupRequiredPage(response);
       return;
     }
-    const asset = staticFiles[pathname] ?? (isShareAppRoute(pathname) ? staticFiles['/'] : undefined);
+    const asset = resolveStaticFile(staticFiles[pathname] ?? (isShareAppRoute(pathname) ? staticFiles['/'] : undefined));
     if (!asset) {
       writeJson(response, 404, { error: 'Not found' });
       return;
@@ -332,7 +346,8 @@ async function handleRequest({
   }
 
   const identityState = identityStore ? await identityStore.readState() : null;
-  if (identityStore && identityState?.settings.multiUserEnabled === true) {
+  const principal = authContext.session.principal ?? localAdminPrincipal();
+  if (identityStore && identityState && (identityState.settings.multiUserEnabled === true || pathname.startsWith('/api/admin/'))) {
     const handled = await handleMultiUserRequest({
       request,
       response,
@@ -340,7 +355,8 @@ async function handleRequest({
       method,
       url,
       authContext,
-      principal: authContext.session.principal ?? localAdminPrincipal(),
+      auth,
+      principal,
       identityStore,
       identityState,
       runtime,
@@ -611,6 +627,13 @@ async function handleRequest({
   writeJson(response, 404, { error: 'Not found' });
 }
 
+function resolveStaticFile(entry: StaticFileEntry | undefined): StaticFileAsset | null {
+  if (!entry) {
+    return null;
+  }
+  return typeof entry === 'function' ? entry() : entry;
+}
+
 interface RateLimitResult {
   allowed: boolean;
   retryAfterMs: number;
@@ -780,6 +803,7 @@ async function handleMultiUserRequest({
   method,
   url,
   authContext,
+  auth,
   principal,
   identityStore,
   identityState,
@@ -792,6 +816,7 @@ async function handleMultiUserRequest({
   method: string;
   url: URL;
   authContext: AuthenticatedRequestContext;
+  auth: CodexWebAuthLike;
   principal: CodexWebPrincipal;
   identityStore: CodexWebIdentityStoreLike;
   identityState: CodexWebIdentityState;
@@ -804,23 +829,46 @@ async function handleMultiUserRequest({
 
   if (pathname === '/api/projects' && method === 'GET') {
     const items = identityState.projects
-      .filter((project) => project.enabled !== false && canCreateProjectSession(identityState, principal, project.id))
+      .filter((project) => (
+        principal.isAdmin
+        || (project.enabled !== false && canReadProject(identityState, principal, project.id))
+      ))
       .map((project) => ({
         id: project.id,
         displayName: project.displayName,
+        canCreate: principal.isAdmin ? true : canCreateProjectSession(identityState, principal, project.id),
       }));
     writeJson(response, 200, { items });
     return true;
   }
 
   if (pathname === '/api/sessions' && method === 'GET') {
-    const items = [];
-    for (const appSession of identityState.sessions) {
-      if (!canReadAppSession(identityState, principal, appSession)) {
-        continue;
+    const readableSessionsByThreadId = new Map(
+      identityState.sessions
+        .filter((appSession) => canReadAppSession(identityState, principal, appSession))
+        .map((appSession) => [appSession.codexThreadId, appSession]),
+    );
+    if (url.searchParams.get('favorite') === 'true') {
+      const items = [];
+      for (const runtimeSession of await runtime.listSessions({ favorite: true })) {
+        const appSession = readableSessionsByThreadId.get(runtimeSession.id);
+        if (!appSession) {
+          continue;
+        }
+        items.push(presentSessionForUser({
+          runtimeSession,
+          appSession,
+          project: findProject(identityState, appSession.projectId),
+          includeCwd: false,
+        }));
       }
-      const runtimeSession = await runtime.readSession(appSession.codexThreadId);
-      if (!runtimeSession) {
+      writeJson(response, 200, { items });
+      return true;
+    }
+    const items = [];
+    for (const runtimeSession of await runtime.listSessions()) {
+      const appSession = readableSessionsByThreadId.get(runtimeSession.id);
+      if (!appSession) {
         continue;
       }
       items.push(presentSessionForUser({
@@ -838,7 +886,10 @@ async function handleMultiUserRequest({
     const body = await readJsonBody(request);
     const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : '';
     const project = findProject(identityState, projectId);
-    if (!project || project.enabled === false || !canCreateProjectSession(identityState, principal, project.id)) {
+    if (
+      !project
+      || (!principal.isAdmin && (project.enabled === false || !canCreateProjectSession(identityState, principal, project.id)))
+    ) {
       writeSessionNotFound(response);
       return true;
     }
@@ -879,6 +930,7 @@ async function handleMultiUserRequest({
       method,
       identityStore,
       identityState,
+      auth,
     });
     if (handledAdmin) {
       return true;
@@ -890,19 +942,25 @@ async function handleMultiUserRequest({
       writeJson(response, 403, { error: 'forbidden' });
       return true;
     }
+    const adminIdentityState = await ensureAdminLegacySessionMappings({
+      identityStore,
+      identityState,
+      runtime,
+      principal,
+    });
     const sessionId = adminSessionsMatch[1] ? decodeURIComponent(adminSessionsMatch[1]) : null;
     if (!sessionId && method === 'GET') {
       const userId = url.searchParams.get('userId');
       const projectId = url.searchParams.get('projectId');
-      const items = identityState.sessions
+      const items = adminIdentityState.sessions
         .filter((session) => !userId || session.ownerUserId === userId)
         .filter((session) => !projectId || session.projectId === projectId)
-        .map((session) => presentAppSessionAudit(identityState, session));
+        .map((session) => presentAppSessionAudit(adminIdentityState, session));
       writeJson(response, 200, { items });
       return true;
     }
     if (sessionId && method === 'GET') {
-      const appSession = identityState.sessions.find((session) => session.id === sessionId);
+      const appSession = adminIdentityState.sessions.find((session) => session.id === sessionId);
       if (!appSession) {
         writeSessionNotFound(response);
         return true;
@@ -917,7 +975,7 @@ async function handleMultiUserRequest({
         session: presentSessionForUser({
           runtimeSession,
           appSession,
-          project: findProject(identityState, appSession.projectId),
+          project: findProject(adminIdentityState, appSession.projectId),
           includeCwd: true,
         }),
       });
@@ -927,7 +985,14 @@ async function handleMultiUserRequest({
 
   const shareCreateMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/share$/u);
   if (shareCreateMatch && method === 'POST') {
-    const resolved = resolveReadableAppSession(identityState, principal, decodeURIComponent(shareCreateMatch[1]!));
+    const stateForSession = await stateForSessionAccess({
+      identityStore,
+      identityState,
+      runtime,
+      principal,
+      sessionId: decodeURIComponent(shareCreateMatch[1]!),
+    });
+    const resolved = resolveReadableAppSession(stateForSession, principal, decodeURIComponent(shareCreateMatch[1]!));
     if (!resolved || !identityStore.createShare) {
       writeSessionNotFound(response);
       return true;
@@ -945,7 +1010,14 @@ async function handleMultiUserRequest({
 
   const sessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/u);
   if (sessionMatch && method === 'GET') {
-    const resolved = resolveReadableAppSession(identityState, principal, decodeURIComponent(sessionMatch[1]!));
+    const stateForSession = await stateForSessionAccess({
+      identityStore,
+      identityState,
+      runtime,
+      principal,
+      sessionId: decodeURIComponent(sessionMatch[1]!),
+    });
+    const resolved = resolveReadableAppSession(stateForSession, principal, decodeURIComponent(sessionMatch[1]!));
     if (!resolved) {
       writeSessionNotFound(response);
       return true;
@@ -968,7 +1040,14 @@ async function handleMultiUserRequest({
 
   const startTurnMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/turns$/u);
   if (startTurnMatch && method === 'POST') {
-    const resolved = resolveWritableAppSession(identityState, principal, decodeURIComponent(startTurnMatch[1]!));
+    const stateForSession = await stateForSessionAccess({
+      identityStore,
+      identityState,
+      runtime,
+      principal,
+      sessionId: decodeURIComponent(startTurnMatch[1]!),
+    });
+    const resolved = resolveWritableAppSession(stateForSession, principal, decodeURIComponent(startTurnMatch[1]!));
     if (!resolved) {
       writeSessionNotFound(response);
       return true;
@@ -993,7 +1072,14 @@ async function handleMultiUserRequest({
 
   const sessionSettingsMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/settings$/u);
   if (sessionSettingsMatch && method === 'PATCH') {
-    const resolved = resolveWritableAppSession(identityState, principal, decodeURIComponent(sessionSettingsMatch[1]!));
+    const stateForSession = await stateForSessionAccess({
+      identityStore,
+      identityState,
+      runtime,
+      principal,
+      sessionId: decodeURIComponent(sessionSettingsMatch[1]!),
+    });
+    const resolved = resolveWritableAppSession(stateForSession, principal, decodeURIComponent(sessionSettingsMatch[1]!));
     if (!resolved) {
       writeSessionNotFound(response);
       return true;
@@ -1087,6 +1173,7 @@ async function handleAdminManagementRequest({
   method,
   identityStore,
   identityState,
+  auth,
 }: {
   request: IncomingMessage;
   response: ServerResponse;
@@ -1094,18 +1181,22 @@ async function handleAdminManagementRequest({
   method: string;
   identityStore: CodexWebIdentityStoreLike;
   identityState: CodexWebIdentityState;
+  auth: CodexWebAuthLike;
 }): Promise<boolean> {
   if (pathname === '/api/admin/settings' && method === 'GET') {
     writeJson(response, 200, { settings: identityState.settings });
     return true;
   }
   if (pathname === '/api/admin/settings' && method === 'PATCH') {
-    if (typeof identityStore.setMultiUserEnabled !== 'function') {
+    const setMultiUserEnabled = typeof auth.setMultiUserEnabled === 'function'
+      ? (enabled: boolean) => auth.setMultiUserEnabled!(enabled)
+      : identityStore.setMultiUserEnabled?.bind(identityStore);
+    if (typeof setMultiUserEnabled !== 'function') {
       writeJson(response, 501, { error: 'not_supported' });
       return true;
     }
     const body = await readJsonBody(request);
-    const state = await identityStore.setMultiUserEnabled(body.multiUserEnabled === true);
+    const state = await setMultiUserEnabled(body.multiUserEnabled === true);
     writeJson(response, 200, { settings: state.settings });
     return true;
   }
@@ -1139,11 +1230,16 @@ async function handleAdminManagementRequest({
       return true;
     }
     const body = await readJsonBody(request);
+    const projectIds = Array.isArray(body.projectIds)
+      ? body.projectIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : [];
     const role = await identityStore.upsertRole({
       id: String(body.id ?? ''),
       name: String(body.name ?? ''),
       isAdmin: body.isAdmin === true,
-      projectGrants: Array.isArray(body.projectGrants) ? body.projectGrants as any[] : [],
+      projectGrants: projectIds.length
+        ? projectIds.map((projectId) => ({ projectId, canRead: true, canCreate: true, canWrite: true }))
+        : normalizeRoleProjectGrants(body.projectGrants),
     });
     writeJson(response, 201, { role });
     return true;
@@ -1158,28 +1254,136 @@ async function handleAdminManagementRequest({
       return true;
     }
     const body = await readJsonBody(request);
+    const roleId = typeof body.roleId === 'string' ? body.roleId.trim() : '';
+    const roleIds = roleId
+      ? [roleId]
+      : Array.isArray(body.roleIds)
+        ? body.roleIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, 1)
+        : [];
     const user = await identityStore.upsertUserWithPassword({
       id: String(body.id ?? ''),
       username: String(body.username ?? ''),
       password: String(body.password ?? ''),
       enabled: body.enabled !== false,
-      roleIds: Array.isArray(body.roleIds) ? body.roleIds.filter((item): item is string => typeof item === 'string') : [],
+      roleIds,
       directProjectGrants: Array.isArray(body.directProjectGrants) ? body.directProjectGrants as any[] : [],
     });
     writeJson(response, 201, { user: presentAdminUser(user) });
+    return true;
+  }
+  const adminUserMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)$/u);
+  if (adminUserMatch && method === 'PATCH') {
+    if (typeof identityStore.updateUserAccess !== 'function') {
+      writeJson(response, 501, { error: 'not_supported' });
+      return true;
+    }
+    const body = await readJsonBody(request);
+    const roleId = typeof body.roleId === 'string' ? body.roleId.trim() : '';
+    const roleIds = roleId
+      ? [roleId]
+      : Array.isArray(body.roleIds)
+        ? body.roleIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, 1)
+        : [];
+    try {
+      const user = await identityStore.updateUserAccess({
+        id: decodeURIComponent(adminUserMatch[1]!),
+        enabled: body.enabled !== false,
+        roleIds,
+        directProjectGrants: Array.isArray(body.directProjectGrants) ? body.directProjectGrants as any[] : undefined,
+      });
+      writeJson(response, 200, { user: presentAdminUser(user) });
+    } catch {
+      writeSessionNotFound(response);
+    }
+    return true;
+  }
+  if (adminUserMatch && method === 'DELETE') {
+    if (typeof identityStore.deleteUser !== 'function') {
+      writeJson(response, 501, { error: 'not_supported' });
+      return true;
+    }
+    try {
+      await identityStore.deleteUser(decodeURIComponent(adminUserMatch[1]!));
+      response.statusCode = 204;
+      response.end();
+    } catch {
+      writeSessionNotFound(response);
+    }
     return true;
   }
   return false;
 }
 
 function presentAdminUser(user: CodexWebUser): Record<string, unknown> {
+  const [roleId = ''] = user.roleIds;
   return {
     id: user.id,
     username: user.username,
     enabled: user.enabled,
+    roleId,
     roleIds: user.roleIds,
     directProjectGrants: user.directProjectGrants,
   };
+}
+
+function normalizeRoleProjectGrants(value: unknown): Array<{
+  projectId: string;
+  canRead: boolean;
+  canCreate: boolean;
+  canWrite: boolean;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((grant) => {
+      if (!grant || typeof grant !== 'object') {
+        return null;
+      }
+      const projectId = typeof (grant as { projectId?: unknown }).projectId === 'string'
+        ? (grant as { projectId: string }).projectId.trim()
+        : '';
+      if (!projectId) {
+        return null;
+      }
+      return {
+        projectId,
+        canRead: true,
+        canCreate: true,
+        canWrite: true,
+      };
+    })
+    .filter((grant): grant is { projectId: string; canRead: boolean; canCreate: boolean; canWrite: boolean } => grant !== null);
+}
+
+function canReadProject(
+  state: CodexWebIdentityState,
+  principal: CodexWebPrincipal,
+  projectId: string,
+): boolean {
+  if (principal.isAdmin) {
+    return true;
+  }
+  const grant = canReadProjectGrant(state, principal, projectId);
+  return grant === true;
+}
+
+function canReadProjectGrant(
+  state: CodexWebIdentityState,
+  principal: CodexWebPrincipal,
+  projectId: string,
+): boolean {
+  const user = state.users.find((item) => item.id === principal.userId && item.enabled !== false);
+  if (!user) {
+    return false;
+  }
+  const grants = [
+    ...state.roles
+      .filter((role) => user.roleIds.includes(role.id))
+      .flatMap((role) => role.projectGrants),
+    ...user.directProjectGrants,
+  ].filter((grant) => grant.projectId === projectId);
+  return grants.some((grant) => grant.canRead === true || grant.canCreate === true || grant.canWrite === true);
 }
 
 function resolveReadableAppSession(
@@ -1187,7 +1391,7 @@ function resolveReadableAppSession(
   principal: CodexWebPrincipal,
   sessionId: string,
 ): { appSession: CodexWebAppSession; project: CodexWebProject | null } | null {
-  const appSession = state.sessions.find((session) => session.id === sessionId);
+  const appSession = findAppSessionByExternalId(state, sessionId);
   if (!appSession || !canReadAppSession(state, principal, appSession)) {
     return null;
   }
@@ -1202,7 +1406,7 @@ function resolveWritableAppSession(
   principal: CodexWebPrincipal,
   sessionId: string,
 ): { appSession: CodexWebAppSession; project: CodexWebProject | null } | null {
-  const appSession = state.sessions.find((session) => session.id === sessionId);
+  const appSession = findAppSessionByExternalId(state, sessionId);
   if (!appSession || !canWriteAppSession(state, principal, appSession)) {
     return null;
   }
@@ -1212,8 +1416,133 @@ function resolveWritableAppSession(
   };
 }
 
+function findAppSessionByExternalId(state: CodexWebIdentityState, sessionId: string): CodexWebAppSession | null {
+  return state.sessions.find((session) => session.id === sessionId)
+    ?? state.sessions.find((session) => session.codexThreadId === sessionId)
+    ?? null;
+}
+
 function findProject(state: CodexWebIdentityState, projectId: string): CodexWebProject | null {
   return state.projects.find((project) => project.id === projectId) ?? null;
+}
+
+async function stateForSessionAccess({
+  identityStore,
+  identityState,
+  runtime,
+  principal,
+  sessionId,
+}: {
+  identityStore: CodexWebIdentityStoreLike;
+  identityState: CodexWebIdentityState;
+  runtime: CodexWebRuntime;
+  principal: CodexWebPrincipal;
+  sessionId: string;
+}): Promise<CodexWebIdentityState> {
+  if (!principal.isAdmin || findAppSessionByExternalId(identityState, sessionId)) {
+    return identityState;
+  }
+  return ensureAdminLegacySessionMappings({
+    identityStore,
+    identityState,
+    runtime,
+    principal,
+  });
+}
+
+async function ensureAdminLegacySessionMappings({
+  identityStore,
+  identityState,
+  runtime,
+  principal,
+}: {
+  identityStore: CodexWebIdentityStoreLike;
+  identityState: CodexWebIdentityState;
+  runtime: CodexWebRuntime;
+  principal: CodexWebPrincipal;
+}): Promise<CodexWebIdentityState> {
+  if (typeof identityStore.upsertProject !== 'function') {
+    return identityState;
+  }
+  const runtimeSessions = await runtime.listSessions();
+  const mappedThreadIds = new Set(identityState.sessions.map((session) => session.codexThreadId));
+  const projectsById = new Map(identityState.projects.map((project) => [project.id, project]));
+  const ownerUserId = adminOwnerUserId(identityState, principal);
+  let changed = false;
+
+  for (const runtimeSession of runtimeSessions) {
+    const threadId = normalizeOptionalString(runtimeSession.id);
+    if (!threadId || mappedThreadIds.has(threadId)) {
+      continue;
+    }
+    const project = legacyProjectForRuntimeSession(runtimeSession);
+    const existingProject = projectsById.get(project.id);
+    if (!existingProject) {
+      await identityStore.upsertProject(project);
+      projectsById.set(project.id, project);
+      changed = true;
+    } else if (existingProject.enabled === false) {
+      const enabledProject = {
+        ...existingProject,
+        enabled: true,
+      };
+      await identityStore.upsertProject(enabledProject);
+      projectsById.set(project.id, enabledProject);
+      changed = true;
+    }
+    const timestamp = isoFromRuntimeTimestamp(runtimeSession.updatedAt, new Date().toISOString());
+    await identityStore.upsertSession({
+      id: legacyAppSessionId(threadId),
+      codexThreadId: threadId,
+      projectId: project.id,
+      ownerUserId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    mappedThreadIds.add(threadId);
+    changed = true;
+  }
+
+  return changed ? identityStore.readState() : identityState;
+}
+
+function adminOwnerUserId(state: CodexWebIdentityState, principal: CodexWebPrincipal): string {
+  const adminUser = state.users.find((user) => user.id === 'user_admin')
+    ?? state.users.find((user) => user.username === 'admin')
+    ?? state.users.find((user) => user.enabled !== false && user.roleIds.some((roleId) => state.roles.some((role) => role.id === roleId && role.isAdmin)));
+  return adminUser?.id ?? principal.userId;
+}
+
+function legacyProjectForRuntimeSession(runtimeSession: CodexWebSession): CodexWebProject {
+  const cwd = normalizeOptionalString(runtimeSession.cwd) || '__codex_web_legacy_unknown_cwd__';
+  const displayName = normalizeOptionalString(runtimeSession.projectName) || path.basename(cwd) || 'Legacy Session';
+  return {
+    id: `project_admin_legacy_${stableIdHash(cwd, 20)}`,
+    internalName: displayName,
+    cwd,
+    displayName,
+    enabled: true,
+  };
+}
+
+function legacyAppSessionId(threadId: string): string {
+  return `app_legacy_${stableIdHash(threadId, 24)}`;
+}
+
+function stableIdHash(value: string, length: number): string {
+  return crypto.createHash('sha256').update(value).digest('hex').slice(0, length);
+}
+
+function normalizeOptionalString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isoFromRuntimeTimestamp(value: unknown, fallback: string): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }
 
 function presentAppSessionAudit(

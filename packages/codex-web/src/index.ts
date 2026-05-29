@@ -1,4 +1,4 @@
-export { AuthStore, type AuthSession, type AuthState, type PublicAuthSession } from './auth_store.js';
+export { AuthStore, type AuthSession, type AuthState, type PasswordHashRecord, type PublicAuthSession } from './auth_store.js';
 export {
   canCreateProjectSession,
   canReadAppSession,
@@ -31,12 +31,14 @@ export { HybridAuthStore } from './hybrid_auth_store.js';
 export {
   FileIdentityStore,
   type CodexWebAppSession,
+  type BootstrapAdminPasswordHashInput,
   type CodexWebIdentityState,
   type CodexWebProject,
   type CodexWebProjectGrant,
   type CodexWebRole,
   type CodexWebShare,
   type CodexWebUser,
+  type UpdateUserAccessInput,
 } from './identity_store.js';
 export {
   createCodexWebServer,

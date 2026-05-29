@@ -1442,7 +1442,7 @@ test('runtime readSession exposes only process-active turn state', async () => {
   assert.equal((await runtime.readSession('thread_active_state'))?.activeTurnId, null);
 });
 
-test('runtime rejects new non-command turns when thread history shows multiple active turns', async () => {
+test('runtime ignores stale historical active turns when starting a new non-command turn', async () => {
   let startTurnCalls = 0;
   const client: CodexWebRuntimeClient = {
     listModels: async () => [],
@@ -1471,12 +1471,13 @@ test('runtime rejects new non-command turns when thread history shows multiple a
       ],
     }),
     writeConfigValue: async () => {},
-    startTurn: async (): Promise<ProviderTurnResult> => {
+    startTurn: async ({ onTurnStarted }): Promise<ProviderTurnResult> => {
       startTurnCalls += 1;
+      await onTurnStarted?.({ turnId: 'turn_new', threadId: 'thread_busy' });
       return {
-        outputText: 'should not start',
+        outputText: 'started',
         status: 'completed',
-        turnId: 'turn_unexpected',
+        turnId: 'turn_new',
         threadId: 'thread_busy',
       };
     },
@@ -1491,17 +1492,71 @@ test('runtime rejects new non-command turns when thread history shows multiple a
     eventBus: new CodexWebEventBus(),
   });
 
+  assert.deepEqual(await runtime.startTurn('thread_busy', { text: 'new question' }), { turnId: 'turn_new' });
+  assert.equal(startTurnCalls, 1);
+});
+
+test('runtime rejects overlapping non-command turns that are active in this process', async () => {
+  let resolveFirstTurn: ((result: ProviderTurnResult) => void) | null = null;
+  let startTurnCalls = 0;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_busy')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_busy', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_busy'),
+      turns: [
+        {
+          id: 'turn_process_active',
+          status: 'in_progress',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Still working' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted }): Promise<ProviderTurnResult> => {
+      startTurnCalls += 1;
+      await onTurnStarted?.({ turnId: 'turn_process_active', threadId: 'thread_busy' });
+      return new Promise<ProviderTurnResult>((resolve) => {
+        resolveFirstTurn = resolve;
+      });
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  await runtime.startTurn('thread_busy', { text: 'first question' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await assert.rejects(
-    runtime.startTurn('thread_busy', { text: 'new question' }),
+    runtime.startTurn('thread_busy', { text: 'second question' }),
     (error: unknown) => {
       assert.equal(error instanceof Error, true);
       assert.equal((error as Error & { code?: string }).code, 'turn_conflict');
-      assert.equal((error as Error & { activeTurnId?: string }).activeTurnId, 'turn_existing_active_1');
+      assert.equal((error as Error & { activeTurnId?: string }).activeTurnId, 'turn_process_active');
       assert.match((error as Error).message, /already has an active turn/u);
       return true;
     },
   );
-  assert.equal(startTurnCalls, 0);
+
+  resolveFirstTurn?.({
+    outputText: 'done',
+    status: 'completed',
+    turnId: 'turn_process_active',
+    threadId: 'thread_busy',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(startTurnCalls, 1);
 });
 
 test('runtime still allows slash commands while thread history shows an active turn', async () => {

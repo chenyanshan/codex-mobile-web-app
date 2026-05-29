@@ -1,6 +1,7 @@
 const APP_BUILD_ID = '__CODEX_WEB_BUILD_ID__';
 const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
+const QUEUED_MESSAGES_KEY = 'codexWebQueuedMessages';
 const THEME_KEY = 'codexWebTheme';
 const DEFAULT_THREAD_SETTINGS_KEY = 'codexWebDefaultThreadSettings';
 const MESSAGE_FONT_SIZE_KEY = 'codexWebMessageFontSize';
@@ -72,7 +73,11 @@ const state = {
     users: [],
     roles: [],
     sessions: [],
+    page: 'projects',
     filterUserId: '',
+    filterProjectId: '',
+    editingProjectId: '',
+    editingRoleId: '',
   },
   sessions: [],
   sessionsByScope: {
@@ -98,6 +103,7 @@ const state = {
   reportsReturnView: 'sessions',
   currentSession: null,
   sessionId: null,
+  draftSessionActive: false,
   view: 'sessions',
   desktopNewSessionOpen: false,
   desktopSettingsOpen: false,
@@ -121,6 +127,11 @@ const state = {
   status: 'Checking auth',
   statusTone: 'warn',
   prompt: '',
+  promptDrafts: new Map(),
+  queuedMessages: loadQueuedMessages(),
+  queuedMessageSending: false,
+  queuedInterruptRequestedTurnId: null,
+  queuedInterruptEligibleTurnId: null,
   composerCanExpand: false,
   composerExpanded: false,
   timelineShouldFollowLatest: true,
@@ -279,14 +290,10 @@ async function restoreAuth() {
     state.authSession = session;
     state.models = Array.isArray(modelsPayload.items) ? modelsPayload.items : [];
     state.model = pickModel(state.models, state.model || DEFAULT_MODEL);
-    if (!state.sessionId) {
-      state.view = 'sessions';
-    }
     state.status = 'Ready';
     state.statusTone = 'success';
     state.error = '';
     render();
-    preloadAllSessionsInBackground();
   } catch (error) {
     handleApiError(error, { auth: true });
   }
@@ -341,6 +348,7 @@ function setLoggedOut(message = '') {
   state.reportsReturnView = 'sessions';
   state.sessionId = null;
   state.currentSession = null;
+  state.draftSessionActive = false;
   state.view = 'sessions';
   state.desktopNewSessionOpen = false;
   state.desktopSettingsOpen = false;
@@ -366,13 +374,15 @@ function setLoggedOut(message = '') {
   state.statusTone = 'warn';
   state.error = '';
   state.loginError = message;
+  state.prompt = '';
+  state.promptDrafts = new Map();
   applyDefaultSettings();
   stopStream();
   render();
 }
 
 function render() {
-  const shouldRestoreLatestTimeline = state.view === 'chat' && state.timelineShouldFollowLatest;
+  const shouldRestoreLatestTimeline = state.timelineShouldFollowLatest;
   app.innerHTML = '';
   if (state.setupRequired) {
     app.appendChild(renderSetup());
@@ -388,7 +398,8 @@ function render() {
   }
   app.appendChild(renderMain());
   bindGlobalEvents();
-  if (state.view === 'chat') {
+  const timeline = document.querySelector('#timeline');
+  if (timeline) {
     syncComposerOffset();
     timelineScrollTrackingAttached = false;
     attachTimelineScrollTracking({ updateInitial: !shouldRestoreLatestTimeline });
@@ -408,6 +419,91 @@ function resetSessionHistoryWindow() {
   state.sessionHistoryItems = [];
   state.sessionHistoryStartIndex = 0;
   state.timelineShouldFollowLatest = true;
+}
+
+function currentPromptDraftKey() {
+  return state.sessionId || (state.draftSessionActive ? `draft:${state.cwd || 'default'}` : '');
+}
+
+function savePromptDraftForCurrentSession() {
+  const key = currentPromptDraftKey();
+  if (!key) {
+    return;
+  }
+  const prompt = String(state.prompt || '');
+  if (prompt) {
+    state.promptDrafts.set(key, prompt);
+  } else {
+    state.promptDrafts.delete(key);
+  }
+}
+
+function restorePromptDraftForSession(sessionId) {
+  state.prompt = state.promptDrafts.get(sessionId) || '';
+}
+
+function clearPromptDraftForCurrentSession() {
+  const key = currentPromptDraftKey();
+  if (key) {
+    state.promptDrafts.delete(key);
+  }
+  state.prompt = '';
+}
+
+function migrateDraftPromptToSession(sessionId) {
+  if (!sessionId) {
+    return;
+  }
+  const draftKey = `draft:${state.cwd || 'default'}`;
+  if (state.promptDrafts.has(draftKey) && !state.promptDrafts.has(sessionId)) {
+    state.promptDrafts.set(sessionId, state.promptDrafts.get(draftKey) || '');
+  }
+  state.promptDrafts.delete(draftKey);
+}
+
+function currentQueuedSessionId() {
+  return state.sessionId || '';
+}
+
+function queuedMessagesForSession(sessionId) {
+  if (!sessionId) {
+    return [];
+  }
+  const messages = state.queuedMessages.get(sessionId);
+  return Array.isArray(messages) ? messages : [];
+}
+
+function queuedMessagesForCurrentSession() {
+  return queuedMessagesForSession(currentQueuedSessionId());
+}
+
+function enqueueQueuedMessage(sessionId, text) {
+  const normalizedText = String(text || '').trim();
+  if (!sessionId || !normalizedText) {
+    return null;
+  }
+  const message = {
+    id: `queued_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    text: normalizedText,
+    createdAt: new Date().toISOString(),
+  };
+  state.queuedMessages.set(sessionId, [...queuedMessagesForSession(sessionId), message]);
+  persistQueuedMessages();
+  return message;
+}
+
+function removeQueuedMessage(sessionId, messageId) {
+  if (!sessionId || !messageId) {
+    return;
+  }
+  const nextMessages = queuedMessagesForSession(sessionId).filter((message) => message.id !== messageId);
+  if (nextMessages.length) {
+    state.queuedMessages.set(sessionId, nextMessages);
+  } else {
+    state.queuedMessages.delete(sessionId);
+  }
+  persistQueuedMessages();
+  render();
 }
 
 function renderSetup() {
@@ -507,7 +603,7 @@ function renderDesktopSidebar() {
 }
 
 function renderDesktopChatPane() {
-  if (!state.currentSession && !state.sessionId && !state.cwd) {
+  if (!state.currentSession && !state.sessionId && !state.cwd && !state.draftSessionActive) {
     return `
       <section class="desktop-chat-pane desktop-empty-pane">
         <div class="desktop-empty-state">
@@ -526,7 +622,7 @@ function renderDesktopChatPane() {
 }
 
 function ensureDesktopActiveSession() {
-  if (!isDesktopLayout() || state.sessionId || state.currentSession) {
+  if (!isDesktopLayout() || state.sessionId || state.currentSession || state.draftSessionActive) {
     return;
   }
   const [firstSession] = sortedSessions();
@@ -604,6 +700,11 @@ function renderSessionListHeader({ desktop = false } = {}) {
           <div class="page-title">Sessions</div>
           ${topbarActions}
         </div>
+        ${isAdminPrincipal() && !state.favoriteSortMode ? `
+          <div class="admin-shortcut-row">
+            <button class="admin-console-action compact-button" type="button" id="open-admin-console-button">Admin Console</button>
+          </div>
+        ` : ''}
         <div class="list-actions${state.favoriteSortMode ? ' is-hidden' : ''}">
           <div class="toggle sort-toggle">
             <button type="button" data-sort-mode="favorites" aria-pressed="${String(state.sortMode === 'favorites')}">Favorites</button>
@@ -811,14 +912,26 @@ function renderAppSettingsSections() {
             </div>
           </div>
         </section>
-        ${isAdminPrincipal() ? `
-          <section class="settings-section">
-            <div class="settings-section-title">Admin</div>
-            <button class="ghost compact-button full-width-button" type="button" id="open-admin-settings-button">Admin Console</button>
-          </section>
-        ` : ''}
+        ${renderAdminSettingsSection({ title: 'Admin', showLoadingNote: true })}
         <section class="settings-section">
           <button class="danger compact-button full-width-button" type="button" id="settings-logout-button">Log out</button>
+        </section>
+  `;
+}
+
+function renderAdminSettingsSection({ title = 'System', showLoadingNote = false } = {}) {
+  if (!isAdminPrincipal()) {
+    return '';
+  }
+  const adminSettingsLoaded = state.admin.settings !== null;
+  return `
+        <section class="settings-section${title === 'System' ? ' admin-summary-section' : ''}">
+          <div class="settings-section-title">${escapeHtml(title)}</div>
+          <label class="settings-action-row admin-toggle-row">
+            <span class="meta">Multi-user mode</span>
+            <input id="admin-multi-user-toggle" type="checkbox"${state.admin.settings?.multiUserEnabled === true ? ' checked' : ''}${adminSettingsLoaded ? '' : ' disabled'}>
+          </label>
+          ${showLoadingNote && !adminSettingsLoaded ? '<div class="meta">Loading admin settings...</div>' : ''}
         </section>
   `;
 }
@@ -827,8 +940,8 @@ function renderAdminConsole() {
   const shell = document.createElement('div');
   shell.className = 'shell';
   shell.innerHTML = `
-    <div class="screen page-screen">
-      ${renderPageNav('Admin Console', { backId: 'back-to-settings-button' })}
+    <div class="screen page-screen admin-console-screen">
+      ${renderPageNav('Admin Console')}
       <main class="admin-console-page">
         ${renderAdminSections()}
       </main>
@@ -842,25 +955,108 @@ function renderAdminSections() {
     return '<div class="empty-state">Loading admin console...</div>';
   }
   return `
-        <section class="settings-section admin-summary-section">
-          <div class="settings-section-title">System</div>
-          <label class="settings-action-row admin-toggle-row">
-            <span class="meta">Multi-user mode</span>
-            <input id="admin-multi-user-toggle" type="checkbox"${state.admin.settings?.multiUserEnabled === true ? ' checked' : ''}>
-          </label>
-        </section>
+        ${renderAdminSettingsSection()}
+        <div class="admin-layout">
+          ${renderAdminSidebar()}
+          <section class="admin-content">
+            ${renderAdminContent()}
+          </section>
+        </div>
+  `;
+}
+
+function renderAdminSidebar() {
+  const page = currentAdminPage();
+  const pages = [
+    ['projects', 'Project Management'],
+    ['roles', 'Role Management'],
+    ['users', 'User Management'],
+    ['sessions', 'Session Audit'],
+  ];
+  return `
+    <nav class="admin-sidebar" aria-label="Admin sections">
+      ${pages.map(([id, label]) => `
+        <button class="admin-sidebar-button" type="button" data-admin-page="${escapeAttribute(id)}" aria-pressed="${String(page === id)}">${escapeHtml(label)}</button>
+      `).join('')}
+    </nav>
+  `;
+}
+
+function renderAdminContent() {
+  switch (currentAdminPage()) {
+    case 'roles':
+      return renderAdminRolePage();
+    case 'users':
+      return renderAdminUserPage();
+    case 'sessions':
+      return renderAdminSessionAuditPage();
+    case 'projects':
+    default:
+      return renderAdminProjectPage();
+  }
+}
+
+function renderAdminProjectPage() {
+  return `
         <section class="settings-section">
-          <div class="settings-section-title">Projects</div>
+          <div class="settings-section-title">Project Management</div>
+          ${renderAdminProjectForm()}
           <div class="admin-list">${renderAdminProjects()}</div>
         </section>
+  `;
+}
+
+function renderAdminRolePage() {
+  return `
         <section class="settings-section">
-          <div class="settings-section-title">Users</div>
-          <div class="admin-list">${renderAdminUsers()}</div>
-        </section>
-        <section class="settings-section">
-          <div class="settings-section-title">Roles</div>
+          <div class="settings-section-title">Role Management</div>
+          ${renderAdminRoleForm()}
           <div class="admin-list">${renderAdminRoles()}</div>
         </section>
+  `;
+}
+
+function renderAdminUserPage() {
+  return `
+        <section class="settings-section">
+          <div class="settings-section-title">User Management</div>
+          ${renderAdminUserForm()}
+          <div class="admin-list">${renderAdminUsers()}</div>
+        </section>
+  `;
+}
+
+function renderAdminSessionAuditPage() {
+  return `
+        <section class="settings-section">
+          <div class="settings-section-title">Session Audit</div>
+          <div class="admin-filter-row">
+            <label class="field" for="admin-session-user-filter">
+              <span>User</span>
+              <select id="admin-session-user-filter" name="adminUserFilter">
+                <option value="">All users</option>
+                ${state.admin.users.map((user) => `
+                  <option value="${escapeAttribute(user.id)}"${state.admin.filterUserId === user.id ? ' selected' : ''}>${escapeHtml(user.username || user.id)}</option>
+                `).join('')}
+              </select>
+            </label>
+            <label class="field" for="admin-session-project-filter">
+              <span>Project</span>
+              <select id="admin-session-project-filter" name="adminProjectFilter">
+                <option value="">All projects</option>
+                ${adminAuditProjects().map((project) => `
+                  <option value="${escapeAttribute(project.id)}"${state.admin.filterProjectId === project.id ? ' selected' : ''}>${escapeHtml(project.displayName || 'Unknown project')}</option>
+                `).join('')}
+              </select>
+            </label>
+          </div>
+          <div class="admin-list">${renderAdminSessions()}</div>
+        </section>
+  `;
+}
+
+function renderLegacyAdminSections() {
+  return `
         <section class="settings-section">
           <div class="settings-section-title">Sessions</div>
           <div class="field">
@@ -877,28 +1073,181 @@ function renderAdminSections() {
   `;
 }
 
+function renderAdminProjectForm() {
+  const project = adminEditingProject();
+  return `
+    <form class="admin-form" id="admin-project-form">
+      <div class="admin-form-grid">
+        <label class="field">
+          <span>Display Name</span>
+          <input name="displayName" autocomplete="off" placeholder="Team Repo" value="${escapeAttribute(project?.displayName || '')}">
+        </label>
+        <label class="field">
+          <span>Internal Name</span>
+          <input name="internalName" autocomplete="off" placeholder="repo" value="${escapeAttribute(project?.internalName || '')}">
+        </label>
+        <label class="field">
+          <span>CWD</span>
+          <input name="cwd" autocomplete="off" placeholder="/Users/name/repo" value="${escapeAttribute(project?.cwd || '')}">
+        </label>
+      </div>
+      <label class="admin-check-row">
+        <input name="enabled" type="checkbox"${project?.enabled === false ? '' : ' checked'}>
+        <span>Enabled</span>
+      </label>
+      <div class="admin-form-actions">
+        <button class="primary compact-button" type="submit">Save Project</button>
+        ${project ? '<button class="ghost compact-button" type="button" id="admin-project-edit-cancel">Cancel</button>' : ''}
+      </div>
+    </form>
+  `;
+}
+
+function renderAdminRoleForm() {
+  const role = adminEditingRole();
+  return `
+    <form class="admin-form" id="admin-role-form">
+      <div class="admin-form-grid">
+        <label class="field">
+          <span>Role ID</span>
+          <input name="id" autocomplete="off" placeholder="role_writer" value="${escapeAttribute(role?.id || '')}">
+        </label>
+        <label class="field">
+          <span>Name</span>
+          <input name="name" autocomplete="off" placeholder="Writer" value="${escapeAttribute(role?.name || '')}">
+        </label>
+      </div>
+      <label class="admin-check-row">
+        <input name="isAdmin" type="checkbox"${role?.isAdmin === true ? ' checked' : ''}>
+        <span>Admin role</span>
+      </label>
+      ${renderAdminProjectCheckboxes(adminRoleProjectIds(role))}
+      <div class="admin-form-actions">
+        <button class="primary compact-button" type="submit">Save Role</button>
+        ${role ? '<button class="ghost compact-button" type="button" id="admin-role-edit-cancel">Cancel</button>' : ''}
+      </div>
+    </form>
+  `;
+}
+
+function renderAdminUserForm() {
+  return `
+    <form class="admin-form" id="admin-user-form">
+      <div class="admin-form-grid">
+        <label class="field">
+          <span>User ID</span>
+          <input name="id" autocomplete="off" placeholder="user_writer">
+        </label>
+        <label class="field">
+          <span>Username</span>
+          <input name="username" autocomplete="username" placeholder="writer">
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input name="password" type="password" autocomplete="new-password" placeholder="At least 8 chars">
+        </label>
+      </div>
+      <label class="admin-check-row">
+        <input name="enabled" type="checkbox" checked>
+        <span>Enabled</span>
+      </label>
+      <label class="field">
+        <span>Role</span>
+        ${renderAdminRoleSelect({ id: 'admin-user-role-select', name: 'roleId' })}
+      </label>
+      <button class="primary compact-button full-width-button" type="submit">Save User</button>
+    </form>
+  `;
+}
+
+function renderAdminRoleSelect({ id = 'admin-user-role-select', name = 'roleId', value = '' } = {}) {
+  if (!state.admin.roles.length) {
+    return `<select id="${escapeAttribute(id)}" name="${escapeAttribute(name)}"><option value="">No roles available</option></select>`;
+  }
+  const selectedValue = String(value || '');
+  return `
+    <select id="${escapeAttribute(id)}" name="${escapeAttribute(name)}">
+      <option value=""${selectedValue ? '' : ' selected'}>No role</option>
+      ${state.admin.roles.map((role) => `
+        <option value="${escapeAttribute(role.id)}"${role.id === selectedValue ? ' selected' : ''}>${escapeHtml(role.name || role.id)}</option>
+      `).join('')}
+    </select>
+  `;
+}
+
+function renderAdminProjectCheckboxes(selectedProjectIds = [], { name = 'projectIds', legend = 'Projects' } = {}) {
+  if (!state.admin.projects.length) {
+    return '<div class="meta">No projects available.</div>';
+  }
+  const selected = new Set(selectedProjectIds);
+  return `
+    <fieldset class="admin-fieldset">
+      <legend>${escapeHtml(legend)}</legend>
+      ${state.admin.projects.map((project) => `
+        <label class="admin-check-row">
+          <input name="${escapeAttribute(name)}" type="checkbox" value="${escapeAttribute(project.id)}"${selected.has(project.id) ? ' checked' : ''}>
+          <span>${escapeHtml(adminProjectVisibleName(project))}</span>
+        </label>
+      `).join('')}
+    </fieldset>
+  `;
+}
+
 function renderAdminProjects() {
   if (!state.admin.projects.length) {
     return '<div class="meta">No projects configured.</div>';
   }
-  return state.admin.projects.map((project) => `
-    <article class="admin-row">
-      <span class="admin-row-main">${escapeHtml(project.displayName || project.id)}</span>
-      <span class="admin-row-meta">${escapeHtml(project.id || '')}</span>
-    </article>
-  `).join('');
+  return `
+    <table class="admin-table">
+      <thead>
+        <tr>
+          <th>CWD</th>
+          <th>Internal Name</th>
+          <th>Display Name</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${state.admin.projects.map((project) => `
+          <tr>
+            <td>${escapeHtml(project.cwd || project.id || '')}</td>
+            <td>${escapeHtml(project.internalName || '')}</td>
+            <td>${escapeHtml(project.displayName || project.cwd || project.id || '')}</td>
+            <td><button class="ghost compact-button" type="button" data-admin-edit-project="${escapeAttribute(project.id || '')}">Edit</button></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
 }
 
 function renderAdminUsers() {
   if (!state.admin.users.length) {
     return '<div class="meta">No users configured.</div>';
   }
-  return state.admin.users.map((user) => `
-    <article class="admin-row">
-      <span class="admin-row-main">${escapeHtml(user.username || user.id)}</span>
-      <span class="admin-row-meta">${escapeHtml(user.enabled === false ? 'disabled' : user.id || '')}</span>
-    </article>
-  `).join('');
+  return state.admin.users.map((user) => {
+    const roleId = adminUserRoleId(user);
+    return `
+      <article class="admin-row admin-user-row">
+        <div>
+          <span class="admin-row-main">${escapeHtml(user.username || user.id)}</span>
+          <span class="admin-row-meta">${escapeHtml(adminUserMeta(user))}</span>
+        </div>
+        <form class="admin-user-access-form" data-admin-user-id="${escapeAttribute(user.id || '')}">
+          ${renderAdminRoleSelect({ id: `admin-user-role-${user.id || 'unknown'}`, name: 'userRoleId', value: roleId })}
+          <label class="admin-check-row">
+            <input name="enabled" type="checkbox"${user?.enabled === false ? '' : ' checked'}>
+            <span>Enabled</span>
+          </label>
+          <div class="admin-user-action-row">
+            <button class="ghost compact-button" type="submit">Save</button>
+            <button class="ghost compact-button" type="button" data-admin-toggle-user-id="${escapeAttribute(user.id || '')}" data-admin-toggle-user-enabled="${user?.enabled === false ? 'true' : 'false'}">${user?.enabled === false ? 'Enable' : 'Disable'}</button>
+            <button class="danger compact-button" type="button" data-admin-delete-user-id="${escapeAttribute(user.id || '')}">Delete</button>
+          </div>
+        </form>
+      </article>
+    `;
+  }).join('');
 }
 
 function renderAdminRoles() {
@@ -909,6 +1258,7 @@ function renderAdminRoles() {
     <article class="admin-row">
       <span class="admin-row-main">${escapeHtml(role.name || role.id)}</span>
       <span class="admin-row-meta">${role.isAdmin ? 'admin' : escapeHtml(role.id || '')}</span>
+      <button class="ghost compact-button" type="button" data-admin-edit-role="${escapeAttribute(role.id || '')}">Edit</button>
     </article>
   `).join('');
 }
@@ -922,8 +1272,8 @@ function renderAdminSessions() {
     return `
       <article class="admin-row admin-session-row">
         <button class="admin-session-open" type="button" data-admin-session-id="${escapeAttribute(session.id)}">
-          <span class="admin-row-main">${escapeHtml(session.projectDisplayName || session.projectId || session.id)}</span>
-          <span class="admin-row-meta">${escapeHtml(`${owner} · ${session.id}`)}</span>
+          <span class="admin-row-main">${escapeHtml(adminProjectNameById(session.projectId, session.projectDisplayName))}</span>
+          <span class="admin-row-meta">${escapeHtml(`${owner} · ${session.id} · Observer Mode`)}</span>
         </button>
       </article>
     `;
@@ -933,7 +1283,8 @@ function renderAdminSessions() {
 function renderNewSession() {
   const shell = document.createElement('div');
   shell.className = 'shell';
-  const projectPicker = renderNewSessionProjectPicker();
+  const sessionTargetPicker = renderNewSessionTargetPicker();
+  const startDisabled = isMultiUserMode() && !currentNewProjectId();
   shell.innerHTML = `
     <div class="screen page-screen">
       <header class="topbar page-topbar">
@@ -944,9 +1295,9 @@ function renderNewSession() {
       </header>
       <main class="new-session-page">
         <form class="panel stack" id="new-session-form">
-          ${projectPicker || renderNewSessionPathPicker()}
+          ${sessionTargetPicker}
           <div class="actions">
-            <button class="primary primary-action" type="submit">Start</button>
+            <button class="primary primary-action" type="submit"${startDisabled ? ' disabled' : ''}>Start</button>
           </div>
         </form>
       </main>
@@ -956,24 +1307,48 @@ function renderNewSession() {
 }
 
 function renderDesktopNewSessionLauncher() {
-  const projectPicker = renderNewSessionProjectPicker();
+  const sessionTargetPicker = renderNewSessionTargetPicker();
+  const startDisabled = isMultiUserMode() && !currentNewProjectId();
   return `
     <section class="desktop-new-session-launcher">
       <form class="panel stack" id="new-session-form">
-        ${projectPicker || renderNewSessionPathPicker()}
+        ${sessionTargetPicker}
         <div class="actions">
           <button class="ghost compact-button" type="button" id="desktop-new-session-cancel-button">Cancel</button>
-          <button class="primary compact-button" type="submit">Start</button>
+          <button class="primary compact-button" type="submit"${startDisabled ? ' disabled' : ''}>Start</button>
         </div>
       </form>
     </section>
   `;
 }
 
-function renderNewSessionProjectPicker() {
+function renderNewSessionTargetPicker() {
+  if (isMultiUserMode()) {
+    return renderMultiUserNewSessionProjectPicker();
+  }
+  return renderNewSessionPathPicker();
+}
+
+function renderMultiUserNewSessionProjectPicker() {
+  if (!state.projectsLoaded) {
+    return `
+      <div class="field">
+        <label>Project</label>
+        <div class="meta">Loading projects...</div>
+      </div>
+    `;
+  }
   const projects = availableProjects();
   if (!projects.length) {
-    return '';
+    return `
+      <div class="field">
+        <label for="new-project-select">Project</label>
+        <select id="new-project-select" name="projectId" disabled>
+          <option value="">No projects available</option>
+        </select>
+        <div class="meta">Ask an admin to assign a project before starting a session.</div>
+      </div>
+    `;
   }
   const currentProjectId = state.newProjectId || projects[0]?.id || '';
   return `
@@ -1027,24 +1402,62 @@ function renderChatContent({ desktop = false } = {}) {
         </div>
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
-      ${readOnly ? renderReadOnlyComposerNotice(state.currentSession) : renderComposer(composerClassName)}
+      ${readOnly ? renderReadOnlyComposerNotice(state.currentSession) : renderComposer(composerClassName, { desktop })}
   `;
 }
 
-function renderComposer(composerClassName) {
+function renderComposer(composerClassName, { desktop = false } = {}) {
   return `
       <div class="composer-wrap ${composerClassName}">
         ${state.composerExpanded ? '' : renderComposerStatus()}
+        ${renderQueuedMessages()}
         <form class="composer ${composerClassName}" id="composer-form">
           ${state.settingsOpen && !state.composerExpanded ? renderSettingsDrawer() : ''}
           ${state.error && !state.composerExpanded ? `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>` : ''}
           <div class="compact-composer-row">
             ${renderComposerLeadingControls()}
-            ${renderMessageEditor()}
+            ${renderMessageEditor({ desktop })}
           </div>
         </form>
       </div>
   `;
+}
+
+function renderQueuedMessages() {
+  const queued = queuedMessagesForCurrentSession();
+  if (!queued.length) {
+    return '';
+  }
+  return `
+        <div class="queued-messages" aria-label="Queued messages">
+          ${queued.map((message) => `
+            <div class="queued-message-row">
+              <span class="queued-message-text">${escapeHtml(message.text)}</span>
+              <button class="ghost queued-message-delete" type="button" data-queued-message-id="${escapeAttribute(message.id)}" aria-label="Delete queued message">Delete</button>
+            </div>
+          `).join('')}
+        </div>
+  `;
+}
+
+async function sendNextQueuedMessage(sessionId = state.sessionId) {
+  if (!sessionId || state.queuedMessageSending || state.pendingTurn || isReadOnlySession(state.currentSession)) {
+    return false;
+  }
+  const [message] = queuedMessagesForSession(sessionId);
+  if (!message) {
+    return false;
+  }
+  state.queuedMessageSending = true;
+  try {
+    await sendComposerMessage(message.text, {
+      queuedMessageId: message.id,
+      sessionId,
+    });
+    return true;
+  } finally {
+    state.queuedMessageSending = false;
+  }
 }
 
 function renderReadOnlyComposerNotice(session) {
@@ -1132,23 +1545,30 @@ function composerStateClassName() {
 }
 
 function renderComposerLeadingControls() {
-  const showExpandButton = state.composerCanExpand || state.composerExpanded;
-  const expandLabel = state.composerExpanded ? 'Collapse message editor' : 'Expand message editor';
-  const expandIcon = state.composerExpanded ? 'v' : '^';
+  let expandButton = '';
+  if (!isDesktopLayout()) {
+    expandButton = `<button class="ghost icon-button" type="button" id="composer-expand-button" aria-label="${state.composerExpanded ? 'Collapse message editor' : 'Expand message editor'}" aria-expanded="${String(state.composerExpanded)}"${state.composerCanExpand || state.composerExpanded ? '' : ' hidden'}>${state.composerExpanded ? 'v' : '^'}</button>`;
+  }
   return `
     <div class="composer-leading-controls">
-      <button class="ghost icon-button" type="button" id="composer-expand-button" aria-label="${expandLabel}" aria-expanded="${String(state.composerExpanded)}"${showExpandButton ? '' : ' hidden'}>${expandIcon}</button>
+      ${expandButton}
       <button class="ghost icon-button" type="button" id="settings-toggle" aria-expanded="${String(state.settingsOpen)}"${state.composerExpanded ? ' hidden' : ''}>Set</button>
     </div>
   `;
 }
 
-function renderMessageEditor() {
+function renderMessageEditor({ desktop = false } = {}) {
   const composerClassName = composerStateClassName();
+  const actionButtons = desktop
+    ? `<div class="composer-action-buttons">
+        <button class="ghost compact-refresh" type="button" id="composer-refresh-button" aria-label="Refresh session">Refresh</button>
+        <button class="primary compact-send" type="submit" id="send-button">Send</button>
+      </div>`
+    : '<button class="primary compact-send" type="submit" id="send-button">Send</button>';
   return `
     <div class="message-editor-shell ${composerClassName}">
       <textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">${escapeHtml(state.prompt)}</textarea>
-      <button class="primary compact-send" type="submit" id="send-button">Send</button>
+      ${actionButtons}
     </div>
   `;
 }
@@ -1666,6 +2086,12 @@ function bindGlobalEvents() {
     composerForm.addEventListener('submit', onComposerSubmit);
   }
 
+  for (const button of document.querySelectorAll('[data-queued-message-id]')) {
+    button.addEventListener('click', () => {
+      removeQueuedMessage(currentQueuedSessionId(), button.getAttribute('data-queued-message-id') || '');
+    });
+  }
+
   const logoutButton = document.querySelector('#logout-button');
   if (logoutButton) {
     logoutButton.addEventListener('click', onLogout);
@@ -1683,9 +2109,9 @@ function bindGlobalEvents() {
     });
   }
 
-  const openAdminSettingsButton = document.querySelector('#open-admin-settings-button');
-  if (openAdminSettingsButton) {
-    openAdminSettingsButton.addEventListener('click', () => {
+  const openAdminConsoleButton = document.querySelector('#open-admin-console-button');
+  if (openAdminConsoleButton) {
+    openAdminConsoleButton.addEventListener('click', () => {
       void openAdminConsole();
     });
   }
@@ -1699,6 +2125,13 @@ function bindGlobalEvents() {
   if (runtimeReloadButton) {
     runtimeReloadButton.addEventListener('click', () => {
       void reloadRuntime();
+    });
+  }
+
+  const composerRefreshButton = document.querySelector('#composer-refresh-button');
+  if (composerRefreshButton) {
+    composerRefreshButton.addEventListener('click', () => {
+      void handleComposerRefresh();
     });
   }
 
@@ -1818,13 +2251,6 @@ function bindGlobalEvents() {
     });
   }
 
-  const backToSettingsButton = document.querySelector('#back-to-settings-button');
-  if (backToSettingsButton) {
-    backToSettingsButton.addEventListener('click', () => {
-      openAppSettingsPage();
-    });
-  }
-
   for (const button of document.querySelectorAll('[data-session-id]')) {
     button.addEventListener('click', () => {
       rememberSessionListScroll();
@@ -1905,6 +2331,92 @@ function bindGlobalEvents() {
     });
   }
 
+  const adminSessionProjectFilter = document.querySelector('#admin-session-project-filter');
+  if (adminSessionProjectFilter) {
+    adminSessionProjectFilter.addEventListener('change', (event) => {
+      void refreshAdminSessions({ projectId: event.target.value, renderAfter: true });
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-admin-page]')) {
+    button.addEventListener('click', () => {
+      state.admin.page = normalizeAdminPage(button.getAttribute('data-admin-page') || '');
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-admin-edit-project]')) {
+    button.addEventListener('click', () => {
+      state.admin.editingProjectId = button.getAttribute('data-admin-edit-project') || '';
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-admin-edit-role]')) {
+    button.addEventListener('click', () => {
+      state.admin.editingRoleId = button.getAttribute('data-admin-edit-role') || '';
+      render();
+    });
+  }
+
+  const adminProjectEditCancel = document.querySelector('#admin-project-edit-cancel');
+  if (adminProjectEditCancel) {
+    adminProjectEditCancel.addEventListener('click', () => {
+      state.admin.editingProjectId = '';
+      render();
+    });
+  }
+
+  const adminRoleEditCancel = document.querySelector('#admin-role-edit-cancel');
+  if (adminRoleEditCancel) {
+    adminRoleEditCancel.addEventListener('click', () => {
+      state.admin.editingRoleId = '';
+      render();
+    });
+  }
+
+  const adminProjectForm = document.querySelector('#admin-project-form');
+  if (adminProjectForm) {
+    adminProjectForm.addEventListener('submit', (event) => {
+      void onAdminProjectSubmit(event);
+    });
+  }
+
+  const adminRoleForm = document.querySelector('#admin-role-form');
+  if (adminRoleForm) {
+    adminRoleForm.addEventListener('submit', (event) => {
+      void onAdminRoleSubmit(event);
+    });
+  }
+
+  const adminUserForm = document.querySelector('#admin-user-form');
+  if (adminUserForm) {
+    adminUserForm.addEventListener('submit', (event) => {
+      void onAdminUserSubmit(event);
+    });
+  }
+
+  for (const form of document.querySelectorAll('.admin-user-access-form')) {
+    form.addEventListener('submit', (event) => {
+      void onAdminUserAccessSubmit(event);
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-admin-toggle-user-id]')) {
+    button.addEventListener('click', () => {
+      void toggleAdminUserEnabled(
+        button.getAttribute('data-admin-toggle-user-id') || '',
+        button.getAttribute('data-admin-toggle-user-enabled') === 'true',
+      );
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-admin-delete-user-id]')) {
+    button.addEventListener('click', () => {
+      void deleteAdminUser(button.getAttribute('data-admin-delete-user-id') || '');
+    });
+  }
+
   for (const button of document.querySelectorAll('[data-admin-session-id]')) {
     button.addEventListener('click', () => {
       void openAdminObservedSession(button.getAttribute('data-admin-session-id') || '');
@@ -1925,6 +2437,7 @@ function bindGlobalEvents() {
     promptInput.addEventListener('keydown', handlePromptKeydown);
     promptInput.addEventListener('input', (event) => {
       state.prompt = event.target.value;
+      savePromptDraftForCurrentSession();
       syncPromptInputLayout(event.target);
     });
     updateComposerExpansionState(promptInput);
@@ -2273,8 +2786,11 @@ function restoreTimelineViewport(snapshot) {
     if (!timeline) {
       return;
     }
-    const bottomOffset = snapshot.shouldFollowLatest ? 0 : snapshot.bottomOffset;
-    timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight - Number(bottomOffset || 0));
+    if (snapshot.shouldFollowLatest) {
+      timeline.scrollTop = timeline.scrollHeight;
+    } else {
+      timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight - Number(snapshot.bottomOffset || 0));
+    }
     state.timelineShouldFollowLatest = snapshot.shouldFollowLatest !== false;
     rememberCurrentTimelineViewport();
     if (snapshot.hadPromptFocus) {
@@ -2291,13 +2807,31 @@ function renderChatWithTimelineRestored(callback) {
   restoreTimelineViewport(snapshot);
 }
 
+function latestTimelineViewportSnapshot() {
+  return {
+    bottomOffset: 0,
+    shouldFollowLatest: true,
+    hadPromptFocus: document.activeElement === document.querySelector('#prompt-input'),
+  };
+}
+
+function renderChatAtLatest(callback) {
+  const snapshot = latestTimelineViewportSnapshot();
+  state.timelineShouldFollowLatest = true;
+  callback();
+  render();
+  restoreTimelineViewport(snapshot);
+}
+
 function renderChatAtLatestIfFollowing(callback) {
   const snapshot = captureTimelineViewport();
+  const shouldFollowLatest = isDesktopWorkspaceView() || snapshot.shouldFollowLatest;
   callback();
   render();
   restoreTimelineViewport({
     ...snapshot,
-    bottomOffset: snapshot.shouldFollowLatest ? 0 : snapshot.bottomOffset,
+    bottomOffset: shouldFollowLatest ? 0 : snapshot.bottomOffset,
+    shouldFollowLatest,
   });
 }
 
@@ -2412,11 +2946,7 @@ function syncPromptInputLayout(textarea) {
 }
 
 function handlePromptKeydown(event) {
-  if (!isDesktopLayout() || event.key !== 'Enter' || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) {
-    return;
-  }
-  event.preventDefault();
-  document.querySelector('#composer-form')?.requestSubmit();
+  return;
 }
 
 function autoGrowPromptInput(textarea) {
@@ -2439,9 +2969,23 @@ function attachTimelineScrollTracking({ updateInitial = true } = {}) {
     return;
   }
   timeline.addEventListener('scroll', updateTimelineFollowState, { passive: true });
+  timeline.addEventListener('wheel', handleTimelineWheel, { passive: false });
   timelineScrollTrackingAttached = true;
   if (updateInitial) {
     updateTimelineFollowState();
+  }
+}
+
+function handleTimelineWheel(event) {
+  if (!isDesktopWorkspaceView() || !state.sessionId || Number(event?.deltaY || 0) >= 0) {
+    return;
+  }
+  const timeline = document.querySelector('#timeline');
+  if (!timeline || timeline.scrollTop > 0) {
+    return;
+  }
+  if (showMoreSessionHistory()) {
+    event?.preventDefault?.();
   }
 }
 
@@ -2504,6 +3048,7 @@ async function onLogout() {
 }
 
 function showSessionList() {
+  savePromptDraftForCurrentSession();
   saveCurrentTimeline();
   stopStream();
   rememberSessionListScroll();
@@ -2521,6 +3066,7 @@ function showSessionList() {
   if (!isDesktopLayout()) {
     state.sessionId = null;
     state.currentSession = null;
+    state.draftSessionActive = false;
     state.turnId = null;
     state.pendingTurn = false;
     state.composerExpanded = false;
@@ -2532,6 +3078,7 @@ function showSessionList() {
 }
 
 async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
+  savePromptDraftForCurrentSession();
   const normalizedProject = String(project || '').trim();
   const normalizedReturnView = returnView === 'chat' && state.sessionId ? 'chat' : 'sessions';
   if (isDesktopLayout()) {
@@ -2570,6 +3117,7 @@ async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
   if (normalizedReturnView !== 'chat') {
     state.sessionId = null;
     state.currentSession = null;
+    state.draftSessionActive = false;
     resetTurnState();
   }
   state.currentReport = null;
@@ -2626,6 +3174,7 @@ function handleReportsBackNavigation() {
 }
 
 function openAppSettingsPage() {
+  savePromptDraftForCurrentSession();
   saveCurrentTimeline();
   state.favoriteSortMode = false;
   state.favoriteSortDraft = [];
@@ -2640,6 +3189,9 @@ function openAppSettingsPage() {
     state.desktopNewSessionOpen = false;
     state.desktopOverlay = null;
     render();
+    if (isAdminPrincipal() && state.admin.settings === null) {
+      void refreshAdminSettings({ renderAfter: true });
+    }
     return;
   }
   stopStream();
@@ -2648,6 +3200,9 @@ function openAppSettingsPage() {
   state.currentSession = null;
   resetTurnState();
   render();
+  if (isAdminPrincipal() && state.admin.settings === null) {
+    void refreshAdminSettings({ renderAfter: true });
+  }
 }
 
 async function openAdminConsole() {
@@ -2669,6 +3224,7 @@ async function openAdminConsole() {
 }
 
 function openNewSessionPage() {
+  savePromptDraftForCurrentSession();
   saveCurrentTimeline();
   if (!state.projectsLoaded) {
     void refreshProjectsList({ renderAfter: true });
@@ -2686,7 +3242,7 @@ function openNewSessionPage() {
     state.currentReport = null;
     state.currentReportContent = '';
     state.currentReportLoading = false;
-    state.newCwd = hasProjectChoices() ? '' : state.cwd || '';
+    state.newCwd = isMultiUserMode() ? '' : hasProjectChoices() ? '' : state.cwd || '';
     state.error = '';
     render();
     return;
@@ -2702,7 +3258,7 @@ function openNewSessionPage() {
   state.currentReport = null;
   state.currentReportContent = '';
   state.currentReportLoading = false;
-  state.newCwd = hasProjectChoices() ? '' : state.cwd || '';
+  state.newCwd = isMultiUserMode() ? '' : hasProjectChoices() ? '' : state.cwd || '';
   resetTurnState();
   state.error = '';
   render();
@@ -2710,8 +3266,14 @@ function openNewSessionPage() {
 
 function onNewSessionSubmit(event) {
   event.preventDefault();
+  savePromptDraftForCurrentSession();
   const form = new FormData(event.currentTarget);
   const selectedProjectId = String(form.get('projectId') || state.newProjectId || '').trim();
+  if (isMultiUserMode() && !selectedProjectId) {
+    state.error = 'No projects are available for this account.';
+    render();
+    return;
+  }
   saveCurrentTimeline();
   stopStream();
   applyDefaultSettings();
@@ -2722,6 +3284,7 @@ function onNewSessionSubmit(event) {
   state.archiveConfirmSessionId = null;
   state.sessionId = null;
   state.currentSession = null;
+  state.draftSessionActive = true;
   state.newProjectId = selectedProjectId || state.newProjectId;
   state.cwd = selectedProjectId ? '' : state.newCwd.trim();
   state.prompt = '';
@@ -2743,13 +3306,16 @@ async function selectSession(sessionId) {
     openNewSessionPage();
     return;
   }
+  savePromptDraftForCurrentSession();
   saveCurrentTimeline();
   stopStream();
   resetSessionHistoryWindow();
   state.sessionId = nextSession.id;
   state.currentSession = nextSession;
+  state.draftSessionActive = false;
   state.archiveConfirmSessionId = null;
   state.cwd = nextSession.cwd || '';
+  restorePromptDraftForSession(nextSession.id);
   applySessionSettings(nextSession);
   restoreTimelineForSession(nextSession);
   const restoredRuntimeStatus = syncRuntimeStatusFromSession(nextSession, { source: 'stale' });
@@ -2782,6 +3348,7 @@ async function selectSession(sessionId) {
   const refreshedSession = state.sessions.find((session) => session.id === sessionId) || nextSession;
   state.currentSession = refreshedSession;
   state.cwd = refreshedSession.cwd || '';
+  restorePromptDraftForSession(refreshedSession.id);
   applySessionSettings(refreshedSession);
   restoreTimelineForSession(refreshedSession);
   const refreshedRuntimeStatus = syncRuntimeStatusFromSession(refreshedSession);
@@ -2813,6 +3380,25 @@ async function onComposerSubmit(event) {
   if (!text) {
     return;
   }
+  if (state.pendingTurn && state.sessionId && !isSlashCommandText(text)) {
+    enqueueQueuedMessage(state.sessionId, text);
+    state.queuedInterruptRequestedTurnId = state.turnId || null;
+    clearPromptDraftForCurrentSession();
+    state.status = 'Turn running';
+    state.statusTone = 'warn';
+    renderChatAtLatestIfFollowing(() => {});
+    void maybeInterruptRunningTurnForQueuedMessage();
+    return;
+  }
+  await sendComposerMessage(text);
+}
+
+function isSlashCommandText(text) {
+  const normalized = String(text || '').trim().toLowerCase();
+  return normalized === '/help' || normalized === '/goal' || normalized.startsWith('/goal ');
+}
+
+async function sendComposerMessage(text, { queuedMessageId = '', sessionId: preferredSessionId = '' } = {}) {
   state.error = '';
   state.pendingTurn = true;
   state.lastTurnEventSequence = null;
@@ -2830,14 +3416,15 @@ async function onComposerSubmit(event) {
   };
   appendMessage(optimisticUserEntry);
   const promptToSend = text;
-  state.prompt = '';
-  renderChatAtLatestIfFollowing(() => {});
+  clearPromptDraftForCurrentSession();
+  renderChatAtLatest(() => {});
 
   const wasNewSession = !state.sessionId;
   let submittedSessionId = '';
   try {
-    const sessionId = await ensureSession();
+    const sessionId = preferredSessionId || await ensureSession();
     submittedSessionId = sessionId;
+    clearPromptDraftForCurrentSession();
     optimisticallyUpdateSessionInput(promptToSend);
     saveCurrentTimeline();
     const settings = collectSettings();
@@ -2848,6 +3435,9 @@ async function onComposerSubmit(event) {
         settings,
       },
     });
+    if (queuedMessageId) {
+      removeQueuedMessage(sessionId, queuedMessageId);
+    }
     if (turn?.type === 'command') {
       handleCommandResult(turn);
       return;
@@ -2863,7 +3453,7 @@ async function onComposerSubmit(event) {
     state.turnId = turn.turnId;
     state.status = 'Turn running';
     state.statusTone = 'warn';
-    renderChatAtLatestIfFollowing(() => {});
+    renderChatAtLatest(() => {});
     void streamTurnEvents(turn.turnId);
   } catch (error) {
     if (handleMissingSession(error, promptToSend)) {
@@ -2872,6 +3462,8 @@ async function onComposerSubmit(event) {
     if (handleTurnConflict(error, {
       promptText: promptToSend,
       optimisticEntryId: optimisticUserEntry.id,
+      queuedMessageId,
+      sessionId: submittedSessionId || preferredSessionId || state.sessionId,
     })) {
       return;
     }
@@ -2892,13 +3484,24 @@ async function onComposerSubmit(event) {
 function handleTurnConflict(error, {
   promptText,
   optimisticEntryId,
+  queuedMessageId = '',
+  sessionId = '',
 } = {}) {
   if (error?.status !== 409 || error?.payload?.error !== 'turn_conflict') {
     return false;
   }
   removeTimelineEntryById(optimisticEntryId);
   const activeTurnId = String(error?.payload?.activeTurnId || '').trim();
-  state.prompt = promptText || state.prompt;
+  if (queuedMessageId && sessionId) {
+    const stillQueued = queuedMessagesForSession(sessionId).some((message) => message.id === queuedMessageId);
+    if (!stillQueued) {
+      enqueueQueuedMessage(sessionId, promptText);
+    }
+    state.prompt = '';
+  } else {
+    state.prompt = promptText || state.prompt;
+    savePromptDraftForCurrentSession();
+  }
   state.pendingTurn = Boolean(activeTurnId);
   state.turnId = activeTurnId || state.turnId;
   state.status = activeTurnId ? 'Turn running' : 'Request blocked';
@@ -2965,7 +3568,16 @@ async function ensureSession() {
   state.status = 'Starting session';
   render();
   const projectId = currentNewProjectId();
-  const body = projectId
+  if (isMultiUserMode() && !projectId) {
+    const error = new Error('No projects are available for this account.');
+    error.status = 400;
+    error.payload = {
+      error: 'project_required',
+      message: 'No projects are available for this account.',
+    };
+    throw error;
+  }
+  const body = isMultiUserMode()
     ? {
         projectId,
         settings: collectSettings(),
@@ -2980,6 +3592,8 @@ async function ensureSession() {
   });
   state.currentSession = payload.session;
   state.sessionId = payload.session.id;
+  migrateDraftPromptToSession(payload.session.id);
+  state.draftSessionActive = false;
   state.cwd = payload.session.cwd || state.cwd;
   upsertSession(payload.session);
   return state.sessionId;
@@ -2987,6 +3601,10 @@ async function ensureSession() {
 
 function isAdminPrincipal() {
   return state.authSession?.principal?.isAdmin === true;
+}
+
+function isMultiUserMode() {
+  return state.authSession?.principal?.mode === 'multi';
 }
 
 function requestArchiveSession(sessionId) {
@@ -3019,6 +3637,7 @@ async function archiveSession(sessionId) {
       stopStream();
       state.sessionId = null;
       state.currentSession = null;
+      state.draftSessionActive = false;
       resetTurnState();
       state.view = 'sessions';
     }
@@ -3156,6 +3775,8 @@ async function streamTurnEvents(turnId, options = {}) {
   let eventName = 'message';
   let eventId = '';
   let dataLines = [];
+  let sawTerminalEvent = false;
+  let shouldReconcileQueuedCompletion = false;
 
   try {
     const after = state.lastTurnEventSequence == null
@@ -3194,6 +3815,9 @@ async function streamTurnEvents(turnId, options = {}) {
     if (buffer.trim()) {
       processSseFrame(buffer);
     }
+    shouldReconcileQueuedCompletion = !sawTerminalEvent
+      && !controller.signal.aborted
+      && queuedMessagesForCurrentSession().length > 0;
   } catch (error) {
     if (controller.signal.aborted) {
       return;
@@ -3214,6 +3838,10 @@ async function streamTurnEvents(turnId, options = {}) {
       state.streamAbortController = null;
     }
     refreshChatDynamicUi();
+  }
+
+  if (shouldReconcileQueuedCompletion) {
+    await reconcileQueuedCompletion(turnId);
   }
 
   function processSseFrame(frame) {
@@ -3239,6 +3867,9 @@ async function streamTurnEvents(turnId, options = {}) {
     }
     try {
       const payload = JSON.parse(dataLines.join('\n'));
+      if (payload?.type === 'turn.completed' || payload?.type === 'turn.failed') {
+        sawTerminalEvent = true;
+      }
       if (eventId && !payload.sequence) {
         payload.sequence = eventId;
       }
@@ -3259,6 +3890,20 @@ async function streamTurnEvents(turnId, options = {}) {
     eventName = 'message';
     eventId = '';
     dataLines = [];
+  }
+}
+
+async function reconcileQueuedCompletion(turnId) {
+  const sessionId = state.sessionId;
+  if (!sessionId || state.turnId !== turnId) {
+    return;
+  }
+  await refreshCurrentSessionMetadata({ hydrateTimeline: true });
+  if (state.sessionId !== sessionId) {
+    return;
+  }
+  if (!state.pendingTurn && queuedMessagesForSession(sessionId).length > 0) {
+    void sendNextQueuedMessage(sessionId);
   }
 }
 
@@ -3318,6 +3963,10 @@ async function resolveApproval(approvalId, action) {
 function applyTurnEvent(event, assistantEntry) {
   switch (event.type) {
     case 'turn.started':
+      if (state.turnId !== event.turnId) {
+        state.queuedInterruptRequestedTurnId = null;
+        state.queuedInterruptEligibleTurnId = null;
+      }
       state.status = 'Turn running';
       state.statusTone = 'warn';
       break;
@@ -3348,6 +3997,7 @@ function applyTurnEvent(event, assistantEntry) {
       appendOrReplace(assistantEntry, (item) => item.id === `assistant_${event.turnId}` || item.id === assistantEntry.id);
       break;
     case 'batch.started':
+      state.queuedInterruptEligibleTurnId = event.turnId;
       upsertWorkBatch(event.turnId, event.batchId, {
         id: `batch_${event.batchId}`,
         batchId: event.batchId,
@@ -3370,8 +4020,10 @@ function applyTurnEvent(event, assistantEntry) {
         status: event.status || 'completed',
         summary: event.raw ? { raw: event.raw } : {},
       });
+      void maybeInterruptRunningTurnForQueuedMessage();
       break;
     case 'approval.requested': {
+      state.queuedInterruptEligibleTurnId = event.turnId;
       const approval = {
         id: `approval_${event.approvalId}`,
         kind: 'approval',
@@ -3396,11 +4048,27 @@ function applyTurnEvent(event, assistantEntry) {
       }
       state.status = 'Approval resolved';
       state.statusTone = 'warn';
+      void maybeInterruptRunningTurnForQueuedMessage();
       break;
     }
     case 'turn.completed':
       state.pendingTurn = false;
       state.streamWasBackgrounded = false;
+      state.queuedInterruptRequestedTurnId = null;
+      state.queuedInterruptEligibleTurnId = null;
+      {
+        const completedSessionId = state.sessionId;
+        const hasQueuedMessage = queuedMessagesForSession(completedSessionId).length > 0;
+        if (hasQueuedMessage) {
+          state.status = 'Starting turn';
+          state.statusTone = 'warn';
+          state.turnId = null;
+          stopStream();
+          void refreshCurrentSessionMetadata();
+          void sendNextQueuedMessage(completedSessionId);
+          break;
+        }
+      }
       {
         const runtimeStatus = runtimeStatusForTurnStatus(event.status);
         state.status = runtimeStatus.status;
@@ -3413,6 +4081,8 @@ function applyTurnEvent(event, assistantEntry) {
     case 'turn.failed':
       state.pendingTurn = false;
       state.streamWasBackgrounded = false;
+      state.queuedInterruptRequestedTurnId = null;
+      state.queuedInterruptEligibleTurnId = null;
       state.status = 'Turn failed';
       state.statusTone = 'danger';
       state.turnId = null;
@@ -3421,6 +4091,9 @@ function applyTurnEvent(event, assistantEntry) {
       break;
   }
   saveCurrentTimeline();
+  if (!state.pendingTurn && state.sessionId && queuedMessagesForCurrentSession().length && event.type !== 'turn.completed') {
+    void sendNextQueuedMessage(state.sessionId);
+  }
   refreshChatDynamicUi();
   scrollTimelineToBottomIfFollowingLatest();
   return assistantEntry;
@@ -3449,6 +4122,58 @@ function upsertWorkBatch(turnId, batchId, patch) {
 
 function upsertWorkApproval(_turnId, approval) {
   appendOrReplace(approval, (item) => item.id === approval.id);
+}
+
+function hasPendingWorkForTurn(turnId = state.turnId) {
+  if (!turnId) {
+    return false;
+  }
+  for (const batch of state.batches.values()) {
+    if (batch?.turnId !== turnId) {
+      continue;
+    }
+    const normalizedStatus = String(batch?.status || '').trim().toLowerCase();
+    if (!normalizedStatus || normalizedStatus === 'started' || normalizedStatus === 'running' || normalizedStatus === 'pending') {
+      return true;
+    }
+  }
+  for (const approval of state.approvals.values()) {
+    if (approval?.resolved !== false) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+async function maybeInterruptRunningTurnForQueuedMessage() {
+  const sessionId = state.sessionId;
+  const turnId = state.turnId;
+  if (!sessionId || !turnId || !state.pendingTurn) {
+    return;
+  }
+  if (!queuedMessagesForSession(sessionId).length) {
+    return;
+  }
+  if (state.queuedInterruptEligibleTurnId !== turnId) {
+    return;
+  }
+  if (state.queuedInterruptRequestedTurnId && state.queuedInterruptRequestedTurnId !== turnId) {
+    return;
+  }
+  if (hasPendingWorkForTurn(turnId)) {
+    return;
+  }
+  state.queuedInterruptRequestedTurnId = turnId;
+  try {
+    await apiFetch(`/api/turns/${encodeURIComponent(turnId)}/interrupt`, { method: 'POST' });
+    await refreshCurrentSessionMetadata({ hydrateTimeline: true });
+    if (state.sessionId === sessionId && !state.pendingTurn && queuedMessagesForSession(sessionId).length > 0) {
+      void sendNextQueuedMessage(sessionId);
+    }
+  } catch (error) {
+    handleApiError(error);
+  }
 }
 
 function setWorkStatus(turnId, status) {
@@ -3483,6 +4208,7 @@ function handleMissingSession(error, promptToRestore) {
   stopStream();
   state.sessionId = null;
   state.currentSession = null;
+  state.draftSessionActive = false;
   state.turnId = null;
   state.pendingTurn = false;
   state.timeline = [];
@@ -3491,6 +4217,7 @@ function handleMissingSession(error, promptToRestore) {
   state.approvals = new Map();
   if (promptToRestore) {
     state.prompt = promptToRestore;
+    savePromptDraftForCurrentSession();
   }
   state.status = 'Ready';
   state.statusTone = 'warn';
@@ -3548,15 +4275,14 @@ async function recoverFirstTurnAfterDelay({ sessionId, promptText, message }) {
     state.status = 'Ready';
     state.statusTone = 'success';
     state.error = '';
-    renderChatWithTimelineRestored(() => {});
-    scrollTimelineToBottomIfFollowingLatest();
+    renderChatAtLatest(() => {});
     return;
   }
   state.pendingTurn = false;
   state.status = 'Request failed';
   state.statusTone = 'danger';
   surfaceTimelineError(`request_${sessionId}`, message);
-  renderChatAtLatestIfFollowing(() => {});
+  renderChatAtLatest(() => {});
 }
 
 function hasRecoveredFirstTurn(session, promptText) {
@@ -3588,7 +4314,7 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false, viewport
     return null;
   }
   const sessionId = state.sessionId;
-  const snapshot = viewportSnapshot || captureTimelineViewport();
+  const snapshot = viewportSnapshot || (isDesktopWorkspaceView() ? latestTimelineViewportSnapshot() : captureTimelineViewport());
   try {
     const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
     if (payload?.session) {
@@ -3737,7 +4463,7 @@ async function refreshAdminConsole({ renderAfter = true } = {}) {
       apiFetch('/api/admin/projects'),
       apiFetch('/api/admin/users'),
       apiFetch('/api/admin/roles'),
-      apiFetch(adminSessionsPath(state.admin.filterUserId)),
+      apiFetch(adminSessionsPath(state.admin.filterUserId, state.admin.filterProjectId)),
     ]);
     state.admin.settings = settingsPayload?.settings || null;
     state.admin.projects = normalizeAdminItems(projectsPayload);
@@ -3758,17 +4484,41 @@ async function refreshAdminConsole({ renderAfter = true } = {}) {
   }
 }
 
-async function refreshAdminSessions({ userId = state.admin.filterUserId, renderAfter = true } = {}) {
+async function refreshAdminSettings({ renderAfter = true } = {}) {
+  if (!isAdminPrincipal()) {
+    return null;
+  }
+  try {
+    const payload = await apiFetch('/api/admin/settings');
+    state.admin.settings = payload?.settings || null;
+    state.error = '';
+    return state.admin.settings;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  } finally {
+    if (renderAfter) {
+      render();
+    }
+  }
+}
+
+async function refreshAdminSessions({
+  userId = state.admin.filterUserId,
+  projectId = state.admin.filterProjectId,
+  renderAfter = true,
+} = {}) {
   if (!isAdminPrincipal()) {
     return [];
   }
   state.admin.filterUserId = String(userId || '');
+  state.admin.filterProjectId = String(projectId || '');
   state.admin.loading = true;
   if (renderAfter) {
     render();
   }
   try {
-    const payload = await apiFetch(adminSessionsPath(state.admin.filterUserId));
+    const payload = await apiFetch(adminSessionsPath(state.admin.filterUserId, state.admin.filterProjectId));
     state.admin.sessions = normalizeAdminItems(payload);
     state.error = '';
     return state.admin.sessions;
@@ -3800,6 +4550,207 @@ async function updateAdminSettings(patch = {}) {
     handleApiError(error);
     return null;
   }
+}
+
+async function onAdminProjectSubmit(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const project = adminEditingProject();
+  await saveAdminProject({
+    id: String(project?.id || '').trim(),
+    internalName: String(form.get('internalName') || '').trim(),
+    cwd: String(form.get('cwd') || '').trim(),
+    displayName: String(form.get('displayName') || '').trim(),
+    enabled: form.get('enabled') === 'on',
+  });
+}
+
+async function onAdminRoleSubmit(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  await saveAdminRole({
+    id: String(form.get('id') || '').trim(),
+    name: String(form.get('name') || '').trim(),
+    isAdmin: form.get('isAdmin') === 'on',
+    projectIds: form.getAll('projectIds').map((value) => String(value || '').trim()).filter(Boolean),
+  });
+}
+
+async function onAdminUserSubmit(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  await saveAdminUser({
+    id: String(form.get('id') || '').trim(),
+    username: String(form.get('username') || '').trim(),
+    password: String(form.get('password') || ''),
+    enabled: form.get('enabled') === 'on',
+    roleId: String(form.get('roleId') || '').trim(),
+  });
+}
+
+async function onAdminUserAccessSubmit(event) {
+  event.preventDefault();
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
+  await saveAdminUserAccess({
+    id: formElement.getAttribute('data-admin-user-id') || '',
+    enabled: form.get('enabled') === 'on',
+    roleId: String(form.get('userRoleId') || '').trim(),
+  });
+}
+
+async function saveAdminProject(project) {
+  if (!isAdminPrincipal()) {
+    return null;
+  }
+  const cwd = String(project.cwd || '').trim();
+  const id = String(project.id || '').trim() || cwd;
+  try {
+    const payload = await apiFetch('/api/admin/projects', {
+      method: 'POST',
+      body: {
+        id,
+        internalName: String(project.internalName || '').trim(),
+        cwd,
+        displayName: String(project.displayName || '').trim(),
+        enabled: project.enabled !== false,
+      },
+    });
+    state.error = '';
+    state.admin.editingProjectId = '';
+    await refreshAdminConsole({ renderAfter: true });
+    return payload?.project || null;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
+async function saveAdminRole(role) {
+  if (!isAdminPrincipal()) {
+    return null;
+  }
+  try {
+    const payload = await apiFetch('/api/admin/roles', {
+      method: 'POST',
+      body: {
+        id: String(role.id || '').trim(),
+        name: String(role.name || '').trim(),
+        isAdmin: role.isAdmin === true,
+        projectIds: Array.isArray(role.projectIds) ? role.projectIds : [],
+        projectGrants: projectGrantsFromProjectIds(role.projectIds),
+      },
+    });
+    state.error = '';
+    state.admin.editingRoleId = '';
+    await refreshAdminConsole({ renderAfter: true });
+    return payload?.role || null;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
+async function saveAdminUser(user) {
+  if (!isAdminPrincipal()) {
+    return null;
+  }
+  try {
+    const roleId = String(user.roleId || '').trim();
+    const body = {
+      id: String(user.id || '').trim(),
+      username: String(user.username || '').trim(),
+      password: String(user.password || ''),
+      enabled: user.enabled !== false,
+      roleId,
+      roleIds: roleId
+        ? [roleId]
+        : Array.isArray(user.roleIds) ? user.roleIds.slice(0, 1) : [],
+    };
+    const payload = await apiFetch('/api/admin/users', {
+      method: 'POST',
+      body,
+    });
+    state.error = '';
+    await refreshAdminConsole({ renderAfter: true });
+    return payload?.user || null;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
+async function saveAdminUserAccess(user) {
+  if (!isAdminPrincipal()) {
+    return null;
+  }
+  const userId = String(user.id || '').trim();
+  if (!userId) {
+    return null;
+  }
+  const roleId = String(user.roleId || '').trim();
+  try {
+    const body = {
+      enabled: user.enabled !== false,
+      roleId,
+      roleIds: roleId ? [roleId] : [],
+    };
+    const payload = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      body,
+    });
+    state.error = '';
+    await refreshAdminConsole({ renderAfter: true });
+    return payload?.user || null;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
+async function toggleAdminUserEnabled(userId, enabled) {
+  const user = adminUserById(userId);
+  if (!user) {
+    return null;
+  }
+  return saveAdminUserAccess({
+    id: user.id,
+    enabled: enabled === true,
+    roleId: adminUserRoleId(user),
+  });
+}
+
+async function deleteAdminUser(userId) {
+  if (!isAdminPrincipal()) {
+    return null;
+  }
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) {
+    return null;
+  }
+  try {
+    await apiFetch(`/api/admin/users/${encodeURIComponent(normalizedUserId)}`, {
+      method: 'DELETE',
+    });
+    state.error = '';
+    await refreshAdminConsole({ renderAfter: true });
+    return true;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
+function projectGrantsFromProjectIds(projectIds) {
+  const uniqueIds = [...new Set((Array.isArray(projectIds) ? projectIds : [])
+    .map((projectId) => String(projectId || '').trim())
+    .filter(Boolean))];
+  return uniqueIds.map((projectId) => ({
+    projectId,
+    canRead: true,
+    canCreate: true,
+    canWrite: true,
+  }));
 }
 
 async function openAdminObservedSession(sessionId) {
@@ -4012,6 +4963,39 @@ async function refreshCurrentView() {
         scope: state.sortMode === 'favorites' ? 'favorites' : 'all',
       });
       render();
+    }
+    if (!state.pendingTurn && !isRuntimeStatusLabel(state.status)) {
+      state.status = 'Ready';
+      state.statusTone = 'success';
+      render();
+    }
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+async function handleComposerRefresh() {
+  if (!state.sessionId) {
+    return;
+  }
+  const wasPending = state.pendingTurn;
+  if (!wasPending) {
+    state.status = 'Refreshing';
+    state.statusTone = 'warn';
+    render();
+  }
+  state.timelineShouldFollowLatest = true;
+  try {
+    await refreshCurrentSessionMetadata({
+      hydrateTimeline: true,
+      viewportSnapshot: {
+        bottomOffset: 0,
+        shouldFollowLatest: true,
+        hadPromptFocus: document.activeElement === document.querySelector('#prompt-input'),
+      },
+    });
+    if (state.pendingTurn && state.turnId && !isTurnStreamHealthy()) {
+      streamTurnEvents(state.turnId, { forceReconnect: true });
     }
     if (!state.pendingTurn && !isRuntimeStatusLabel(state.status)) {
       state.status = 'Ready';
@@ -4371,6 +5355,7 @@ function syncCurrentSessionFromList() {
   if (!session) {
     state.sessionId = null;
     state.currentSession = null;
+    state.draftSessionActive = false;
     return;
   }
   state.currentSession = session;
@@ -4523,6 +5508,64 @@ function persistTimelineCache() {
   } catch (error) {
     console.warn('[codex-web] timeline cache persist failed', error);
   }
+}
+
+function loadQueuedMessages() {
+  const queue = new Map();
+  try {
+    const parsed = JSON.parse(localStorage.getItem(QUEUED_MESSAGES_KEY) || '{"sessions":[]}');
+    const sessions = Array.isArray(parsed?.sessions)
+      ? parsed.sessions
+      : [];
+    for (const session of sessions) {
+      const sessionId = typeof session?.sessionId === 'string' ? session.sessionId : '';
+      const messages = Array.isArray(session?.messages)
+        ? session.messages
+          .map((message) => normalizeQueuedMessage(message))
+          .filter(Boolean)
+          .slice(0, 20)
+        : [];
+      if (sessionId && messages.length) {
+        queue.set(sessionId, messages);
+      }
+    }
+  } catch (_error) {
+    localStorage.removeItem(QUEUED_MESSAGES_KEY);
+  }
+  return queue;
+}
+
+function persistQueuedMessages() {
+  const sessions = [...state.queuedMessages.entries()]
+    .map(([sessionId, messages]) => ({
+      sessionId,
+      messages: (Array.isArray(messages) ? messages : []).map((message) => normalizeQueuedMessage(message)).filter(Boolean).slice(0, 20),
+    }))
+    .filter((entry) => entry.sessionId && entry.messages.length)
+    .slice(-50);
+  try {
+    localStorage.setItem(QUEUED_MESSAGES_KEY, JSON.stringify({ sessions }));
+  } catch (error) {
+    console.warn('[codex-web] queued messages persist failed', error);
+  }
+}
+
+function normalizeQueuedMessage(message) {
+  const text = typeof message?.text === 'string' ? message.text.trim() : '';
+  if (!text) {
+    return null;
+  }
+  const id = typeof message?.id === 'string' && message.id
+    ? message.id
+    : `queued_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const createdAt = typeof message?.createdAt === 'string' && message.createdAt
+    ? message.createdAt
+    : new Date().toISOString();
+  return {
+    id,
+    text: text.slice(0, 12000),
+    createdAt,
+  };
 }
 
 function serializeTimelineCacheEntry(sessionId, value) {
@@ -4956,7 +5999,9 @@ function uniqueSessionPaths() {
 }
 
 function availableProjects() {
-  return Array.isArray(state.projects) ? state.projects.filter((project) => project?.id && project?.displayName) : [];
+  return Array.isArray(state.projects)
+    ? state.projects.filter((project) => project?.id && project?.displayName && project.canCreate !== false)
+    : [];
 }
 
 function hasProjectChoices() {
@@ -4991,17 +6036,130 @@ function resetAdminState() {
   state.admin.users = [];
   state.admin.roles = [];
   state.admin.sessions = [];
+  state.admin.page = 'projects';
   state.admin.filterUserId = '';
+  state.admin.filterProjectId = '';
+  state.admin.editingProjectId = '';
+  state.admin.editingRoleId = '';
 }
 
-function adminSessionsPath(userId = '') {
-  const value = String(userId || '').trim();
-  return value ? `/api/admin/sessions?userId=${encodeURIComponent(value)}` : '/api/admin/sessions';
+function adminSessionsPath(userId = '', projectId = '') {
+  const normalizedUserId = String(userId || '').trim();
+  const normalizedProjectId = String(projectId || '').trim();
+  const params = [];
+  if (normalizedUserId) {
+    params.push(`userId=${encodeURIComponent(normalizedUserId)}`);
+  }
+  if (normalizedProjectId) {
+    params.push(`projectId=${encodeURIComponent(normalizedProjectId)}`);
+  }
+  const query = params.join('&');
+  return query ? `/api/admin/sessions?${query}` : '/api/admin/sessions';
 }
 
 function adminUserName(userId) {
   const value = String(userId || '');
   return state.admin.users.find((user) => user.id === value)?.username || value || 'unknown';
+}
+
+function adminUserById(userId) {
+  const value = String(userId || '').trim();
+  return state.admin.users.find((user) => user.id === value) || null;
+}
+
+function adminUserMeta(user) {
+  const status = user?.enabled === false ? 'disabled' : user?.id || '';
+  const roleId = adminUserRoleId(user);
+  return [status, roleId].filter(Boolean).join(' · ');
+}
+
+function adminUserRoleId(user) {
+  return user?.roleId || (Array.isArray(user?.roleIds) ? user.roleIds[0] : '') || '';
+}
+
+function adminUserProjectIds(user) {
+  return Array.isArray(user?.directProjectGrants)
+    ? user.directProjectGrants.map((grant) => String(grant?.projectId || '').trim()).filter(Boolean)
+    : [];
+}
+
+function adminProjectVisibleName(project) {
+  const displayName = String(project?.displayName || '').trim();
+  if (displayName) {
+    return displayName;
+  }
+  const internalName = String(project?.internalName || '').trim();
+  if (internalName) {
+    return internalName;
+  }
+  const cwd = String(project?.cwd || '').trim();
+  if (cwd) {
+    return cwd;
+  }
+  return 'Unknown project';
+}
+
+function adminProjectNameById(projectId, fallback = '') {
+  const normalizedId = String(projectId || '').trim();
+  const project = state.admin.projects.find((item) => String(item?.id || '').trim() === normalizedId);
+  if (project) {
+    return adminProjectVisibleName(project);
+  }
+  const normalizedFallback = String(fallback || '').trim();
+  if (normalizedFallback && normalizedFallback !== normalizedId) {
+    return normalizedFallback;
+  }
+  return 'Unknown project';
+}
+
+function adminAuditProjects() {
+  const byId = new Map();
+  for (const project of state.admin.projects) {
+    const id = String(project?.id || '').trim();
+    if (!id) {
+      continue;
+    }
+    byId.set(id, {
+      id,
+      displayName: adminProjectVisibleName(project),
+    });
+  }
+  for (const session of state.admin.sessions) {
+    const id = String(session?.projectId || '').trim();
+    if (!id || byId.has(id)) {
+      continue;
+    }
+    byId.set(id, {
+      id,
+      displayName: adminProjectNameById(id, session?.projectDisplayName),
+    });
+  }
+  return [...byId.values()].sort((left, right) => left.displayName.localeCompare(right.displayName));
+}
+
+function adminEditingProject() {
+  const id = String(state.admin.editingProjectId || '');
+  return state.admin.projects.find((project) => project.id === id) || null;
+}
+
+function adminEditingRole() {
+  const id = String(state.admin.editingRoleId || '');
+  return state.admin.roles.find((role) => role.id === id) || null;
+}
+
+function adminRoleProjectIds(role) {
+  return Array.isArray(role?.projectGrants)
+    ? role.projectGrants.map((grant) => String(grant?.projectId || '').trim()).filter(Boolean)
+    : [];
+}
+
+function currentAdminPage() {
+  return normalizeAdminPage(state.admin.page);
+}
+
+function normalizeAdminPage(page) {
+  const value = String(page || '').trim();
+  return ['projects', 'roles', 'users', 'sessions'].includes(value) ? value : 'projects';
 }
 
 function projectNameForSession(session, fallbackCwd = '') {
@@ -5619,6 +6777,9 @@ function isChatTitlePullTarget(target) {
 }
 
 function getActiveScrollContainer(pull = {}) {
+  if (state.view === 'admin') {
+    return false;
+  }
   if (state.view === 'chat' && isChatTitlePullTarget(pull.target)) {
     return null;
   }
@@ -5746,9 +6907,11 @@ async function recoverActiveTurnAfterForeground() {
   if (!state.authSession || !state.sessionId) {
     return;
   }
-  const viewportSnapshot = rememberedTimelineViewport()
-    || chatTimelineForegroundSnapshot
-    || captureTimelineViewport();
+  const viewportSnapshot = isDesktopWorkspaceView()
+    ? latestTimelineViewportSnapshot()
+    : rememberedTimelineViewport()
+      || chatTimelineForegroundSnapshot
+      || latestTimelineViewportSnapshot();
   await refreshCurrentSessionMetadata({ hydrateTimeline: true, viewportSnapshot });
   chatTimelineForegroundSnapshot = null;
   if (state.pendingTurn && state.turnId && !isTurnStreamHealthy()) {
@@ -5863,7 +7026,7 @@ function scrollTimelineToBottom() {
 }
 
 function rememberCurrentTimelineViewport() {
-  if (state.view !== 'chat' || !state.sessionId) {
+  if (!state.sessionId || (!isDesktopWorkspaceView() && state.view !== 'chat')) {
     return;
   }
   const snapshot = captureTimelineViewport();

@@ -17,6 +17,7 @@ export interface CodexWebUser {
   id: string;
   username: string;
   enabled: boolean;
+  canNewSession: boolean;
   passwordHash?: string;
   passwordSalt?: string;
   passwordIterations?: number;
@@ -83,8 +84,23 @@ export interface UpsertUserWithPasswordInput {
   username: string;
   password: string;
   enabled?: boolean;
+  canNewSession?: boolean;
   roleIds?: string[];
   directProjectGrants?: CodexWebProjectGrant[];
+}
+
+export interface UpdateUserAccessInput {
+  id: string;
+  enabled?: boolean;
+  canNewSession?: boolean;
+  roleIds?: string[];
+  directProjectGrants?: CodexWebProjectGrant[];
+}
+
+export interface BootstrapAdminPasswordHashInput {
+  passwordHash: string;
+  passwordSalt: string;
+  passwordIterations?: number;
 }
 
 export class FileIdentityStore {
@@ -117,6 +133,44 @@ export class FileIdentityStore {
     });
   }
 
+  async ensureBootstrapAdminFromPasswordHash(input: BootstrapAdminPasswordHashInput): Promise<CodexWebIdentityState> {
+    return this.withMutationLock(async () => {
+      const state = await this.readState();
+      const adminRole: CodexWebRole = {
+        id: 'role_admin',
+        name: 'Admin',
+        isAdmin: true,
+        projectGrants: [],
+      };
+      state.roles = upsertById(state.roles, adminRole);
+      const existingAdmin = state.users.find((user) => user.username === 'admin' || user.id === 'user_admin');
+      const adminUser: CodexWebUser = {
+        ...(existingAdmin ?? {
+          id: 'user_admin',
+          username: 'admin',
+          enabled: true,
+          canNewSession: true,
+          roleIds: [],
+          directProjectGrants: [],
+        }),
+        id: existingAdmin?.id ?? 'user_admin',
+        username: existingAdmin?.username ?? 'admin',
+        enabled: existingAdmin?.enabled !== false,
+        canNewSession: true,
+        passwordHash: normalizeRequiredId(input.passwordHash, 'password hash'),
+        passwordSalt: normalizeRequiredId(input.passwordSalt, 'password salt'),
+        passwordIterations: Number.isFinite(input.passwordIterations)
+          ? Number(input.passwordIterations)
+          : PASSWORD_ITERATIONS,
+        roleIds: uniqueStrings([...(existingAdmin?.roleIds ?? []), adminRole.id]),
+        directProjectGrants: normalizeProjectGrants(existingAdmin?.directProjectGrants ?? []),
+      };
+      state.users = upsertById(state.users, adminUser);
+      await this.writeState(state);
+      return state;
+    });
+  }
+
   async upsertUserWithPassword(input: UpsertUserWithPasswordInput): Promise<CodexWebUser> {
     return this.withMutationLock(async () => {
       const state = await this.readState();
@@ -126,6 +180,7 @@ export class FileIdentityStore {
         id: normalizeRequiredId(input.id, 'user id'),
         username: normalizeUsername(input.username),
         enabled: input.enabled !== false,
+        canNewSession: input.canNewSession !== false,
         passwordHash: await hashPassword(normalized, salt, PASSWORD_ITERATIONS),
         passwordSalt: salt,
         passwordIterations: PASSWORD_ITERATIONS,
@@ -135,6 +190,50 @@ export class FileIdentityStore {
       state.users = upsertById(state.users, user);
       await this.writeState(state);
       return user;
+    });
+  }
+
+  async updateUserAccess(input: UpdateUserAccessInput): Promise<CodexWebUser> {
+    return this.withMutationLock(async () => {
+      const state = await this.readState();
+      const userId = normalizeRequiredId(input.id, 'user id');
+      const existing = state.users.find((user) => user.id === userId);
+      if (!existing) {
+        throw new Error(`Unknown user: ${userId}`);
+      }
+      const user: CodexWebUser = {
+        ...existing,
+        enabled: typeof input.enabled === 'boolean' ? input.enabled : existing.enabled,
+        canNewSession: typeof input.canNewSession === 'boolean' ? input.canNewSession : existing.canNewSession,
+        roleIds: Array.isArray(input.roleIds) ? normalizeStringArray(input.roleIds) : existing.roleIds,
+        directProjectGrants: Array.isArray(input.directProjectGrants)
+          ? normalizeProjectGrants(input.directProjectGrants)
+          : existing.directProjectGrants,
+      };
+      state.users = upsertById(state.users, user);
+      await this.writeState(state);
+      return user;
+    });
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    return this.withMutationLock(async () => {
+      const state = await this.readState();
+      const normalizedUserId = normalizeRequiredId(userId, 'user id');
+      const existing = state.users.find((user) => user.id === normalizedUserId);
+      if (!existing) {
+        throw new Error(`Unknown user: ${normalizedUserId}`);
+      }
+      const removedSessionIds = new Set(
+        state.sessions
+          .filter((session) => session.ownerUserId === normalizedUserId)
+          .map((session) => session.id),
+      );
+      state.users = state.users.filter((user) => user.id !== normalizedUserId);
+      state.sessions = state.sessions.filter((session) => session.ownerUserId !== normalizedUserId);
+      state.shares = state.shares.filter((share) => share.createdByUserId !== normalizedUserId && !removedSessionIds.has(share.sessionId));
+      state.userSessions = state.userSessions.filter((session) => session.userId !== normalizedUserId);
+      await this.writeState(state);
     });
   }
 
@@ -323,6 +422,7 @@ function normalizeUserOrNull(value: unknown): CodexWebUser | null {
     id: value.id,
     username: value.username,
     enabled: value.enabled !== false,
+    canNewSession: value.canNewSession !== false,
     passwordHash: typeof value.passwordHash === 'string' ? value.passwordHash : undefined,
     passwordSalt: typeof value.passwordSalt === 'string' ? value.passwordSalt : undefined,
     passwordIterations: Number.isFinite(value.passwordIterations) ? Number(value.passwordIterations) : undefined,
@@ -440,7 +540,11 @@ function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
-  return [...new Set(value.map((item) => typeof item === 'string' ? item.trim() : '').filter(Boolean))];
+  return uniqueStrings(value.map((item) => typeof item === 'string' ? item.trim() : '').filter(Boolean));
+}
+
+function uniqueStrings(value: string[]): string[] {
+  return [...new Set(value.map((item) => item.trim()).filter(Boolean))];
 }
 
 function normalizeUsername(username: string): string {

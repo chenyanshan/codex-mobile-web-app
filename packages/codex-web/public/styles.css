@@ -265,6 +265,11 @@ button:disabled {
   min-width: 44px;
 }
 
+.admin-shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .topbar-meta {
   margin-top: 8px;
   color: var(--muted);
@@ -332,6 +337,14 @@ button:disabled {
   padding: 0 12px;
   border-color: color-mix(in srgb, var(--accent-2) 82%, var(--border));
   color: var(--accent);
+}
+
+.admin-console-action {
+  min-height: 36px;
+  padding: 0 12px;
+  border-color: color-mix(in srgb, var(--warn) 52%, var(--border));
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, var(--panel));
 }
 
 .brand {
@@ -534,12 +547,16 @@ button:disabled {
   align-content: start;
 }
 
-.admin-console-page {
-  flex: 1;
-  min-height: 0;
+.admin-console-screen {
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+}
+
+.admin-console-page {
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
   display: grid;
   gap: 10px;
   align-content: start;
@@ -583,6 +600,146 @@ button:disabled {
   gap: 8px;
 }
 
+.admin-layout {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 172px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.admin-sidebar {
+  min-width: 0;
+  position: sticky;
+  top: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.admin-sidebar-button {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  justify-content: flex-start;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.admin-sidebar-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+}
+
+.admin-content {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.admin-filter-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.admin-table th {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.admin-form {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.admin-form-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-form-actions {
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-fieldset {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.admin-fieldset legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-check-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-check-row input {
+  width: auto;
+}
+
+.admin-grant-row {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-grant-row > span {
+  color: var(--text);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.admin-grant-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-grant-row input {
+  width: auto;
+}
+
 .admin-row {
   min-width: 0;
   padding: 10px;
@@ -592,6 +749,25 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel-2);
+}
+
+.admin-user-row {
+  gap: 8px;
+}
+
+.admin-user-access-form {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.admin-user-action-row {
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .admin-session-open {
@@ -1197,6 +1373,44 @@ button:disabled {
   color: var(--danger);
 }
 
+.queued-messages {
+  width: min(100%, 720px);
+  margin: 0 auto 6px;
+  display: grid;
+  gap: 4px;
+}
+
+.queued-message-row {
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 4px 4px 9px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: var(--shadow);
+}
+
+.queued-message-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queued-message-delete {
+  min-height: 24px;
+  padding: 0 7px;
+  color: var(--danger);
+  font-size: 11px;
+}
+
 .read-only-composer-wrap {
   padding-top: 0;
 }
@@ -1303,7 +1517,19 @@ button:disabled {
   grid-row: 1;
 }
 
-.message-editor-shell .compact-send {
+.composer-action-buttons {
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  gap: 6px;
+}
+
+.message-editor-shell .compact-send,
+.message-editor-shell .compact-refresh {
+  width: 100%;
+}
+
+.message-editor-shell > .compact-send {
   grid-column: 2;
   grid-row: 1;
 }
@@ -1322,7 +1548,8 @@ button:disabled {
   padding: 54px 12px 58px;
 }
 
-.message-editor-shell.is-expanded .compact-send {
+.message-editor-shell.is-expanded > .compact-send,
+.message-editor-shell.is-expanded .composer-action-buttons {
   position: absolute;
   right: 8px;
   bottom: 8px;
@@ -1338,11 +1565,16 @@ button:disabled {
 }
 
 .icon-button,
-.compact-send {
+.compact-send,
+.compact-refresh {
   min-height: 38px;
   padding: 0 8px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.compact-refresh {
+  color: var(--muted);
 }
 
 .composer.is-expanded .composer-leading-controls {
@@ -1644,6 +1876,25 @@ pre.command {
   }
 }
 
+@media (max-width: 719px) {
+  .admin-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-sidebar {
+    position: static;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-filter-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-user-access-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (min-width: 820px) and (hover: hover) and (pointer: fine) {
   .desktop-shell {
     background:
@@ -1723,10 +1974,6 @@ pre.command {
   .desktop-chat-pane .compact-composer-row textarea {
     min-height: 96px;
     max-height: 220px;
-  }
-
-  .desktop-chat-pane .compact-send {
-    display: none;
   }
 
   .session-card.is-active {

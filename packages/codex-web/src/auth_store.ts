@@ -39,6 +39,12 @@ export interface AuthStoreError extends Error {
   code?: string;
 }
 
+export interface PasswordHashRecord {
+  passwordHash: string;
+  passwordSalt: string;
+  passwordIterations?: number;
+}
+
 export class AuthStore {
   private readonly authPath: string;
 
@@ -157,6 +163,18 @@ export class AuthStore {
       }
       throw error;
     }
+  }
+
+  async readPasswordHash(): Promise<PasswordHashRecord | null> {
+    const state = await this.readState();
+    if (!state.passwordHash || !state.passwordSalt) {
+      return null;
+    }
+    return {
+      passwordHash: state.passwordHash,
+      passwordSalt: state.passwordSalt,
+      passwordIterations: state.passwordIterations ?? PASSWORD_ITERATIONS,
+    };
   }
 
   private async writeState(state: AuthState): Promise<void> {

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { AuthStore, PublicAuthSession } from './auth_store.js';
+import type { AuthStore, PasswordHashRecord, PublicAuthSession } from './auth_store.js';
 import { localAdminPrincipal, type CodexWebPrincipal } from './access_control.js';
 import type { CodexWebUserSession, FileIdentityStore } from './identity_store.js';
 
@@ -14,10 +14,13 @@ interface LegacyAuthLike {
   verifyToken(token: string | null | undefined): Promise<PublicAuthSession | null>;
   logout(token: string | null | undefined): Promise<void>;
   setPassword?(password: string): Promise<void>;
+  readPasswordHash?(): Promise<PasswordHashRecord | null>;
 }
 
 interface IdentityStoreLike {
   readState(): ReturnType<FileIdentityStore['readState']>;
+  setMultiUserEnabled?(enabled: boolean): ReturnType<FileIdentityStore['setMultiUserEnabled']>;
+  ensureBootstrapAdminFromPasswordHash?(input: PasswordHashRecord): ReturnType<FileIdentityStore['ensureBootstrapAdminFromPasswordHash']>;
   verifyUserPassword(username: string, password: string): Promise<string | null>;
   addUserSession?(session: CodexWebUserSession): Promise<CodexWebUserSession>;
   touchUserSession?(sessionId: string, lastSeenAt: string): Promise<void>;
@@ -64,6 +67,29 @@ export class HybridAuthStore {
       throw new Error('Legacy auth store does not support password setup');
     }
     await this.legacyAuth.setPassword(password);
+  }
+
+  async setMultiUserEnabled(enabled: boolean): ReturnType<FileIdentityStore['setMultiUserEnabled']> {
+    if (!this.identityStore.setMultiUserEnabled) {
+      throw new Error('Identity store does not support multi-user settings');
+    }
+    if (enabled) {
+      const state = await this.identityStore.readState();
+      const hasAdmin = state.users.some((user) => user.enabled !== false
+        && user.roleIds.some((roleId) => state.roles.some((role) => role.id === roleId && role.isAdmin === true))
+        && Boolean(user.passwordHash && user.passwordSalt));
+      if (!hasAdmin) {
+        const legacyPasswordHash = await this.legacyAuth.readPasswordHash?.();
+        if (!legacyPasswordHash) {
+          throw new Error('Legacy password is not configured');
+        }
+        if (!this.identityStore.ensureBootstrapAdminFromPasswordHash) {
+          throw new Error('Identity store does not support admin password migration');
+        }
+        await this.identityStore.ensureBootstrapAdminFromPasswordHash(legacyPasswordHash);
+      }
+    }
+    return this.identityStore.setMultiUserEnabled(enabled);
   }
 
   async login({
@@ -164,7 +190,14 @@ export class HybridAuthStore {
       });
     }
     const legacy = await this.legacyAuth.verifyToken(normalized);
-    return legacy ? { ...legacy, principal: localAdminPrincipal() } : null;
+    if (!legacy) {
+      return null;
+    }
+    const migratedAdmin = migratedAdminPrincipal(state);
+    return {
+      ...legacy,
+      principal: migratedAdmin ?? localAdminPrincipal(),
+    };
   }
 
   async logout(token: string | null | undefined): Promise<void> {
@@ -188,6 +221,21 @@ export class HybridAuthStore {
     }
     await this.legacyAuth.logout(normalized);
   }
+}
+
+function migratedAdminPrincipal(state: Awaited<ReturnType<IdentityStoreLike['readState']>>): CodexWebPrincipal | null {
+  const adminUser = state.users.find((user) => user.enabled !== false
+    && user.roleIds.some((roleId) => state.roles.some((role) => role.id === roleId && role.isAdmin === true)));
+  if (!adminUser) {
+    return null;
+  }
+  return {
+    userId: adminUser.id,
+    username: adminUser.username,
+    roleIds: [...adminUser.roleIds],
+    isAdmin: true,
+    mode: 'multi',
+  };
 }
 
 function toPublicSession(session: HybridSession, principal: CodexWebPrincipal): PublicAuthSession {

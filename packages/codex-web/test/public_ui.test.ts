@@ -166,12 +166,71 @@ test('login form supports optional username for multi-user mode', async () => {
   assert.match(app, /body: \{ username, password \}/u);
 });
 
-test('admin principals see a management entry in settings', async () => {
-  const app = await readFile(appUrl, 'utf8');
+test('admin settings page shows the multi-user toggle without nesting the admin console entry', async () => {
+  const { api } = await loadAppHarness();
 
-  assert.match(app, /function isAdminPrincipal\(\)/u);
-  assert.match(app, /id="open-admin-settings-button"/u);
-  assert.match(app, /Admin Console/u);
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true, mode: 'multi' } };
+  api.state.view = 'settings';
+  api.state.admin.settings = { multiUserEnabled: true };
+  api.render();
+
+  const html = api.context.document.querySelector('#app').innerHTML;
+  assert.match(html, /id="admin-multi-user-toggle" type="checkbox" checked/u);
+  assert.doesNotMatch(html, /id="open-admin-settings-button"/u);
+});
+
+test('opening app settings loads admin settings when the toggle state is not cached yet', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/admin/settings') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ settings: { multiUserEnabled: true } }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true, mode: 'multi' } };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+
+  api.openAppSettingsPage();
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls, ['/api/admin/settings']);
+  assert.equal(api.state.admin.settings?.multiUserEnabled, true);
+  assert.match(api.context.document.querySelector('#app').innerHTML, /id="admin-multi-user-toggle" type="checkbox" checked/u);
+});
+
+test('admin console uses the session-list back navigation', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+
+  const html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /id="back-to-list-button"/u);
+  assert.doesNotMatch(html, /id="back-to-settings-button"/u);
+});
+
+test('admin console uses a page-level mobile scroll container for long management screens', async () => {
+  const [styles, { api }] = await Promise.all([
+    readFile(stylesUrl, 'utf8'),
+    loadAppHarness(),
+  ]);
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+
+  const html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /class="screen page-screen admin-console-screen"/u);
+  assert.match(styles, /\.admin-console-screen\s*\{[^}]*overflow-y:\s*auto;[^}]*-webkit-overflow-scrolling:\s*touch;/su);
+  assert.match(styles, /\.admin-console-page\s*\{[^}]*overflow:\s*visible;/su);
 });
 
 test('restore auth also loads project display names for new sessions', async () => {
@@ -240,7 +299,16 @@ test('new session form uses project display names and posts selected project id'
   });
 
   api.state.token = 'token';
-  api.state.authSession = { id: 'auth_1' };
+  api.state.authSession = {
+    id: 'auth_1',
+    principal: {
+      userId: 'user_1',
+      username: 'viewer',
+      roleIds: ['role_viewer'],
+      isAdmin: false,
+      mode: 'multi',
+    },
+  };
   api.state.projects = [
     { id: 'project_a', displayName: 'Project Alpha' },
     { id: 'project_b', displayName: 'Project Beta' },
@@ -261,6 +329,105 @@ test('new session form uses project display names and posts selected project id'
     projectId: 'project_b',
     settings: api.collectSettings(),
   }));
+});
+
+test('new session waits for projects before falling back to project path', async () => {
+  let resolveProjects;
+  const projectsReady = new Promise((resolve) => {
+    resolveProjects = resolve;
+  });
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      if (path === '/api/projects') {
+        await projectsReady;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [{ id: 'project_admin', displayName: 'Admin Project', canCreate: true }],
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = {
+    id: 'auth_1',
+    principal: {
+      userId: 'user_admin',
+      username: 'admin',
+      roleIds: ['role_admin'],
+      isAdmin: true,
+      mode: 'multi',
+    },
+  };
+  api.state.view = 'sessions';
+  api.state.projects = [];
+  api.state.projectsLoaded = false;
+
+  api.openNewSessionPage();
+
+  assert.match(api.context.document.querySelector('#app').innerHTML, /Loading projects/u);
+  assert.doesNotMatch(api.context.document.querySelector('#app').innerHTML, /Project path/u);
+
+  resolveProjects();
+  await flushMicrotasks();
+
+  const html = api.context.document.querySelector('#app').innerHTML;
+  assert.match(html, /id="new-project-select"/u);
+  assert.match(html, /Admin Project/u);
+  assert.doesNotMatch(html, /Project path/u);
+});
+
+test('multi-user new session without project access does not expose freeform path entry', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = {
+    id: 'auth_1',
+    principal: {
+      userId: 'user_viewer',
+      username: 'viewer',
+      roleIds: ['role_viewer'],
+      isAdmin: false,
+      mode: 'multi',
+    },
+  };
+  api.state.projects = [];
+  api.state.projectsLoaded = true;
+
+  const html = api.renderNewSession().innerHTML;
+  assert.match(html, /<label for="new-project-select">Project<\/label>/u);
+  assert.match(html, /<select id="new-project-select" name="projectId" disabled>/u);
+  assert.match(html, />No projects available<\/option>/u);
+  assert.doesNotMatch(html, /new-cwd-input/u);
+  assert.match(html, /type="submit"[^>]*disabled/u);
+});
+
+test('multi-user new session without project access stays on project selection when start is submitted', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.token = 'token';
+  api.state.authSession = {
+    id: 'auth_1',
+    principal: {
+      userId: 'user_viewer',
+      username: 'viewer',
+      roleIds: ['role_viewer'],
+      isAdmin: false,
+      mode: 'multi',
+    },
+  };
+  api.state.projects = [];
+  api.state.projectsLoaded = true;
+  api.openNewSessionPage();
+
+  await assert.rejects(() => api.ensureSession(), /No projects are available for this account\./u);
+
+  assert.equal(api.state.view, 'new');
+  assert.equal(api.state.draftSessionActive, false);
+  assert.equal(api.state.sessionId, null);
 });
 
 test('admin console opens from settings and loads management overview', async () => {
@@ -307,8 +474,419 @@ test('admin console opens from settings and loads management overview', async ()
   const html = api.renderAdminConsole().innerHTML;
   assert.match(html, /Admin Console/u);
   assert.match(html, /Project Alpha/u);
-  assert.match(html, /alice/u);
-  assert.match(html, /session_1/u);
+  assert.match(html, /data-admin-page="users"/u);
+  assert.match(html, /data-admin-page="sessions"/u);
+  assert.equal(api.state.admin.users[0]?.username, 'alice');
+  assert.equal(api.state.admin.sessions[0]?.id, 'session_1');
+});
+
+test('admin console stays open while restore auth finishes in the background', async () => {
+  const pending: Array<{
+    path: string;
+    resolve: (response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
+  }> = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => new Promise((resolve) => {
+      pending.push({ path, resolve });
+    }),
+  });
+
+  api.state.token = 'token';
+
+  const restore = api.restoreAuth();
+  await flushMicrotasks();
+
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me']);
+  pending[0]?.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({ session: { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } } }),
+  });
+  await flushMicrotasks();
+
+  assert.deepEqual(pending.map((request) => request.path), [
+    '/api/auth/me',
+    '/api/models',
+    '/api/projects',
+    '/api/sessions?favorite=true',
+    '/api/reports',
+  ]);
+
+  const openAdmin = api.openAdminConsole();
+  await flushMicrotasks();
+
+  assert.equal(api.state.view, 'admin');
+  assert.deepEqual(pending.slice(5).map((request) => request.path), [
+    '/api/admin/settings',
+    '/api/admin/projects',
+    '/api/admin/users',
+    '/api/admin/roles',
+    '/api/admin/sessions',
+  ]);
+
+  pending[1]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[2]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[3]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[4]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  await restore;
+  await flushMicrotasks();
+
+  assert.equal(api.state.view, 'admin');
+  assert.equal(api.state.admin.loading, true);
+
+  pending[5]?.resolve({ ok: true, status: 200, json: async () => ({ settings: { multiUserEnabled: true } }) });
+  pending[6]?.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: '/repo/admin', cwd: '/repo/admin', displayName: 'Admin Repo' }] }) });
+  pending[7]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[8]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[9]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  await openAdmin;
+
+  assert.equal(api.state.view, 'admin');
+  assert.equal(api.state.admin.loaded, true);
+});
+
+test('admin shortcut does not crowd the primary session topbar actions', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+  api.state.sortMode = 'favorites';
+
+  const html = api.renderSessionList().innerHTML;
+  const topbarActions = html.match(/<div class="topbar-actions">([\s\S]*?)<\/div>/u)?.[1] || '';
+
+  assert.match(topbarActions, /id="open-app-settings-button"[\s\S]*>Set<\/button>/u);
+  assert.doesNotMatch(topbarActions, /open-admin-console-button/u);
+  assert.match(html, /class="admin-shortcut-row"[\s\S]*id="open-admin-console-button"[\s\S]*Admin Console/u);
+});
+
+test('admin console renders four-page management layout with RBAC controls', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+  api.state.admin.loaded = true;
+  api.state.admin.settings = { multiUserEnabled: true };
+  api.state.admin.projects = [{ id: 'project_a', cwd: '/repo/a', internalName: 'repo-a', displayName: 'Project Alpha' }];
+  api.state.admin.roles = [{ id: 'role_user', name: 'User', projectGrants: [{ projectId: 'project_a' }] }];
+  api.state.admin.users = [{
+    id: 'user_1',
+    username: 'alice',
+    enabled: true,
+    roleId: 'role_user',
+    roleIds: ['role_user'],
+    directProjectGrants: [{ projectId: 'project_a', canRead: true, canCreate: true, canWrite: true }],
+  }];
+  api.state.admin.sessions = [{ id: 'session_1', ownerUserId: 'user_1', projectId: 'project_a', projectDisplayName: 'Project Alpha' }];
+
+  let html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /class="admin-layout"/u);
+  assert.match(html, /class="admin-sidebar"/u);
+  assert.match(html, /data-admin-page="projects"/u);
+  assert.match(html, /data-admin-page="roles"/u);
+  assert.match(html, /data-admin-page="users"/u);
+  assert.match(html, /data-admin-page="sessions"/u);
+
+  assert.match(html, /id="admin-project-form"/u);
+  assert.doesNotMatch(html, /Project ID/u);
+  assert.match(html, /<th>CWD<\/th>/u);
+  assert.match(html, /<th>Internal Name<\/th>/u);
+  assert.match(html, /<th>Display Name<\/th>/u);
+  assert.match(html, /name="cwd"/u);
+  assert.match(html, /data-admin-edit-project="project_a"/u);
+
+  api.state.admin.editingProjectId = 'project_a';
+  html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /name="internalName" autocomplete="off" placeholder="repo" value="repo-a"/u);
+
+  api.state.admin.page = 'roles';
+  api.state.admin.editingProjectId = '';
+  html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /id="admin-role-form"/u);
+  assert.match(html, /name="projectIds" type="checkbox" value="project_a"/u);
+  assert.match(html, /<span>Project Alpha<\/span>/u);
+  assert.match(html, /data-admin-edit-role="role_user"/u);
+
+  api.state.admin.editingRoleId = 'role_user';
+  html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /name="id" autocomplete="off" placeholder="role_writer" value="role_user"/u);
+  assert.match(html, /name="projectIds" type="checkbox" value="project_a" checked/u);
+
+  api.state.admin.page = 'users';
+  html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /id="admin-user-form"/u);
+  assert.match(html, /<select id="admin-user-role-select" name="roleId">/u);
+  assert.doesNotMatch(html, /name="userProjectIds" type="checkbox"/u);
+  assert.doesNotMatch(html, /name="canNewSession" type="checkbox"/u);
+  assert.match(html, /class="admin-user-access-form"/u);
+  assert.match(html, /data-admin-user-id="user_1"/u);
+  assert.doesNotMatch(html, /name="userCanNewSession" type="checkbox"/u);
+
+  api.state.admin.page = 'sessions';
+  html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /id="admin-session-user-filter"/u);
+  assert.match(html, /id="admin-session-project-filter"/u);
+  assert.match(html, /<option value="project_a">Project Alpha<\/option>/u);
+  assert.match(html, /class="admin-row-main">Project Alpha<\/span>/u);
+  assert.match(html, /Observer Mode/u);
+});
+
+test('admin management actions post project, role, and user changes', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (options.method === 'POST') {
+        return { ok: true, status: 201, json: async () => ({}) };
+      }
+      if (path === '/api/admin/settings') {
+        return { ok: true, status: 200, json: async () => ({ settings: { multiUserEnabled: true } }) };
+      }
+      if (path === '/api/admin/projects') {
+        return { ok: true, status: 200, json: async () => ({ items: [{ id: 'project_a', displayName: 'Project Alpha' }] }) };
+      }
+      if (path === '/api/admin/users') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/admin/roles') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/admin/sessions') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+
+  await api.saveAdminProject({
+    internalName: 'repo-a',
+    cwd: '/repo/a',
+    displayName: 'Project Alpha',
+    enabled: true,
+  });
+  await api.saveAdminRole({
+    id: 'role_writer',
+    name: 'Writer',
+    isAdmin: false,
+    projectIds: ['project_a'],
+  });
+  await api.saveAdminUser({
+    id: 'user_writer',
+    username: 'writer',
+    password: 'writer-password',
+    enabled: true,
+    roleId: 'role_writer',
+  });
+
+  const posts = fetchCalls.filter((call) => call.options.method === 'POST');
+  assert.deepEqual(posts.map((call) => call.path), [
+    '/api/admin/projects',
+    '/api/admin/roles',
+    '/api/admin/users',
+  ]);
+  assert.equal(JSON.parse(posts[0].options.body).id, '/repo/a');
+  assert.equal(JSON.parse(posts[0].options.body).cwd, '/repo/a');
+  assert.deepEqual(JSON.parse(posts[1].options.body).projectGrants, [
+    { projectId: 'project_a', canRead: true, canCreate: true, canWrite: true },
+  ]);
+  assert.deepEqual(JSON.parse(posts[2].options.body), {
+    id: 'user_writer',
+    username: 'writer',
+    password: 'writer-password',
+    enabled: true,
+    roleId: 'role_writer',
+    roleIds: ['role_writer'],
+  });
+});
+
+test('admin inline user access updates patch role and enabled state without per-user project grants', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (options.method === 'PATCH' && path === '/api/admin/users/user_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            user: { id: 'user_1', username: 'alice', roleId: 'role_viewer', roleIds: ['role_viewer'] },
+          }),
+        };
+      }
+      if (path === '/api/admin/settings') {
+        return { ok: true, status: 200, json: async () => ({ settings: { multiUserEnabled: true } }) };
+      }
+      if (path === '/api/admin/projects') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/admin/users') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/admin/roles') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/admin/sessions') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+  api.state.admin.users = [{
+    id: 'user_1',
+    username: 'alice',
+    enabled: true,
+    roleId: 'role_viewer',
+    roleIds: ['role_viewer'],
+    directProjectGrants: [{ projectId: 'project_a', canRead: true, canCreate: true, canWrite: true }],
+  }];
+
+  await api.saveAdminUserAccess({
+    id: 'user_1',
+    roleId: 'role_viewer',
+    enabled: false,
+  });
+
+  const patch = fetchCalls.find((call) => call.options.method === 'PATCH');
+  assert.equal(patch?.path, '/api/admin/users/user_1');
+  assert.deepEqual(JSON.parse(patch.options.body), {
+    enabled: false,
+    roleId: 'role_viewer',
+    roleIds: ['role_viewer'],
+  });
+});
+
+test('admin user rows render explicit disable and delete actions', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+  api.state.admin.loaded = true;
+  api.state.admin.page = 'users';
+  api.state.admin.roles = [{ id: 'role_user', name: 'User' }];
+  api.state.admin.projects = [{ id: 'project_a', displayName: 'Project Alpha' }];
+  api.state.admin.users = [{
+    id: 'user_1',
+    username: 'alice',
+    enabled: true,
+    roleId: 'role_user',
+    roleIds: ['role_user'],
+    directProjectGrants: [{ projectId: 'project_a', canRead: true, canCreate: true, canWrite: true }],
+  }];
+
+  const html = api.renderAdminConsole().innerHTML;
+  assert.match(html, /data-admin-toggle-user-id="user_1"/u);
+  assert.match(html, />Disable<\/button>/u);
+  assert.match(html, /data-admin-delete-user-id="user_1"/u);
+});
+
+test('admin explicit user disable and delete actions call the patch and delete endpoints', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (options.method === 'PATCH' && path === '/api/admin/users/user_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            user: { id: 'user_1', username: 'alice', enabled: false, roleId: 'role_viewer', roleIds: ['role_viewer'] },
+          }),
+        };
+      }
+      if (options.method === 'DELETE' && path === '/api/admin/users/user_1') {
+        return {
+          ok: true,
+          status: 204,
+        };
+      }
+      if (path === '/api/admin/settings') {
+        return { ok: true, status: 200, json: async () => ({ settings: { multiUserEnabled: true } }) };
+      }
+      if (path === '/api/admin/projects') {
+        return { ok: true, status: 200, json: async () => ({ items: [{ id: 'project_a', displayName: 'Project Alpha' }] }) };
+      }
+      if (path === '/api/admin/users') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/admin/roles') {
+        return { ok: true, status: 200, json: async () => ({ items: [{ id: 'role_viewer', name: 'Viewer' }] }) };
+      }
+      if (path === '/api/admin/sessions') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+  api.state.admin.users = [{
+    id: 'user_1',
+    username: 'alice',
+    enabled: true,
+    roleId: 'role_viewer',
+    roleIds: ['role_viewer'],
+    directProjectGrants: [{ projectId: 'project_a', canRead: true, canCreate: true, canWrite: true }],
+  }];
+
+  await api.toggleAdminUserEnabled('user_1', false);
+  await api.deleteAdminUser('user_1');
+
+  const patch = fetchCalls.find((call) => call.options.method === 'PATCH');
+  const remove = fetchCalls.find((call) => call.options.method === 'DELETE');
+  assert.equal(patch?.path, '/api/admin/users/user_1');
+  assert.deepEqual(JSON.parse(patch.options.body), {
+    enabled: false,
+    roleId: 'role_viewer',
+    roleIds: ['role_viewer'],
+  });
+  assert.equal(remove?.path, '/api/admin/users/user_1');
+});
+
+test('admin session audit refresh includes user and project filters', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/admin/sessions?userId=user_1&projectId=project_a') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [{ id: 'session_1', ownerUserId: 'user_1', projectId: 'project_a' }] }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+  api.state.admin.filterUserId = 'user_1';
+
+  const sessions = await api.refreshAdminSessions({ projectId: 'project_a', renderAfter: false });
+
+  assert.deepEqual(fetchCalls, ['/api/admin/sessions?userId=user_1&projectId=project_a']);
+  assert.deepEqual(sessions, [{ id: 'session_1', ownerUserId: 'user_1', projectId: 'project_a' }]);
+});
+
+test('admin session audit project filter includes projects discovered from sessions', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true } };
+  api.state.admin.loaded = true;
+  api.state.admin.page = 'sessions';
+  api.state.admin.projects = [];
+  api.state.admin.sessions = [
+    { id: 'session_1', ownerUserId: 'user_1', projectId: 'project_legacy', projectDisplayName: 'Legacy Repo' },
+  ];
+
+  const html = api.renderAdminConsole().innerHTML;
+
+  assert.match(html, /id="admin-session-project-filter"/u);
+  assert.match(html, /<option value="project_legacy">Legacy Repo<\/option>/u);
 });
 
 test('observer sessions and share sessions render read-only chat without composer actions', async () => {
@@ -382,7 +960,7 @@ test('share routes load public session history without auth and render read-only
 test('admin console uses dense mobile-safe management rows', async () => {
   const styles = await readFile(stylesUrl, 'utf8');
 
-  assert.match(styles, /\.admin-console-page\s*\{[^}]*overflow-y:\s*auto;/su);
+  assert.match(styles, /\.admin-console-screen\s*\{[^}]*overflow-y:\s*auto;/su);
   assert.match(styles, /\.admin-list\s*\{[^}]*display:\s*grid;/su);
   assert.match(styles, /\.admin-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/su);
   assert.match(styles, /\.admin-row-main\s*\{[^}]*overflow-wrap:\s*anywhere;/su);
@@ -461,7 +1039,7 @@ test('new session path entry and primary submit buttons are readable on mobile',
   assert.match(styles, /\.new-session-page textarea\s*\{[^}]*min-height:\s*92px;/su);
   assert.match(styles, /\.new-session-page textarea\s*\{[^}]*resize:\s*vertical;/su);
   assert.match(styles, /\.primary-action\s*\{[^}]*min-height:\s*48px;/su);
-  assert.match(app, /<button class="primary primary-action" type="submit">Start<\/button>/u);
+  assert.match(app, /<button class="primary primary-action" type="submit"\$\{startDisabled \? ' disabled' : ''\}>Start<\/button>/u);
   assert.match(app, /<button class="primary primary-action" type="submit">Log in<\/button>/u);
 });
 
@@ -525,8 +1103,8 @@ test('message input starts one line and auto-grows to a compact capped height', 
   assert.doesNotMatch(styles, /\.composer-editor-toggle/u);
   assert.match(styles, /\.composer-leading-controls\s*\{[^}]*gap:\s*6px;/su);
   assert.match(styles, /\.icon-button\[hidden\]\s*\{[^}]*display:\s*none;/su);
-  assert.match(styles, /\.icon-button,\s*\.compact-send\s*\{[^}]*min-height:\s*38px;/su);
-  assert.match(styles, /\.icon-button,\s*\.compact-send\s*\{[^}]*padding:\s*0 8px;/su);
+  assert.match(styles, /\.icon-button,\s*\.compact-send,\s*\.compact-refresh\s*\{[^}]*min-height:\s*38px;/su);
+  assert.match(styles, /\.icon-button,\s*\.compact-send,\s*\.compact-refresh\s*\{[^}]*padding:\s*0 8px;/su);
   assert.match(app, /function autoGrowPromptInput\(textarea\)/u);
   assert.match(app, /textarea\.style\.height = 'auto';/u);
   assert.match(app, /if \(state\.composerExpanded\) \{\s*textarea\.style\.height = '';\s*return;\s*\}/u);
@@ -555,6 +1133,7 @@ test('composer shows external expand above Set and expanded editor wraps collaps
   assert.match(shortHtml, /id="settings-toggle"[^>]*>Set<\/button>/u);
   assert.match(shortHtml, /class="message-editor-shell [^"]*"/u);
   assert.match(shortHtml, /<textarea id="prompt-input"[\s\S]*<button class="primary compact-send" type="submit" id="send-button">Send<\/button>/u);
+  assert.doesNotMatch(shortHtml, /id="composer-refresh-button"/u);
   assert.match(shortHtml, /class="composer-wrap "/u);
 
   api.state.composerCanExpand = true;
@@ -578,6 +1157,7 @@ test('composer shows external expand above Set and expanded editor wraps collaps
   assert.match(expandedHtml, /class="composer is-expanded"/u);
   assert.match(expandedHtml, /<div class="composer-leading-controls">[\s\S]*id="composer-expand-button"[\s\S]*v<\/button>[\s\S]*id="settings-toggle"[^>]*hidden/u);
   assert.match(expandedHtml, /<div class="message-editor-shell is-expanded"[\s\S]*<textarea id="prompt-input"[\s\S]*<button class="primary compact-send" type="submit" id="send-button">Send<\/button>[\s\S]*<\/div>/u);
+  assert.doesNotMatch(expandedHtml, /id="composer-refresh-button"/u);
   assert.match(expandedHtml, /<textarea id="prompt-input"[\s\S]*id="send-button"/u);
 });
 
@@ -594,9 +1174,9 @@ test('expanded composer positions collapse and Send inside a single editor surfa
   assert.match(styles, /\.message-editor-shell\.is-expanded textarea\s*\{[^}]*border-color:\s*transparent;/su);
   assert.match(styles, /\.message-editor-shell\.is-expanded textarea\s*\{[^}]*background:\s*transparent;/su);
   assert.match(styles, /\.message-editor-shell\.is-expanded textarea\s*\{[^}]*padding:\s*54px 12px 58px;/su);
-  assert.match(styles, /\.message-editor-shell\.is-expanded \.compact-send\s*\{[^}]*position:\s*absolute;/su);
-  assert.match(styles, /\.message-editor-shell\.is-expanded \.compact-send\s*\{[^}]*right:\s*8px;/su);
-  assert.match(styles, /\.message-editor-shell\.is-expanded \.compact-send\s*\{[^}]*bottom:\s*8px;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded \.composer-action-buttons\s*\{[^}]*position:\s*absolute;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded \.composer-action-buttons\s*\{[^}]*right:\s*8px;/su);
+  assert.match(styles, /\.message-editor-shell\.is-expanded \.composer-action-buttons\s*\{[^}]*bottom:\s*8px;/su);
   assert.doesNotMatch(styles, /\.composer\.is-expanded \.compact-composer-row textarea\s*\{[^}]*max-height:\s*min\(72dvh,\s*560px\);/su);
 });
 
@@ -613,16 +1193,97 @@ test('running turns keep message sending available and move stop into settings',
   assert.doesNotMatch(app, /function onComposerSubmit\(event\)\s*\{[\s\S]{0,180}if \(state\.pendingTurn\)/u);
 });
 
-test('composer can submit a new message while a turn is already running', async () => {
+test('composer queues a new message while a turn is already running', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
     fetch: async (path, options = {}) => {
       fetchCalls.push({ path, options });
-      if (path === '/api/sessions/session_1/turns') {
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.pendingTurn = true;
+  api.state.turnId = 'turn_1';
+  api.state.prompt = 'Follow-up while running';
+
+  await api.onComposerSubmit({
+    preventDefault() {},
+  });
+
+  assert.deepEqual(fetchCalls, []);
+  assert.equal(api.state.pendingTurn, true);
+  assert.equal(api.state.turnId, 'turn_1');
+  assert.equal(api.state.prompt, '');
+  assert.equal(api.queuedMessagesForCurrentSession().map((item) => item.text).join('\n'), 'Follow-up while running');
+  assert.doesNotMatch(api.state.timeline.map((item) => item.text || '').join('\n'), /Follow-up while running/u);
+
+  const html = api.renderChat().innerHTML;
+  assert.match(html, /class="queued-message-row"/u);
+  assert.match(html, /Follow-up while running/u);
+  assert.match(html, /data-queued-message-id=/u);
+});
+
+test('queued composer messages can be deleted before they are sent', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.enqueueQueuedMessage('session_1', 'Remove me');
+
+  const queued = api.queuedMessagesForCurrentSession();
+  assert.equal(queued.length, 1);
+  api.removeQueuedMessage('session_1', queued[0].id);
+
+  assert.equal(api.queuedMessagesForCurrentSession().length, 0);
+  assert.doesNotMatch(api.renderChat().innerHTML, /Remove me/u);
+});
+
+test('turn completion sends the next queued message without interrupting the running turn', async () => {
+  const fetchCalls = [];
+  let eventRead = 0;
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/turns/turn_1/events') {
         return {
           ok: true,
           status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => {
+                eventRead += 1;
+                if (eventRead === 1) {
+                  return {
+                    done: false,
+                    value: new TextEncoder().encode('data: {"type":"turn.completed","turnId":"turn_1","status":"completed","sequence":1}\n\n'),
+                  };
+                }
+                return { done: true };
+              },
+            }),
+          },
+        };
+      }
+      if (path === '/api/sessions/session_1/turns') {
+        return {
+          ok: true,
+          status: 202,
           json: async () => ({ turnId: 'turn_2' }),
+        };
+      }
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ session: { id: 'session_1', cwd: '/repo', settings: { metadata: {} }, thread: { turns: [] } } }),
         };
       }
       if (path === '/api/turns/turn_2/events') {
@@ -647,41 +1308,78 @@ test('composer can submit a new message while a turn is already running', async 
   api.state.currentSession = { id: 'session_1', cwd: '/repo' };
   api.state.pendingTurn = true;
   api.state.turnId = 'turn_1';
-  api.state.prompt = 'Follow-up while running';
+  api.enqueueQueuedMessage('session_1', 'Queued follow-up');
 
-  await api.onComposerSubmit({
-    preventDefault() {},
-  });
+  await api.streamTurnEvents('turn_1');
+  await flushMicrotasks();
 
-  assert.equal(fetchCalls[0]?.path, '/api/sessions/session_1/turns');
+  assert.deepEqual(fetchCalls.map((call) => call.path), [
+    '/api/turns/turn_1/events',
+    '/api/sessions/session_1',
+    '/api/sessions/session_1/turns',
+    '/api/turns/turn_2/events',
+  ]);
   assert.equal(api.state.pendingTurn, true);
   assert.equal(api.state.turnId, 'turn_2');
-  assert.match(api.state.timeline.map((item) => item.text || '').join('\n'), /Follow-up while running/u);
+  assert.equal(api.queuedMessagesForCurrentSession().length, 0);
+  assert.equal(JSON.parse(fetchCalls[2].options.body).text, 'Queued follow-up');
 });
 
-test('composer restores the prompt and reconnects when backend reports an active turn conflict', async () => {
+test('stream completion without a terminal event refreshes session state and sends the next queued message', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
     fetch: async (path, options = {}) => {
       fetchCalls.push({ path, options });
-      if (path === '/api/sessions/session_1/turns') {
-        return {
-          ok: false,
-          status: 409,
-          json: async () => ({
-            error: 'turn_conflict',
-            message: 'Session session_1 already has an active turn (turn_active).',
-            activeTurnId: 'turn_active',
-          }),
-        };
-      }
-      if (path === '/api/turns/turn_active/events') {
+      if (path === '/api/turns/turn_1/events') {
         return {
           ok: true,
           status: 200,
           body: {
             getReader: () => ({
               read: async () => ({ done: true }),
+            }),
+          },
+        };
+      }
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Question that just finished' },
+                      { type: 'message', role: 'assistant', text: 'Finished elsewhere' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_1/turns') {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({ turnId: 'turn_2' }),
+        };
+      }
+      if (path === '/api/turns/turn_2/events') {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => new Promise(() => {}),
             }),
           },
         };
@@ -696,22 +1394,126 @@ test('composer restores the prompt and reconnects when backend reports an active
   api.state.sessionId = 'session_1';
   api.state.currentSession = { id: 'session_1', cwd: '/repo' };
   api.state.pendingTurn = true;
-  api.state.turnId = 'turn_old';
-  api.state.prompt = 'Follow-up while running';
+  api.state.turnId = 'turn_1';
+  api.enqueueQueuedMessage('session_1', 'Queued after silent stream end');
 
-  await api.onComposerSubmit({
-    preventDefault() {},
-  });
+  await api.streamTurnEvents('turn_1');
+  await flushMicrotasks();
+  await flushMicrotasks();
 
   assert.deepEqual(fetchCalls.map((call) => call.path), [
+    '/api/turns/turn_1/events',
+    '/api/sessions/session_1',
     '/api/sessions/session_1/turns',
-    '/api/turns/turn_active/events',
+    '/api/turns/turn_2/events',
   ]);
   assert.equal(api.state.pendingTurn, true);
-  assert.equal(api.state.turnId, 'turn_active');
-  assert.equal(api.state.prompt, 'Follow-up while running');
-  assert.equal(api.state.error, '');
-  assert.doesNotMatch(api.state.timeline.map((item) => item.text || '').join('\n'), /Follow-up while running/u);
+  assert.equal(api.state.turnId, 'turn_2');
+  assert.equal(api.queuedMessagesForCurrentSession().length, 0);
+  assert.equal(JSON.parse(fetchCalls[2].options.body).text, 'Queued after silent stream end');
+});
+
+test('queued follow-up interrupts a running turn after tool batches complete and immediately starts the next turn', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/turns/turn_1/interrupt') {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({}),
+        };
+      }
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'interrupted',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Initial running prompt' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_1/turns') {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({ turnId: 'turn_2' }),
+        };
+      }
+      if (path === '/api/turns/turn_2/events') {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => new Promise(() => {}),
+            }),
+          },
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.pendingTurn = true;
+  api.state.turnId = 'turn_1';
+  api.enqueueQueuedMessage('session_1', 'Take this new direction');
+
+  let assistantEntry = null;
+  assistantEntry = api.applyTurnEvent({
+    type: 'turn.started',
+    turnId: 'turn_1',
+    threadId: 'session_1',
+  }, assistantEntry);
+  assistantEntry = api.applyTurnEvent({
+    type: 'batch.started',
+    turnId: 'turn_1',
+    batchId: 'batch_1',
+    kind: 'command',
+    title: 'npm test',
+  }, assistantEntry);
+
+  api.applyTurnEvent({
+    type: 'batch.completed',
+    turnId: 'turn_1',
+    batchId: 'batch_1',
+    status: 'completed',
+  }, assistantEntry);
+
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls.map((call) => call.path), [
+    '/api/turns/turn_1/interrupt',
+    '/api/sessions/session_1',
+    '/api/sessions/session_1/turns',
+    '/api/turns/turn_2/events',
+  ]);
+  assert.equal(api.state.turnId, 'turn_2');
+  assert.equal(api.state.pendingTurn, true);
+  assert.equal(api.queuedMessagesForCurrentSession().length, 0);
+  assert.equal(JSON.parse(fetchCalls[2].options.body).text, 'Take this new direction');
 });
 
 test('composer renders handled goal slash command results without streaming a turn', async () => {
@@ -1204,6 +2006,22 @@ test('timeline follows the latest messages until the user scrolls upward', async
   assert.equal(timeline.scrollTop, 700);
 });
 
+test('desktop workspace render keeps the chat timeline anchored to latest messages', async () => {
+  const { api, context } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', text: 'latest' }];
+  api.state.timelineShouldFollowLatest = true;
+
+  api.render();
+
+  const timeline = context.document.querySelector('#timeline');
+  assert.equal(timeline.scrollTop, timeline.scrollHeight);
+});
+
 test('composer expand toggle stays hidden at two lines and appears at four lines', async () => {
   const { api, context } = await loadAppHarness();
   let expandButtonHidden = true;
@@ -1282,7 +2100,7 @@ test('session list scroll position is restored when returning from chat or refre
   assert.match(app, /function restoreSessionListScroll\(\)/u);
   assert.match(app, /function rememberSessionListScroll\(\)/u);
   assert.match(app, /if \(state\.view === 'sessions'\) \{\s*restoreSessionListScroll\(\);/u);
-  assert.match(app, /showSessionList\(\) \{\s*saveCurrentTimeline\(\);[\s\S]*rememberSessionListScroll\(\);/u);
+  assert.match(app, /showSessionList\(\) \{\s*savePromptDraftForCurrentSession\(\);\s*saveCurrentTimeline\(\);[\s\S]*rememberSessionListScroll\(\);/u);
   assert.match(app, /for \(const button of document\.querySelectorAll\('\[data-session-id\]'\)\) \{\s*button\.addEventListener\('click', \(\) => \{\s*rememberSessionListScroll\(\);/u);
   assert.match(app, /function refreshCurrentView\(\)[\s\S]*rememberSessionListScroll\(\);[\s\S]*await refreshSessionsList/u);
 });
@@ -1423,7 +2241,7 @@ test('mobile UI uses session list, compact composer, settings drawer, and histor
   assert.match(app, /settingsOpen/u);
   assert.match(app, /function renderComposerStatus\(\)/u);
   assert.match(app, /composer-status/u);
-  assert.match(app, /<div class="composer-wrap \$\{composerClassName\}">\s*\$\{state\.composerExpanded \? '' : renderComposerStatus\(\)\}\s*<form class="composer \$\{composerClassName\}"/u);
+  assert.match(app, /<div class="composer-wrap \$\{composerClassName\}">\s*\$\{state\.composerExpanded \? '' : renderComposerStatus\(\)\}\s*\$\{renderQueuedMessages\(\)\}\s*<form class="composer \$\{composerClassName\}"/u);
   assert.doesNotMatch(app, /----- \$\{escapeHtml\(composerStatusLabel\(\)\)\} -----/u);
   assert.doesNotMatch(app, /Turn started/u);
   assert.doesNotMatch(app, /Turn completed/u);
@@ -1638,6 +2456,29 @@ test('returning to sessions and back keeps the unsent prompt draft', async () =>
   assert.equal(api.state.prompt, 'unfinished draft');
 });
 
+test('switching sessions keeps unsent prompt drafts scoped to each session', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo/one', settings: { metadata: {} } };
+  api.state.sessions = [
+    { id: 'session_1', cwd: '/repo/one', settings: { metadata: {} } },
+    { id: 'session_2', cwd: '/repo/two', settings: { metadata: {} } },
+  ];
+  api.state.prompt = 'draft for session one';
+
+  await api.selectSession('session_2');
+
+  assert.equal(api.state.prompt, '');
+
+  api.state.prompt = 'draft for session two';
+  await api.selectSession('session_1');
+
+  assert.equal(api.state.prompt, 'draft for session one');
+});
+
 test('session refresh while chat is open keeps the latest timeline position', async () => {
   const app = await readFile(appUrl, 'utf8');
 
@@ -1787,7 +2628,7 @@ test('sending a message keeps a following chat timeline at the latest content', 
   await api.onComposerSubmit({ preventDefault() {} });
 
   const nextTimeline = context.document.querySelector('#timeline');
-  assert.equal(nextTimeline.scrollTop, nextTimeline.scrollHeight - nextTimeline.clientHeight);
+  assert.equal(nextTimeline.scrollTop, nextTimeline.scrollHeight);
 });
 
 test('opening a report path switches to a report loading view before resolve finishes', async () => {
@@ -1962,7 +2803,7 @@ test('returning from a report keeps a following chat timeline at the latest cont
   api.closeReportViewer();
 
   const restoredTimeline = context.document.querySelector('#timeline');
-  assert.equal(restoredTimeline.scrollTop, restoredTimeline.scrollHeight - restoredTimeline.clientHeight);
+  assert.equal(restoredTimeline.scrollTop, restoredTimeline.scrollHeight);
 });
 
 test('report viewer rerenders preserve the report scroll position', async () => {
@@ -3705,7 +4546,7 @@ test('desktop showSessionList keeps the active right pane instead of clearing it
   assert.match(api.context.document.querySelector('#app').innerHTML, /Still visible/u);
 });
 
-test('desktop composer is larger, hides Send, and submits with Enter while preserving Shift Enter', async () => {
+test('desktop composer is larger, shows Refresh and Send, and does not render the expand control', async () => {
   const [styles, app] = await Promise.all([
     readFile(stylesUrl, 'utf8'),
     readFile(appUrl, 'utf8'),
@@ -3714,14 +4555,16 @@ test('desktop composer is larger, hides Send, and submits with Enter while prese
   assert.match(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.composer\s*\{[^}]*width:\s*min\(100%,\s*960px\);/su);
   assert.match(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.compact-composer-row textarea\s*\{[^}]*min-height:\s*96px;/su);
   assert.match(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.compact-composer-row textarea\s*\{[^}]*max-height:\s*220px;/su);
-  assert.match(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.compact-send\s*\{[^}]*display:\s*none;/su);
+  assert.doesNotMatch(styles, /@media \(min-width:\s*820px\)[\s\S]*\.desktop-chat-pane \.compact-send\s*\{[^}]*display:\s*none;/su);
+  assert.match(app, /if \(!isDesktopLayout\(\)\) \{[\s\S]*id="composer-expand-button"/u);
+  assert.match(app, /id="composer-refresh-button"/u);
+  assert.match(app, /class="composer-action-buttons"/u);
   assert.match(app, /function handlePromptKeydown\(event\)/u);
   assert.match(app, /promptInput\.addEventListener\('keydown', handlePromptKeydown\)/u);
-  assert.match(app, /if \(!isDesktopLayout\(\) \|\| event\.key !== 'Enter' \|\| event\.shiftKey/u);
-  assert.match(app, /document\.querySelector\('#composer-form'\)\?\.requestSubmit\(\)/u);
+  assert.doesNotMatch(app, /document\.querySelector\('#composer-form'\)\?\.requestSubmit\(\)/u);
 });
 
-test('desktop prompt Enter submits while Shift Enter keeps editing', async () => {
+test('desktop prompt Enter does not submit the form', async () => {
   let submitCount = 0;
   const { api, context } = await loadAppHarness({ viewportWidth: 900, desktopPointer: true });
 
@@ -3751,8 +4594,8 @@ test('desktop prompt Enter submits while Shift Enter keeps editing', async () =>
   };
   api.handlePromptKeydown(enterEvent);
 
-  assert.equal(enterEvent.prevented, true);
-  assert.equal(submitCount, 1);
+  assert.equal(enterEvent.prevented, false);
+  assert.equal(submitCount, 0);
 
   const shiftEnterEvent = {
     key: 'Enter',
@@ -3768,7 +4611,104 @@ test('desktop prompt Enter submits while Shift Enter keeps editing', async () =>
   api.handlePromptKeydown(shiftEnterEvent);
 
   assert.equal(shiftEnterEvent.prevented, false);
-  assert.equal(submitCount, 1);
+  assert.equal(submitCount, 0);
+});
+
+test('desktop composer refresh button refreshes the current session without relying on browser reload', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    viewportWidth: 1280,
+    desktopPointer: true,
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [{
+                  id: 'turn_1',
+                  status: 'completed',
+                  items: [
+                    { type: 'message', role: 'user', text: 'Question' },
+                    { type: 'message', role: 'assistant', text: 'Refreshed answer' },
+                  ],
+                }],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timelineShouldFollowLatest = true;
+  api.render();
+
+  await api.handleComposerRefresh();
+
+  assert.deepEqual(fetchCalls, ['/api/sessions/session_1']);
+  assert.equal(api.state.timeline.some((item) => item.text === 'Refreshed answer'), true);
+});
+
+test('desktop timeline wheel at the top expands older session history', async () => {
+  const { api, context } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+  const timeline = {
+    scrollTop: 0,
+    scrollHeight: 1000,
+    clientHeight: 400,
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  context.__elements.set('#timeline', timeline);
+  const appElement = context.document.querySelector('#app');
+  context.document.querySelector = (selector) => {
+    if (selector === '#timeline') {
+      return timeline;
+    }
+    if (selector === '#app') {
+      return appElement;
+    }
+    return null;
+  };
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.sessionHistoryItems = [
+    { id: 'old_user', kind: 'message', role: 'user', label: 'You', text: 'Old question' },
+    { id: 'old_assistant', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Old answer' },
+    { id: 'new_user', kind: 'message', role: 'user', label: 'You', text: 'New question' },
+    { id: 'new_assistant', kind: 'message', role: 'assistant', label: 'Assistant', text: 'New answer' },
+  ];
+  api.state.sessionHistoryStartIndex = 2;
+  api.state.timeline = api.state.sessionHistoryItems.slice(2);
+  const wheelEvent = {
+    deltaY: -80,
+    target: timeline,
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+  };
+
+  api.handleTimelineWheel(wheelEvent);
+
+  assert.equal(wheelEvent.defaultPrevented, true);
+  assert.equal(api.state.sessionHistoryStartIndex, 0);
+  assert.equal(api.state.timeline[0]?.text, 'Old question');
 });
 
 test('desktop new session opens an inline sidebar launcher', async () => {
@@ -3818,6 +4758,90 @@ test('desktop new session submit keeps the workspace shell and activates the dra
   assert.equal(api.state.currentSession, null);
   assert.match(api.context.document.querySelector('#app').innerHTML, /desktop-workspace/u);
   assert.match(api.context.document.querySelector('#app').innerHTML, /No context yet/u);
+});
+
+test('desktop new session submit does not auto-select an existing session', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessions = [{ id: 'session_old', cwd: '/repo/old', favorite: true, settings: { favorite: true, metadata: {} } }];
+  api.state.desktopNewSessionOpen = true;
+  api.state.newCwd = '/repo/new';
+
+  api.onNewSessionSubmit({
+    preventDefault() {},
+  });
+
+  assert.equal(api.state.sessionId, null);
+  assert.equal(api.state.currentSession, null);
+  assert.equal(api.state.cwd, '/repo/new');
+  assert.match(api.context.document.querySelector('#app').innerHTML, /No context yet/u);
+});
+
+test('desktop new session submit with the default cwd still shows the composer', async () => {
+  const { api } = await loadAppHarness({ viewportWidth: 1280, desktopPointer: true });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.desktopNewSessionOpen = true;
+  api.state.newCwd = '';
+
+  api.onNewSessionSubmit({
+    preventDefault() {},
+  });
+
+  const html = api.context.document.querySelector('#app').innerHTML;
+  assert.match(html, /id="composer-form"/u);
+  assert.match(html, /id="prompt-input"/u);
+  assert.doesNotMatch(html, /No active session/u);
+});
+
+test('desktop draft session clears after the first submitted message creates a backend session', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    viewportWidth: 1280,
+    desktopPointer: true,
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            session: {
+              id: 'session_new',
+              cwd: '/repo/new',
+              settings: {},
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      if (path === '/api/sessions/session_new/turns') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({ turnId: 'turn_new', session: { id: 'session_new', cwd: '/repo/new', settings: {}, thread: { turns: [] } } }),
+        };
+      }
+      return { ok: true, status: 204, json: async () => ({}) };
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.desktopNewSessionOpen = true;
+  api.state.newCwd = '/repo/new';
+  api.onNewSessionSubmit({ preventDefault() {} });
+  api.state.prompt = 'hello';
+
+  await api.onComposerSubmit({ preventDefault() {} });
+
+  assert.equal(api.state.draftSessionActive, false);
+  assert.equal(api.state.sessionId, 'session_new');
+  assert.deepEqual(fetchCalls.slice(0, 2), ['/api/sessions', '/api/sessions/session_new/turns']);
 });
 
 test('desktop app settings opens as a panel without clearing the active session', async () => {
@@ -4322,7 +5346,7 @@ test('session list initially fetches only favorites and loads all sessions on de
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session', 'time_session']));
 });
 
-test('session restore renders favorites first and preloads all sessions in the background', async () => {
+test('session restore renders favorites first and loads all sessions only on demand', async () => {
   const pending: Array<{
     path: string;
     resolve: (response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
@@ -4374,8 +5398,12 @@ test('session restore renders favorites first and preloads all sessions in the b
   assert.equal(api.state.sortMode, 'favorites');
   assert.equal(api.state.sessionsScope, 'favorites');
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session']));
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions?favorite=true', '/api/reports']);
 
+  const loadAll = api.setSessionSortMode('time');
+  await flushMicrotasks();
+
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
   pending[5]?.resolve({
     ok: true,
     status: 200,
@@ -4386,17 +5414,13 @@ test('session restore renders favorites first and preloads all sessions in the b
       ],
     }),
   });
+  await loadAll;
   await flushMicrotasks();
 
-  assert.equal(api.state.sortMode, 'favorites');
-  assert.equal(api.state.sessionsScope, 'favorites');
-  assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session']));
-  assert.equal(JSON.stringify(api.state.sessionsByScope.all.map((session) => session.id)), JSON.stringify(['favorite_session', 'all_session']));
-
-  await api.setSessionSortMode('time');
-
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions?favorite=true', '/api/reports', '/api/sessions']);
+  assert.equal(api.state.sortMode, 'time');
+  assert.equal(api.state.sessionsScope, 'all');
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['favorite_session', 'all_session']));
+  assert.equal(JSON.stringify(api.state.sessionsByScope.all.map((session) => session.id)), JSON.stringify(['favorite_session', 'all_session']));
 });
 
 test('all tab does not show stale favorites while full sessions are loading', async () => {
@@ -4944,6 +5968,18 @@ test('PWA chat pull gestures expand timeline history while title pulls refresh t
   assert.match(app, /onRefresh:\s*\(pull\)\s*=>\s*\{/u);
 });
 
+test('PWA pull refresh is disabled on the admin console so downward scroll does not trigger refresh', async () => {
+  const [pullRefresh, { api }] = await Promise.all([
+    readFile(pwaPullRefreshUrl, 'utf8'),
+    loadAppHarness(),
+  ]);
+
+  api.state.view = 'admin';
+
+  assert.equal(api.getActiveScrollContainer({ target: null }), false);
+  assert.match(pullRefresh, /container === false/u);
+});
+
 test('PWA refresh updates the current view instead of reloading the app', async () => {
   const fetchCalls = [];
   const { api } = await loadAppHarness({
@@ -5013,7 +6049,7 @@ test('PWA foreground recovery refreshes session history and reconnects unhealthy
   assert.match(app, /state\.streamWasBackgrounded = true/u);
   assert.match(app, /function isTurnStreamHealthy\(\)/u);
   assert.match(app, /async function recoverActiveTurnAfterForeground\(\)/u);
-  assert.match(app, /refreshCurrentSessionMetadata\(\{ hydrateTimeline: true \}\)/u);
+  assert.match(app, /refreshCurrentSessionMetadata\(\{ hydrateTimeline: true, viewportSnapshot \}\)/u);
   assert.match(app, /streamTurnEvents\(state\.turnId, \{ forceReconnect: true \}\)/u);
   assert.match(app, /lastTurnEventSequence/u);
   assert.match(app, /after=\$\{encodeURIComponent\(String\(state\.lastTurnEventSequence\)\)\}/u);
@@ -5131,6 +6167,74 @@ test('foreground recovery keeps the latest chat message visible even when hidden
   api.updateTimelineFollowState();
 
   timeline.scrollTop = 0;
+  await context.recoverActiveTurnAfterForeground();
+
+  const restoredTimeline = context.document.querySelector('#timeline');
+  assert.equal(api.state.timelineShouldFollowLatest, true);
+  assert.equal(restoredTimeline.scrollTop, restoredTimeline.scrollHeight);
+});
+
+test('desktop foreground recovery ignores stale historical viewport and keeps latest visible', async () => {
+  const { api, context } = await loadAppHarness({
+    viewportWidth: 1280,
+    desktopPointer: true,
+    fetch: async (path) => {
+      if (path === '/api/sessions/session_1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: {
+              id: 'session_1',
+              cwd: '/repo',
+              settings: { metadata: {} },
+              thread: {
+                turns: [
+                  {
+                    id: 'turn_1',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Old question' },
+                      { type: 'message', role: 'assistant', text: 'Old answer' },
+                    ],
+                  },
+                  {
+                    id: 'turn_2',
+                    status: 'completed',
+                    items: [
+                      { type: 'message', role: 'user', text: 'Latest question' },
+                      { type: 'message', role: 'assistant', text: 'Latest answer' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.timeline = [
+    { id: 'old_user', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Old question' },
+    { id: 'old_assistant', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Old answer' },
+    { id: 'latest_user', kind: 'message', role: 'user', label: 'You', meta: 'history', text: 'Latest question' },
+    { id: 'latest_assistant', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Latest answer' },
+  ];
+  api.render();
+
+  const timeline = context.document.querySelector('#timeline');
+  timeline.scrollHeight = 1600;
+  timeline.clientHeight = 400;
+  timeline.scrollTop = 0;
+  api.updateTimelineFollowState();
+
   await context.recoverActiveTurnAfterForeground();
 
   const restoredTimeline = context.document.querySelector('#timeline');
@@ -5888,6 +6992,7 @@ async function loadAppHarness(overrides = {}) {
     TextDecoder,
     AbortController,
     FormData,
+    TextEncoder,
     ResizeObserver: class ResizeObserver {
       observe() {}
       disconnect() {}
@@ -5896,6 +7001,9 @@ async function loadAppHarness(overrides = {}) {
   vm.runInNewContext(`${app}
 globalThis.__codexWebTest = {
   state,
+  get draftSessionActive() {
+    return state.draftSessionActive;
+  },
   context: globalThis,
   render: typeof render === 'function' ? render : null,
   DESKTOP_WORKSPACE_MIN_WIDTH: typeof DESKTOP_WORKSPACE_MIN_WIDTH === 'number' ? DESKTOP_WORKSPACE_MIN_WIDTH : null,
@@ -5957,6 +7065,8 @@ globalThis.__codexWebTest = {
   attachTimelineScrollTracking: typeof attachTimelineScrollTracking === 'function' ? attachTimelineScrollTracking : null,
   updateTimelineFollowState: typeof updateTimelineFollowState === 'function' ? updateTimelineFollowState : null,
   scrollTimelineToBottomIfFollowingLatest: typeof scrollTimelineToBottomIfFollowingLatest === 'function' ? scrollTimelineToBottomIfFollowingLatest : null,
+  handleTimelineWheel: typeof handleTimelineWheel === 'function' ? handleTimelineWheel : null,
+  handleComposerRefresh: typeof handleComposerRefresh === 'function' ? handleComposerRefresh : null,
   filteredSessions: typeof filteredSessions === 'function' ? filteredSessions : null,
   sortedSessions: typeof sortedSessions === 'function' ? sortedSessions : null,
   toggleSessionFavorite: typeof toggleSessionFavorite === 'function' ? toggleSessionFavorite : null,
@@ -5965,6 +7075,13 @@ globalThis.__codexWebTest = {
   cancelFavoriteSortMode: typeof cancelFavoriteSortMode === 'function' ? cancelFavoriteSortMode : null,
   moveFavoriteSession: typeof moveFavoriteSession === 'function' ? moveFavoriteSession : null,
 	  reloadRuntime: typeof reloadRuntime === 'function' ? reloadRuntime : null,
+	  refreshAdminSessions: typeof refreshAdminSessions === 'function' ? refreshAdminSessions : null,
+	  saveAdminProject: typeof saveAdminProject === 'function' ? saveAdminProject : null,
+	  saveAdminRole: typeof saveAdminRole === 'function' ? saveAdminRole : null,
+	  saveAdminUser: typeof saveAdminUser === 'function' ? saveAdminUser : null,
+	  saveAdminUserAccess: typeof saveAdminUserAccess === 'function' ? saveAdminUserAccess : null,
+	  toggleAdminUserEnabled: typeof toggleAdminUserEnabled === 'function' ? toggleAdminUserEnabled : null,
+	  deleteAdminUser: typeof deleteAdminUser === 'function' ? deleteAdminUser : null,
 	  applyTheme: typeof applyTheme === 'function' ? applyTheme : null,
 	  applyDefaultThreadSettings: typeof applyDefaultThreadSettings === 'function' ? applyDefaultThreadSettings : null,
 	  applyDefaultSettings: typeof applyDefaultSettings === 'function' ? applyDefaultSettings : null,
@@ -5972,6 +7089,10 @@ globalThis.__codexWebTest = {
 	  handleApiError: typeof handleApiError === 'function' ? handleApiError : null,
 	  streamTurnEvents,
 	  applyTurnEvent: typeof applyTurnEvent === 'function' ? applyTurnEvent : null,
+	  enqueueQueuedMessage: typeof enqueueQueuedMessage === 'function' ? enqueueQueuedMessage : null,
+	  removeQueuedMessage: typeof removeQueuedMessage === 'function' ? removeQueuedMessage : null,
+	  queuedMessagesForCurrentSession: typeof queuedMessagesForCurrentSession === 'function' ? queuedMessagesForCurrentSession : null,
+	  sendNextQueuedMessage: typeof sendNextQueuedMessage === 'function' ? sendNextQueuedMessage : null,
 	  saveCurrentTimeline,
 	};`, context);
   return {

@@ -960,18 +960,7 @@ export class CodexWebRuntime {
   }
 
   private conflictingActiveTurnId(session: CodexWebSession): string | null {
-    const processActiveTurnId = this.activeTurnIdForThread(session.id);
-    const activeTurns = (session.thread.turns ?? []).filter((turn) => isActiveTurnStatus(turn?.status));
-    if (activeTurns.length <= 1) {
-      return null;
-    }
-    for (const turn of activeTurns) {
-      if (turn.id && turn.id === processActiveTurnId) {
-        continue;
-      }
-      return turn.id || processActiveTurnId || 'unknown';
-    }
-    return null;
+    return this.activeTurnIdForThread(session.id);
   }
 
   private async withThreadGoal(session: CodexWebSession): Promise<CodexWebSession> {
