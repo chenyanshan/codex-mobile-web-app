@@ -3,6 +3,7 @@ const TOKEN_KEY = 'codexWebToken';
 const TIMELINE_CACHE_KEY = 'codexWebTimelineCache';
 const QUEUED_MESSAGES_KEY = 'codexWebQueuedMessages';
 const THEME_KEY = 'codexWebTheme';
+const SITE_TITLE_KEY = 'codexWebSiteTitle';
 const DEFAULT_THREAD_SETTINGS_KEY = 'codexWebDefaultThreadSettings';
 const MESSAGE_FONT_SIZE_KEY = 'codexWebMessageFontSize';
 const MAX_TIMELINE_CACHE_SESSIONS = 16;
@@ -21,6 +22,7 @@ const DEFAULT_PERMISSION_PRESET = 'full-access';
 const DEFAULT_APPROVAL_POLICY = 'never';
 const DEFAULT_SANDBOX_MODE = 'danger-full-access';
 const DEFAULT_THEME = 'dark';
+const DEFAULT_SITE_TITLE = 'Codex Web';
 const DEFAULT_MESSAGE_FONT_SIZE = 'medium';
 const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
 const DESKTOP_PROMPT_TEXTAREA_MAX_HEIGHT = 220;
@@ -54,8 +56,12 @@ const NON_RUNTIME_STATUS_LABELS = new Set([
   'Session archived',
   'Session favorited',
   'Favorite removed',
-  'Favorite order saved',
-  'Favorite order saved; unavailable sessions removed',
+  'Creating share link',
+  'Share link copied',
+  'Share link ready',
+  'Uploading attachment',
+  'Attachment uploaded',
+  'Upload failed',
 ]);
 
 const state = {
@@ -105,16 +111,18 @@ const state = {
   sessionId: null,
   draftSessionActive: false,
   view: 'sessions',
-  desktopNewSessionOpen: false,
+  selectedProjectKey: '',
+  selectedProjectId: '',
+  selectedProjectLabel: '',
+  mobileSidebarOpen: false,
   desktopSettingsOpen: false,
   desktopOverlay: null,
   theme: normalizeTheme(localStorage.getItem(THEME_KEY)),
+  siteTitle: normalizeSiteTitle(localStorage.getItem(SITE_TITLE_KEY)),
   messageFontSize: normalizeMessageFontSize(localStorage.getItem(MESSAGE_FONT_SIZE_KEY)),
   defaultThreadSettings: loadDefaultThreadSettings(),
-  sortMode: 'favorites',
-  favoriteSortMode: false,
-  favoriteSortDraft: [],
-  sessionsScope: 'favorites',
+  sortMode: 'time',
+  sessionsScope: 'all',
   archiveConfirmSessionId: null,
   cwd: '',
   newCwd: '',
@@ -128,6 +136,7 @@ const state = {
   statusTone: 'warn',
   prompt: '',
   promptDrafts: new Map(),
+  composerAttachments: [],
   queuedMessages: loadQueuedMessages(),
   queuedMessageSending: false,
   queuedInterruptRequestedTurnId: null,
@@ -152,6 +161,7 @@ const state = {
   lastTurnEventSequence: null,
   lastTurnEventAt: 0,
   streamWasBackgrounded: false,
+  shareDialog: null,
 };
 
 const app = document.querySelector('#app');
@@ -172,12 +182,15 @@ let sharedSessionLoadPromise = null;
 
 bootstrap();
 applyTheme(state.theme, { persist: false });
+applySiteTitle(state.siteTitle, { persist: false });
 applyMessageFontSize(state.messageFontSize, { persist: false });
 registerServiceWorker();
 setupPwaPullToRefresh();
 setupEdgeSwipeBackNavigation();
 setupAppVersionRefresh();
+setupMobileOrientationLock();
 document.addEventListener('visibilitychange', onVisibilityChange);
+document.addEventListener('click', handleSessionSettingsOutsideClick);
 window.addEventListener('resize', () => {
   handleLayoutResize();
   render();
@@ -284,7 +297,7 @@ async function restoreAuth() {
     const [modelsPayload] = await Promise.all([
       apiFetch('/api/models').catch(() => ({ items: [] })),
       refreshProjectsList({ renderAfter: false }).catch(() => []),
-      refreshSessionsList({ renderAfter: false, scope: 'favorites' }).catch(() => null),
+      refreshSessionsList({ renderAfter: false, scope: 'all' }).catch(() => null),
       refreshReportsList({ renderAfter: false }).catch(() => null),
     ]);
     state.authSession = session;
@@ -350,13 +363,15 @@ function setLoggedOut(message = '') {
   state.currentSession = null;
   state.draftSessionActive = false;
   state.view = 'sessions';
-  state.desktopNewSessionOpen = false;
+  state.selectedProjectKey = '';
+  state.selectedProjectId = '';
+  state.selectedProjectLabel = '';
+  state.mobileSidebarOpen = false;
   state.desktopSettingsOpen = false;
   state.desktopOverlay = null;
-  state.sortMode = 'favorites';
-  state.favoriteSortMode = false;
-  state.favoriteSortDraft = [];
-  state.sessionsScope = 'favorites';
+  state.shareDialog = null;
+  state.sortMode = 'time';
+  state.sessionsScope = 'all';
   state.archiveConfirmSessionId = null;
   state.cwd = '';
   state.newCwd = '';
@@ -376,6 +391,7 @@ function setLoggedOut(message = '') {
   state.loginError = message;
   state.prompt = '';
   state.promptDrafts = new Map();
+  state.composerAttachments = [];
   applyDefaultSettings();
   stopStream();
   render();
@@ -477,6 +493,14 @@ function queuedMessagesForCurrentSession() {
   return queuedMessagesForSession(currentQueuedSessionId());
 }
 
+function pendingQueuedMessagesForSession(sessionId) {
+  return queuedMessagesForSession(sessionId).filter((message) => message?.sending !== true);
+}
+
+function pendingQueuedMessagesForCurrentSession() {
+  return pendingQueuedMessagesForSession(currentQueuedSessionId());
+}
+
 function enqueueQueuedMessage(sessionId, text) {
   const normalizedText = String(text || '').trim();
   if (!sessionId || !normalizedText) {
@@ -490,6 +514,33 @@ function enqueueQueuedMessage(sessionId, text) {
   state.queuedMessages.set(sessionId, [...queuedMessagesForSession(sessionId), message]);
   persistQueuedMessages();
   return message;
+}
+
+function setQueuedMessageSending(sessionId, messageId, sending, { renderAfter = false } = {}) {
+  if (!sessionId || !messageId) {
+    return false;
+  }
+  const messages = queuedMessagesForSession(sessionId);
+  let changed = false;
+  const nextMessages = messages.map((message) => {
+    if (message.id !== messageId) {
+      return message;
+    }
+    changed = true;
+    return {
+      ...message,
+      sending: Boolean(sending),
+    };
+  });
+  if (!changed) {
+    return false;
+  }
+  state.queuedMessages.set(sessionId, nextMessages);
+  persistQueuedMessages();
+  if (renderAfter) {
+    render();
+  }
+  return true;
 }
 
 function removeQueuedMessage(sessionId, messageId) {
@@ -582,33 +633,59 @@ function renderDesktopWorkspace() {
   shell.className = 'shell desktop-shell';
   shell.innerHTML = `
     <div class="desktop-workspace">
-      ${renderDesktopSidebar()}
-      ${renderDesktopChatPane()}
-      ${state.desktopSettingsOpen ? renderDesktopSettingsPanel() : ''}
-      ${state.desktopOverlay === 'reports' ? renderDesktopReportsOverlay() : ''}
+      ${renderDesktopProjectRail()}
+      ${renderDesktopSessionPane()}
+      <div class="desktop-workspace-pane-stack">
+        ${renderDesktopChatPane()}
+        ${state.desktopSettingsOpen ? renderDesktopSettingsPanel() : ''}
+        ${state.desktopOverlay === 'reports' ? renderDesktopReportsOverlay() : ''}
+      </div>
     </div>
     ${renderArchiveConfirmModal()}
   `;
   return shell;
 }
 
-function renderDesktopSidebar() {
+function renderDesktopProjectRail() {
   return `
-    <aside class="desktop-sidebar">
-      ${renderSessionListHeader({ desktop: true })}
-      ${state.desktopNewSessionOpen ? renderDesktopNewSessionLauncher() : ''}
-      <main class="session-list desktop-session-list">${renderSessionCards()}</main>
+    <aside class="desktop-project-rail">
+      <header class="project-rail-header">
+        <div class="project-rail-brand">${escapeHtml(state.siteTitle)}</div>
+        <div class="project-rail-meta">${escapeHtml(currentProjectScopeTitle())}</div>
+      </header>
+      <nav class="project-rail-list" aria-label="Projects">
+        ${renderWorkspaceProjectList()}
+      </nav>
+      <div class="project-rail-footer">
+        ${renderWorkspaceRailActions()}
+      </div>
     </aside>
   `;
 }
 
+function renderDesktopSessionPane() {
+  return `
+    <section class="desktop-session-pane">
+      ${renderSessionListHeader({ desktop: true })}
+      <main class="session-list desktop-session-list">${renderSessionCards()}</main>
+    </section>
+  `;
+}
+
 function renderDesktopChatPane() {
+  if (state.view === 'new') {
+    return `
+      <section class="desktop-chat-pane desktop-new-pane">
+        ${renderNewSessionContent({ desktop: true })}
+      </section>
+    `;
+  }
   if (!state.currentSession && !state.sessionId && !state.cwd && !state.draftSessionActive) {
     return `
       <section class="desktop-chat-pane desktop-empty-pane">
         <div class="desktop-empty-state">
           <h2>No active session</h2>
-          <p class="meta">Select a session on the left or start a new one.</p>
+          <p class="meta">Select a session in the middle pane or start a new one.</p>
           <button class="primary primary-action" type="button" id="desktop-empty-new-session-button">Start a new session</button>
         </div>
       </section>
@@ -622,7 +699,7 @@ function renderDesktopChatPane() {
 }
 
 function ensureDesktopActiveSession() {
-  if (!isDesktopLayout() || state.sessionId || state.currentSession || state.draftSessionActive) {
+  if (!isDesktopLayout() || state.view === 'new' || state.sessionId || state.currentSession || state.draftSessionActive) {
     return;
   }
   const [firstSession] = sortedSessions();
@@ -652,9 +729,9 @@ function isDesktopWorkspaceView() {
 
 function handleLayoutResize() {
   if (isDesktopLayout()) {
+    state.mobileSidebarOpen = false;
     return;
   }
-  state.desktopNewSessionOpen = false;
   state.desktopSettingsOpen = false;
   state.desktopOverlay = null;
   if (state.sessionId) {
@@ -668,6 +745,7 @@ function renderSessionList() {
   const shell = document.createElement('div');
   shell.className = 'shell';
   shell.innerHTML = `
+    ${renderMobileProjectDrawer()}
     <div class="screen page-screen">
       ${renderSessionListHeader()}
       <main class="session-list">${renderSessionCards()}</main>
@@ -678,50 +756,48 @@ function renderSessionList() {
 }
 
 function renderSessionListHeader({ desktop = false } = {}) {
-  const canSortFavorites = state.sortMode === 'favorites';
-  const topbarActions = state.favoriteSortMode
-    ? `
-          <div class="topbar-actions sort-edit-actions">
-            <button class="primary compact-button" type="button" id="favorite-sort-save-button">Save</button>
-            <button class="ghost compact-button" type="button" id="favorite-sort-cancel-button">Cancel</button>
-          </div>
-        `
-    : `
-          <div class="topbar-actions">
-            <button class="reports-action compact-button" type="button" id="open-reports-button">Reports</button>
-            ${canSortFavorites ? '<button class="ghost compact-button" type="button" id="favorite-sort-button">Sort</button>' : ''}
-            <button class="ghost compact-button" type="button" id="open-new-session-button">New</button>
-            <button class="ghost compact-button" type="button" id="open-app-settings-button">Set</button>
-          </div>
-        `;
+  const sortToggle = renderSessionSortToggle({ mobile: !desktop });
+  if (!desktop) {
+    return `
+      <header class="topbar page-topbar mobile-session-topbar">
+        <div class="topbar-main">
+          <button class="ghost page-back-button mobile-sidebar-toggle-button" type="button" id="mobile-sidebar-toggle-button" aria-label="Projects">≡</button>
+          ${sortToggle}
+        </div>
+      </header>
+  `;
+  }
   return `
-      <header class="topbar page-topbar${desktop ? ' desktop-sidebar-topbar' : ''}">
+      <header class="topbar page-topbar${desktop ? ' desktop-session-pane-topbar' : ''}">
         <div class="topbar-main">
           <div class="page-title">Sessions</div>
-          ${topbarActions}
+          <div class="topbar-actions">
+            <button class="reports-action compact-button" type="button" id="open-reports-button">Reports</button>
+            <button class="ghost compact-button" type="button" id="open-new-session-button">New</button>
+          </div>
         </div>
-        ${isAdminPrincipal() && !state.favoriteSortMode ? `
-          <div class="admin-shortcut-row">
-            <button class="admin-console-action compact-button" type="button" id="open-admin-console-button">Admin Console</button>
-          </div>
-        ` : ''}
-        <div class="list-actions${state.favoriteSortMode ? ' is-hidden' : ''}">
-          <div class="toggle sort-toggle">
-            <button type="button" data-sort-mode="favorites" aria-pressed="${String(state.sortMode === 'favorites')}">Favorites</button>
-            <button type="button" data-sort-mode="time" aria-pressed="${String(state.sortMode === 'time')}">All</button>
-          </div>
+        <div class="list-actions">
+          ${sortToggle}
         </div>
       </header>
   `;
 }
 
+function renderSessionSortToggle({ mobile = false } = {}) {
+  return `
+          <div class="toggle sort-toggle${mobile ? ' mobile-session-sort-toggle' : ''}">
+            <button type="button" data-sort-mode="favorites" aria-pressed="${String(state.sortMode === 'favorites')}">Favorites</button>
+            <button type="button" data-sort-mode="time" aria-pressed="${String(state.sortMode === 'time')}">Recents</button>
+          </div>
+        `;
+}
+
 function renderReportsPage() {
   const shell = document.createElement('div');
   shell.className = 'shell';
-  const title = state.reportProject ? state.reportProject : 'Reports';
   shell.innerHTML = `
     <div class="screen page-screen">
-      ${renderPageNav(title, { backId: 'back-to-list-button' })}
+      ${renderPageNav('Reports', { backId: 'back-to-list-button' })}
       <main class="report-list">${state.reportProject ? renderReportCards() : renderReportProjects()}</main>
     </div>
   `;
@@ -729,11 +805,10 @@ function renderReportsPage() {
 }
 
 function renderDesktopReportsOverlay() {
-  const title = state.reportProject ? state.reportProject : 'Reports';
   return `
     <section class="desktop-overlay">
       <div class="desktop-overlay-card">
-        ${renderPageNav(title, { backId: 'desktop-reports-close-button' })}
+        ${renderPageNav('Reports', { backId: 'desktop-reports-close-button' })}
         <main class="report-list">${state.reportProject ? renderReportCards() : renderReportProjects()}</main>
       </div>
     </section>
@@ -772,14 +847,7 @@ function renderReportCards() {
     }
     return '<div class="empty-state">No reports yet.</div>';
   }
-  let currentProject = '';
-  return reports.map((report) => {
-    const projectHeader = report.project !== currentProject
-      ? `<div class="report-project-heading">${escapeHtml(report.project)}</div>`
-      : '';
-    currentProject = report.project;
-    return `
-      ${projectHeader}
+  return reports.map((report) => `
       <article class="report-card">
         <button class="report-card-open" type="button" data-report-id="${escapeAttribute(report.id)}">
           <span class="report-card-main">
@@ -793,8 +861,7 @@ function renderReportCards() {
         </button>
         <button class="ghost compact-button report-favorite" type="button" data-report-favorite-id="${escapeAttribute(report.id)}" aria-pressed="${String(report.favorite === true)}">${report.favorite ? 'Unfavorite' : 'Favorite'}</button>
       </article>
-    `;
-  }).join('');
+    `).join('');
 }
 
 function renderReportViewer() {
@@ -865,6 +932,13 @@ function renderDesktopSettingsPanel() {
 
 function renderAppSettingsSections() {
   return `
+        <section class="settings-section">
+          <div class="settings-section-title">Website title</div>
+          <div class="control-group">
+            <label for="site-title-input">Browser title</label>
+            <input id="site-title-input" name="siteTitle" type="text" value="${escapeAttribute(state.siteTitle)}" placeholder="${escapeAttribute(DEFAULT_SITE_TITLE)}">
+          </div>
+        </section>
         <section class="settings-section">
           <div class="settings-section-title">Theme</div>
           <div class="toggle theme-toggle">
@@ -1045,7 +1119,7 @@ function renderAdminSessionAuditPage() {
               <select id="admin-session-project-filter" name="adminProjectFilter">
                 <option value="">All projects</option>
                 ${adminAuditProjects().map((project) => `
-                  <option value="${escapeAttribute(project.id)}"${state.admin.filterProjectId === project.id ? ' selected' : ''}>${escapeHtml(project.displayName || 'Unknown project')}</option>
+                  <option value="${escapeAttribute(project.id)}"${state.admin.filterProjectId === project.id ? ' selected' : ''}>${escapeHtml(projectVisibleName(project, project.id))}</option>
                 `).join('')}
               </select>
             </label>
@@ -1080,11 +1154,7 @@ function renderAdminProjectForm() {
       <div class="admin-form-grid">
         <label class="field">
           <span>Display Name</span>
-          <input name="displayName" autocomplete="off" placeholder="Team Repo" value="${escapeAttribute(project?.displayName || '')}">
-        </label>
-        <label class="field">
-          <span>Internal Name</span>
-          <input name="internalName" autocomplete="off" placeholder="repo" value="${escapeAttribute(project?.internalName || '')}">
+          <input name="displayName" autocomplete="off" placeholder="auto from CWD" value="${escapeAttribute(project?.displayName || '')}">
         </label>
         <label class="field">
           <span>CWD</span>
@@ -1202,7 +1272,6 @@ function renderAdminProjects() {
       <thead>
         <tr>
           <th>CWD</th>
-          <th>Internal Name</th>
           <th>Display Name</th>
           <th>Action</th>
         </tr>
@@ -1211,8 +1280,7 @@ function renderAdminProjects() {
         ${state.admin.projects.map((project) => `
           <tr>
             <td>${escapeHtml(project.cwd || project.id || '')}</td>
-            <td>${escapeHtml(project.internalName || '')}</td>
-            <td>${escapeHtml(project.displayName || project.cwd || project.id || '')}</td>
+            <td>${escapeHtml(adminProjectVisibleName(project))}</td>
             <td><button class="ghost compact-button" type="button" data-admin-edit-project="${escapeAttribute(project.id || '')}">Edit</button></td>
           </tr>
         `).join('')}
@@ -1283,42 +1351,50 @@ function renderAdminSessions() {
 function renderNewSession() {
   const shell = document.createElement('div');
   shell.className = 'shell';
-  const sessionTargetPicker = renderNewSessionTargetPicker();
-  const startDisabled = isMultiUserMode() && !currentNewProjectId();
   shell.innerHTML = `
+    ${renderMobileProjectDrawer()}
     <div class="screen page-screen">
-      <header class="topbar page-topbar">
-        <div class="topbar-main">
-          <div class="page-title">New Session</div>
-          <button class="ghost compact-button" type="button" id="back-to-list-button">Sessions</button>
-        </div>
-      </header>
-      <main class="new-session-page">
-        <form class="panel stack" id="new-session-form">
-          ${sessionTargetPicker}
-          <div class="actions">
-            <button class="primary primary-action" type="submit"${startDisabled ? ' disabled' : ''}>Start</button>
-          </div>
-        </form>
-      </main>
+      ${renderNewSessionContent()}
     </div>
   `;
   return shell;
 }
 
-function renderDesktopNewSessionLauncher() {
+function renderNewSessionContent({ desktop = false } = {}) {
   const sessionTargetPicker = renderNewSessionTargetPicker();
   const startDisabled = isMultiUserMode() && !currentNewProjectId();
   return `
-    <section class="desktop-new-session-launcher">
+    ${desktop
+      ? `
+        <header class="topbar chat-topbar desktop-chat-topbar">
+          <div class="chat-nav">
+            <div class="chat-nav-spacer" aria-hidden="true"></div>
+            <div class="chat-title-stack">
+              <div class="project-title">New Session</div>
+              <div class="goal-status" data-status="unknown">${escapeHtml(currentProjectScopeTitle())}</div>
+            </div>
+            <div class="chat-nav-spacer" aria-hidden="true"></div>
+          </div>
+        </header>
+      `
+      : `
+        <header class="topbar page-topbar">
+          <div class="topbar-main">
+            <button class="ghost page-back-button mobile-sidebar-toggle-button" type="button" id="mobile-sidebar-toggle-button" aria-label="Projects">≡</button>
+            <div class="page-title">New Session</div>
+            <button class="ghost compact-button" type="button" id="back-to-list-button">Sessions</button>
+          </div>
+        </header>
+      `}
+    <main class="new-session-page${desktop ? ' desktop-new-session-page' : ''}">
       <form class="panel stack" id="new-session-form">
         ${sessionTargetPicker}
         <div class="actions">
-          <button class="ghost compact-button" type="button" id="desktop-new-session-cancel-button">Cancel</button>
-          <button class="primary compact-button" type="submit"${startDisabled ? ' disabled' : ''}>Start</button>
+          ${desktop ? '<button class="ghost compact-button" type="button" id="back-to-list-button">Sessions</button>' : ''}
+          <button class="${desktop ? 'primary compact-button' : 'primary primary-action'}" type="submit"${startDisabled ? ' disabled' : ''}>Start</button>
         </div>
       </form>
-    </section>
+    </main>
   `;
 }
 
@@ -1356,7 +1432,7 @@ function renderMultiUserNewSessionProjectPicker() {
           <label for="new-project-select">Project</label>
           <select id="new-project-select" name="projectId">
             ${projects.map((project) => `
-              <option value="${escapeAttribute(project.id)}"${project.id === currentProjectId ? ' selected' : ''}>${escapeHtml(project.displayName)}</option>
+              <option value="${escapeAttribute(project.id)}"${project.id === currentProjectId ? ' selected' : ''}>${escapeHtml(projectVisibleName(project, project.id))}</option>
             `).join('')}
           </select>
         </div>
@@ -1396,13 +1472,50 @@ function renderChatContent({ desktop = false } = {}) {
             <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
             ${renderGoalStatus()}
           </div>
-          ${sessionReportsProject
-            ? `<button class="ghost compact-button session-report-button" type="button" data-session-reports-project="${escapeAttribute(sessionReportsProject)}">Reports</button>`
-            : '<div class="chat-nav-spacer" aria-hidden="true"></div>'}
+          ${renderChatHeaderActions({ readOnly, sessionReportsProject })}
         </div>
       </header>
       <main class="timeline" id="timeline">${renderTimeline()}</main>
       ${readOnly ? renderReadOnlyComposerNotice(state.currentSession) : renderComposer(composerClassName, { desktop })}
+      ${renderShareDialog()}
+  `;
+}
+
+function renderChatHeaderActions({ readOnly, sessionReportsProject }) {
+  const canOpenSettings = !readOnly;
+  if (!canOpenSettings && !sessionReportsProject) {
+    return '<div class="chat-nav-spacer" aria-hidden="true"></div>';
+  }
+  return `
+          <div class="chat-header-actions">
+            ${canOpenSettings ? `<button class="ghost icon-button settings-toggle-button" type="button" id="settings-toggle" aria-label="Session menu" title="Session menu" aria-expanded="${String(state.settingsOpen)}">...</button>` : ''}
+            ${sessionReportsProject ? `<button class="ghost compact-button session-report-button" type="button" data-session-reports-project="${escapeAttribute(sessionReportsProject)}">Reports</button>` : ''}
+          </div>
+  `;
+}
+
+function canShareCurrentSession() {
+  return Boolean(state.sessionId && !state.draftSessionActive && !isReadOnlySession(state.currentSession));
+}
+
+function renderShareDialog() {
+  if (!state.shareDialog?.url) {
+    return '';
+  }
+  return `
+      <div class="modal-backdrop share-modal-backdrop">
+        <section class="confirm-dialog share-dialog" role="dialog" aria-modal="true" aria-labelledby="share-dialog-title">
+          <div>
+            <h2 id="share-dialog-title">Share link</h2>
+            <p class="meta">${escapeHtml(state.shareDialog.copied ? 'Copied to clipboard.' : 'Copy this read-only session link.')}</p>
+          </div>
+          <input id="share-link-input" class="share-link-input" type="text" readonly value="${escapeAttribute(state.shareDialog.url)}">
+          <div class="actions">
+            <button class="ghost compact-button" type="button" id="copy-share-link-button">Copy</button>
+            <button class="primary compact-button" type="button" id="close-share-dialog-button">Done</button>
+          </div>
+        </section>
+      </div>
   `;
 }
 
@@ -1414,6 +1527,8 @@ function renderComposer(composerClassName, { desktop = false } = {}) {
         <form class="composer ${composerClassName}" id="composer-form">
           ${state.settingsOpen && !state.composerExpanded ? renderSettingsDrawer() : ''}
           ${state.error && !state.composerExpanded ? `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>` : ''}
+          ${renderAttachmentTray()}
+          <input class="visually-hidden" id="attachment-input" type="file" multiple aria-label="Upload files">
           <div class="compact-composer-row">
             ${renderComposerLeadingControls()}
             ${renderMessageEditor({ desktop })}
@@ -1424,7 +1539,7 @@ function renderComposer(composerClassName, { desktop = false } = {}) {
 }
 
 function renderQueuedMessages() {
-  const queued = queuedMessagesForCurrentSession();
+  const queued = pendingQueuedMessagesForCurrentSession();
   if (!queued.length) {
     return '';
   }
@@ -1444,15 +1559,17 @@ async function sendNextQueuedMessage(sessionId = state.sessionId) {
   if (!sessionId || state.queuedMessageSending || state.pendingTurn || isReadOnlySession(state.currentSession)) {
     return false;
   }
-  const [message] = queuedMessagesForSession(sessionId);
+  const [message] = pendingQueuedMessagesForSession(sessionId);
   if (!message) {
     return false;
   }
   state.queuedMessageSending = true;
+  setQueuedMessageSending(sessionId, message.id, true, { renderAfter: true });
   try {
     await sendComposerMessage(message.text, {
       queuedMessageId: message.id,
       sessionId,
+      includeComposerAttachments: false,
     });
     return true;
   } finally {
@@ -1549,22 +1666,24 @@ function renderComposerLeadingControls() {
   if (!isDesktopLayout()) {
     expandButton = `<button class="ghost icon-button" type="button" id="composer-expand-button" aria-label="${state.composerExpanded ? 'Collapse message editor' : 'Expand message editor'}" aria-expanded="${String(state.composerExpanded)}"${state.composerCanExpand || state.composerExpanded ? '' : ' hidden'}>${state.composerExpanded ? 'v' : '^'}</button>`;
   }
+  const attachDisabled = state.pendingTurn || hasUploadingComposerAttachments() ? ' disabled' : '';
   return `
     <div class="composer-leading-controls">
       ${expandButton}
-      <button class="ghost icon-button" type="button" id="settings-toggle" aria-expanded="${String(state.settingsOpen)}"${state.composerExpanded ? ' hidden' : ''}>Set</button>
+      <button class="ghost icon-button attach-button" type="button" id="attach-button" aria-label="Attach files" title="Attach files"${attachDisabled}>+</button>
     </div>
   `;
 }
 
 function renderMessageEditor({ desktop = false } = {}) {
   const composerClassName = composerStateClassName();
+  const sendDisabled = hasUploadingComposerAttachments() ? ' disabled' : '';
   const actionButtons = desktop
     ? `<div class="composer-action-buttons">
         <button class="ghost compact-refresh" type="button" id="composer-refresh-button" aria-label="Refresh session">Refresh</button>
-        <button class="primary compact-send" type="submit" id="send-button">Send</button>
+        <button class="primary compact-send" type="submit" id="send-button"${sendDisabled}>Send</button>
       </div>`
-    : '<button class="primary compact-send" type="submit" id="send-button">Send</button>';
+    : `<button class="primary compact-send" type="submit" id="send-button"${sendDisabled}>Send</button>`;
   return `
     <div class="message-editor-shell ${composerClassName}">
       <textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">${escapeHtml(state.prompt)}</textarea>
@@ -1573,9 +1692,211 @@ function renderMessageEditor({ desktop = false } = {}) {
   `;
 }
 
+function renderAttachmentTray() {
+  const attachments = Array.isArray(state.composerAttachments) ? state.composerAttachments : [];
+  if (!attachments.length) {
+    return '';
+  }
+  return `
+          <div class="attachment-tray" aria-label="Attachments">
+            ${attachments.map(renderAttachmentChip).join('')}
+          </div>
+  `;
+}
+
+function renderAttachmentChip(attachment) {
+  const status = String(attachment?.status || 'ready');
+  const fileName = String(attachment?.fileName || attachment?.uploaded?.fileName || 'upload');
+  const sizeLabel = formatAttachmentSize(attachment?.sizeBytes || attachment?.uploaded?.sizeBytes || 0);
+  const statusLabel = attachmentStatusLabel(attachment);
+  const statusClass = status === 'failed' ? ' is-failed' : status === 'uploading' ? ' is-uploading' : '';
+  return `
+            <div class="attachment-chip${statusClass}" data-attachment-id="${escapeAttribute(attachment.id || '')}">
+              <span class="attachment-main">
+                <span class="attachment-name">${escapeHtml(fileName)}</span>
+                <span class="attachment-meta">${escapeHtml(sizeLabel)}</span>
+              </span>
+              <span class="attachment-status">${escapeHtml(statusLabel)}</span>
+              <button class="ghost attachment-remove" type="button" data-attachment-remove-id="${escapeAttribute(attachment.id || '')}" aria-label="Remove ${escapeAttribute(fileName)}">x</button>
+            </div>
+  `;
+}
+
+function attachmentStatusLabel(attachment) {
+  const status = String(attachment?.status || 'ready');
+  if (status === 'uploading') {
+    return 'Uploading';
+  }
+  if (status === 'failed') {
+    return 'Failed';
+  }
+  const storage = String(attachment?.uploaded?.storage || '').trim();
+  return storage === 'state' ? 'Saved' : 'Ready';
+}
+
+function formatAttachmentSize(sizeBytes) {
+  const size = Number(sizeBytes);
+  if (!Number.isFinite(size) || size <= 0) {
+    return '';
+  }
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`;
+  }
+  return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function hasUploadingComposerAttachments() {
+  return (Array.isArray(state.composerAttachments) ? state.composerAttachments : [])
+    .some((attachment) => attachment?.status === 'uploading');
+}
+
+function hasFailedComposerAttachments() {
+  return (Array.isArray(state.composerAttachments) ? state.composerAttachments : [])
+    .some((attachment) => attachment?.status === 'failed');
+}
+
+function readyComposerAttachments() {
+  return (Array.isArray(state.composerAttachments) ? state.composerAttachments : [])
+    .filter((attachment) => attachment?.status === 'ready' && attachment.uploaded)
+    .map((attachment) => attachment.uploaded);
+}
+
+function normalizeTimelineMessageDisplay(role, text, attachments) {
+  const rawText = typeof text === 'string' ? text.trim() : '';
+  const parsed = role === 'user'
+    ? parseAttachmentPromptText(rawText)
+    : { text: rawText, attachments: [] };
+  return {
+    text: parsed.text,
+    attachments: mergeTimelineAttachments(
+      normalizeTimelineAttachments(attachments),
+      parsed.attachments,
+    ),
+  };
+}
+
+function parseAttachmentPromptText(text) {
+  const rawText = typeof text === 'string' ? text.trim() : '';
+  const footer = 'Use the local file paths above when you inspect these attachments.';
+  const footerIndex = rawText.lastIndexOf(`\n${footer}`);
+  if (footerIndex < 0) {
+    return { text: rawText, attachments: [] };
+  }
+  const beforeFooter = rawText.slice(0, footerIndex).trimEnd();
+  const marker = '\n\nAttachments:\n';
+  let markerIndex = beforeFooter.lastIndexOf(marker);
+  let blockStart = markerIndex >= 0 ? markerIndex + marker.length : -1;
+  if (markerIndex < 0 && beforeFooter.startsWith('Attachments:\n')) {
+    markerIndex = 0;
+    blockStart = 'Attachments:\n'.length;
+  }
+  if (markerIndex < 0 || blockStart < 0) {
+    return { text: rawText, attachments: [] };
+  }
+  const parsedAttachments = parseAttachmentPromptBlock(beforeFooter.slice(blockStart));
+  if (!parsedAttachments.length) {
+    return { text: rawText, attachments: [] };
+  }
+  const displayText = beforeFooter.slice(0, markerIndex).trim();
+  return {
+    text: displayText === 'User sent attachments without additional text.' ? '' : displayText,
+    attachments: parsedAttachments,
+  };
+}
+
+function parseAttachmentPromptBlock(blockText) {
+  const attachments = [];
+  let current = null;
+  const pushCurrent = () => {
+    if (!current?.localPath) {
+      return;
+    }
+    attachments.push({
+      kind: current.kind === 'image' ? 'image' : 'file',
+      localPath: current.localPath,
+      fileName: current.fileName || fileNameFromPath(current.localPath),
+      mimeType: current.mimeType || null,
+    });
+  };
+  for (const line of String(blockText || '').split('\n')) {
+    const itemMatch = line.match(/^\d+\.\s+(.+?)\s*$/u);
+    if (itemMatch) {
+      pushCurrent();
+      const label = String(itemMatch[1] || '').toLowerCase();
+      current = {
+        kind: label.includes('image') ? 'image' : 'file',
+        localPath: '',
+        fileName: '',
+        mimeType: '',
+      };
+      continue;
+    }
+    const fieldMatch = line.match(/^\s+(path|filename|mime):\s*(.*?)\s*$/u);
+    if (!fieldMatch || !current) {
+      continue;
+    }
+    const value = String(fieldMatch[2] || '').trim();
+    if (fieldMatch[1] === 'path') {
+      current.localPath = value;
+    } else if (fieldMatch[1] === 'filename') {
+      current.fileName = value;
+    } else if (fieldMatch[1] === 'mime') {
+      current.mimeType = value;
+    }
+  }
+  pushCurrent();
+  return attachments;
+}
+
+function normalizeTimelineAttachments(attachments) {
+  return (Array.isArray(attachments) ? attachments : [])
+    .map((attachment) => normalizeTimelineAttachment(attachment))
+    .filter(Boolean);
+}
+
+function normalizeTimelineAttachment(attachment) {
+  if (!attachment || typeof attachment !== 'object') {
+    return null;
+  }
+  const localPath = typeof attachment.localPath === 'string' ? attachment.localPath.trim() : '';
+  const fileName = typeof attachment.fileName === 'string' ? attachment.fileName.trim() : '';
+  const mimeType = typeof attachment.mimeType === 'string' ? attachment.mimeType.trim() : '';
+  if (!localPath && !fileName) {
+    return null;
+  }
+  return {
+    kind: attachment.kind === 'image' ? 'image' : 'file',
+    localPath,
+    fileName: fileName || fileNameFromPath(localPath) || 'upload',
+    mimeType: mimeType || null,
+    sizeBytes: Number.isFinite(attachment.sizeBytes) ? Number(attachment.sizeBytes) : null,
+  };
+}
+
+function mergeTimelineAttachments(...attachmentGroups) {
+  const merged = [];
+  const seen = new Set();
+  for (const attachment of attachmentGroups.flatMap((group) => normalizeTimelineAttachments(group))) {
+    const key = attachment.localPath || `${attachment.kind}:${attachment.fileName}:${attachment.mimeType || ''}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(attachment);
+  }
+  return merged;
+}
+
+function fileNameFromPath(filePath) {
+  const parts = String(filePath || '').replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
 function renderSessionCards() {
   const sessions = sortedSessions();
-  const isSortingFavorites = state.sortMode === 'favorites' && state.favoriteSortMode;
   if (!sessions.length) {
     if (state.sessionsLoading) {
       return '<div class="empty-state">Loading sessions...</div>';
@@ -1585,7 +1906,7 @@ function renderSessionCards() {
   }
   return sessions.map((session) => `
     <article class="session-card${state.sessionId === session.id ? ' is-active' : ''}">
-      <button class="session-card-open" type="button" data-session-id="${escapeAttribute(session.id)}" ${isSortingFavorites ? 'disabled' : ''}>
+      <button class="session-card-open" type="button" data-session-id="${escapeAttribute(session.id)}">
         <span class="session-card-main">
           <span class="session-project">${escapeHtml(projectNameForSession(session))}</span>
           <span class="session-preview">${escapeHtml(shorten(previewInputForSession(session), 96) || 'No prompt preview')}</span>
@@ -1596,27 +1917,11 @@ function renderSessionCards() {
         </span>
       </button>
       <div class="session-card-actions">
-        ${isSortingFavorites
-          ? renderFavoriteMoveControls(session)
-          : `
-            <button class="ghost compact-button session-favorite" type="button" data-session-favorite-id="${escapeAttribute(session.id)}" aria-pressed="${String(isFavoriteSession(session))}">${isFavoriteSession(session) ? 'Unfavorite' : 'Favorite'}</button>
-            <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">Archive</button>
-          `}
+        <button class="ghost compact-button session-favorite" type="button" data-session-favorite-id="${escapeAttribute(session.id)}" aria-pressed="${String(isFavoriteSession(session))}">${isFavoriteSession(session) ? 'Unfavorite' : 'Favorite'}</button>
+        <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">Archive</button>
       </div>
     </article>
   `).join('');
-}
-
-function renderFavoriteMoveControls(session) {
-  if (state.sortMode !== 'favorites' || !state.favoriteSortMode || !isFavoriteSession(session)) {
-    return '';
-  }
-  return `
-    <div class="favorite-move-controls">
-      <button class="ghost compact-button favorite-move" type="button" data-session-favorite-move-id="${escapeAttribute(session.id)}" data-session-favorite-move="up" aria-label="Move favorite up">↑</button>
-      <button class="ghost compact-button favorite-move" type="button" data-session-favorite-move-id="${escapeAttribute(session.id)}" data-session-favorite-move="down" aria-label="Move favorite down">↓</button>
-    </div>
-  `;
 }
 
 function renderArchiveConfirmModal() {
@@ -1662,6 +1967,7 @@ function renderSettingsDrawer() {
   return `
     <div class="settings-drawer">
       ${renderStopTurnControl()}
+      ${renderShareSettingsControl()}
       <div class="settings-action-row">
         <span class="meta">Runtime</span>
         <button class="ghost compact-button" type="button" id="runtime-reload-button">Reload</button>
@@ -1694,6 +2000,18 @@ function renderSettingsDrawer() {
         </div>
       </div>
     </div>
+  `;
+}
+
+function renderShareSettingsControl() {
+  if (!canShareCurrentSession()) {
+    return '';
+  }
+  return `
+      <div class="settings-action-row">
+        <span class="meta">Share</span>
+        <button class="ghost compact-button" type="button" id="share-session-button">Share</button>
+      </div>
   `;
 }
 
@@ -1746,9 +2064,13 @@ function composerStatusTone() {
 function renderTimelineItem(item) {
   if (item.kind === 'message') {
     const usesMarkdown = item.role === 'assistant' || item.role === 'system';
+    const display = normalizeTimelineMessageDisplay(item.role, item.text, item.attachments);
     const body = usesMarkdown
-      ? `<div class="message-text markdown-body">${renderMarkdown(item.text)}</div>`
-      : `<p class="message-text">${escapeHtml(item.text)}</p>`;
+      ? `<div class="message-text markdown-body">${renderMarkdown(display.text)}</div>`
+      : display.text
+        ? `<p class="message-text">${escapeHtml(display.text)}</p>`
+        : '';
+    const attachments = renderMessageAttachments(display.attachments);
     return `
       <article class="card message-card ${escapeHtml(item.role)}${item.severity === 'error' ? ' error-message' : ''}">
         <div class="card-header">
@@ -1757,6 +2079,7 @@ function renderTimelineItem(item) {
         </div>
         ${item.severity === 'error' ? '<span class="error-badge">Error</span>' : ''}
         ${body}
+        ${attachments}
       </article>
     `;
   }
@@ -1795,6 +2118,34 @@ function renderTimelineItem(item) {
       </div>
       <p class="meta">${escapeHtml(item.text || '')}</p>
     </article>
+  `;
+}
+
+function renderMessageAttachments(attachments) {
+  const normalized = normalizeTimelineAttachments(attachments);
+  if (!normalized.length) {
+    return '';
+  }
+  return `
+        <div class="message-attachments" aria-label="Message attachments">
+          ${normalized.map(renderMessageAttachment).join('')}
+        </div>
+  `;
+}
+
+function renderMessageAttachment(attachment) {
+  const kindLabel = attachment.kind === 'image' ? 'Image' : 'File';
+  const fileName = attachment.fileName || fileNameFromPath(attachment.localPath) || 'upload';
+  const meta = [
+    typeof attachment.sizeBytes === 'number' && attachment.sizeBytes > 0 ? formatAttachmentSize(attachment.sizeBytes) : '',
+    attachment.mimeType || '',
+  ].filter(Boolean).join(' · ');
+  return `
+            <span class="message-attachment ${attachment.kind === 'image' ? 'is-image' : 'is-file'}">
+              <span class="message-attachment-kind">${escapeHtml(kindLabel)}</span>
+              <span class="message-attachment-name">${escapeHtml(fileName)}</span>
+              ${meta ? `<span class="message-attachment-meta">${escapeHtml(meta)}</span>` : ''}
+            </span>
   `;
 }
 
@@ -2109,6 +2460,13 @@ function bindGlobalEvents() {
     });
   }
 
+  const openNewSessionButton = document.querySelector('#open-new-session-button');
+  if (openNewSessionButton) {
+    openNewSessionButton.addEventListener('click', () => {
+      openNewSessionPage();
+    });
+  }
+
   const openAdminConsoleButton = document.querySelector('#open-admin-console-button');
   if (openAdminConsoleButton) {
     openAdminConsoleButton.addEventListener('click', () => {
@@ -2135,18 +2493,59 @@ function bindGlobalEvents() {
     });
   }
 
-  const openNewSessionButton = document.querySelector('#open-new-session-button');
-  if (openNewSessionButton) {
-    openNewSessionButton.addEventListener('click', () => {
-      openNewSessionPage();
+  const attachButton = document.querySelector('#attach-button');
+  const attachmentInput = document.querySelector('#attachment-input');
+  if (attachButton && attachmentInput) {
+    attachButton.addEventListener('click', () => {
+      attachmentInput.click?.();
+    });
+    attachmentInput.addEventListener('change', (event) => {
+      void handleAttachmentInputChange(event);
     });
   }
 
-  const desktopNewSessionCancelButton = document.querySelector('#desktop-new-session-cancel-button');
-  if (desktopNewSessionCancelButton) {
-    desktopNewSessionCancelButton.addEventListener('click', () => {
-      state.desktopNewSessionOpen = false;
+  for (const button of document.querySelectorAll('[data-attachment-remove-id]')) {
+    button.addEventListener('click', () => {
+      removeComposerAttachment(button.getAttribute('data-attachment-remove-id') || '');
+    });
+  }
+
+  const railShowSessionsButton = document.querySelector('#rail-show-sessions-button');
+  if (railShowSessionsButton) {
+    railShowSessionsButton.addEventListener('click', () => {
+      showSessionList();
+    });
+  }
+
+  const mobileSidebarToggleButton = document.querySelector('#mobile-sidebar-toggle-button');
+  if (mobileSidebarToggleButton) {
+    mobileSidebarToggleButton.addEventListener('click', () => {
+      state.mobileSidebarOpen = true;
       render();
+    });
+  }
+
+  const mobileProjectDrawerBackdrop = document.querySelector('#mobile-drawer-backdrop');
+  if (mobileProjectDrawerBackdrop) {
+    mobileProjectDrawerBackdrop.addEventListener('click', (event) => {
+      if (event.target !== mobileProjectDrawerBackdrop) {
+        return;
+      }
+      state.mobileSidebarOpen = false;
+      render();
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-project-scope-key]')) {
+    button.addEventListener('click', () => {
+      void selectProjectScope(button.getAttribute('data-project-scope-key') || '');
+    });
+  }
+
+  for (const button of document.querySelectorAll('[data-project-favorite-id]')) {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void toggleProjectFavorite(button.getAttribute('data-project-favorite-id') || '');
     });
   }
 
@@ -2176,6 +2575,28 @@ function bindGlobalEvents() {
   if (desktopReportsCloseButton) {
     desktopReportsCloseButton.addEventListener('click', () => {
       closeReportsPage();
+    });
+  }
+
+  const shareSessionButton = document.querySelector('#share-session-button');
+  if (shareSessionButton) {
+    shareSessionButton.addEventListener('click', () => {
+      void shareCurrentSession();
+    });
+  }
+
+  const copyShareLinkButton = document.querySelector('#copy-share-link-button');
+  if (copyShareLinkButton) {
+    copyShareLinkButton.addEventListener('click', () => {
+      void copyShareLink(state.shareDialog?.url || '');
+    });
+  }
+
+  const closeShareDialogButton = document.querySelector('#close-share-dialog-button');
+  if (closeShareDialogButton) {
+    closeShareDialogButton.addEventListener('click', () => {
+      state.shareDialog = null;
+      render();
     });
   }
 
@@ -2219,27 +2640,6 @@ function bindGlobalEvents() {
     });
   }
 
-  const favoriteSortButton = document.querySelector('#favorite-sort-button');
-  if (favoriteSortButton) {
-    favoriteSortButton.addEventListener('click', () => {
-      enterFavoriteSortMode();
-    });
-  }
-
-  const favoriteSortSaveButton = document.querySelector('#favorite-sort-save-button');
-  if (favoriteSortSaveButton) {
-    favoriteSortSaveButton.addEventListener('click', () => {
-      void saveFavoriteSortOrder();
-    });
-  }
-
-  const favoriteSortCancelButton = document.querySelector('#favorite-sort-cancel-button');
-  if (favoriteSortCancelButton) {
-    favoriteSortCancelButton.addEventListener('click', () => {
-      cancelFavoriteSortMode();
-    });
-  }
-
   const backToListButton = document.querySelector('#back-to-list-button');
   if (backToListButton) {
     backToListButton.addEventListener('click', () => {
@@ -2267,15 +2667,6 @@ function bindGlobalEvents() {
   for (const button of document.querySelectorAll('[data-session-favorite-id]')) {
     button.addEventListener('click', () => {
       void toggleSessionFavorite(button.getAttribute('data-session-favorite-id') || '');
-    });
-  }
-
-  for (const button of document.querySelectorAll('[data-session-favorite-move-id]')) {
-    button.addEventListener('click', () => {
-      void moveFavoriteSession(
-        button.getAttribute('data-session-favorite-move-id') || '',
-        button.getAttribute('data-session-favorite-move') || '',
-      );
     });
   }
 
@@ -2515,6 +2906,13 @@ function bindGlobalEvents() {
     });
   }
 
+  const siteTitleInput = document.querySelector('#site-title-input');
+  if (siteTitleInput) {
+    siteTitleInput.addEventListener('input', (event) => {
+      applySiteTitle(event.target.value);
+    });
+  }
+
   for (const button of document.querySelectorAll('[data-default-mode]')) {
     button.addEventListener('click', () => {
       applyDefaultThreadSettings({ collaborationMode: button.getAttribute('data-default-mode') || DEFAULT_COLLABORATION_MODE });
@@ -2582,6 +2980,18 @@ function toggleSettingsDrawer() {
   withTimelineScrollPreserved(() => render());
 }
 
+function handleSessionSettingsOutsideClick(event) {
+  if (!state.settingsOpen) {
+    return;
+  }
+  const target = event?.target;
+  if (target?.closest?.('#settings-toggle, .settings-drawer')) {
+    return;
+  }
+  state.settingsOpen = false;
+  withTimelineScrollPreserved(() => render());
+}
+
 function toggleComposerExpanded() {
   if (!state.composerCanExpand && !state.composerExpanded) {
     return;
@@ -2640,7 +3050,6 @@ function syncComposerPresentation() {
   }
   const settingsToggle = document.querySelector('#settings-toggle');
   if (settingsToggle) {
-    settingsToggle.hidden = state.composerExpanded;
     settingsToggle.setAttribute('aria-expanded', String(state.settingsOpen));
   }
   const composerExpandButton = document.querySelector('#composer-expand-button');
@@ -2710,6 +3119,140 @@ function syncComposerErrorDisplay() {
   if (row && composerForm.insertBefore) {
     composerForm.insertBefore(htmlToElement(errorHtml), row);
   }
+}
+
+async function handleAttachmentInputChange(event) {
+  const files = Array.from(event?.target?.files || []);
+  if (event?.target) {
+    event.target.value = '';
+  }
+  if (!files.length) {
+    return;
+  }
+  if (state.pendingTurn) {
+    state.error = 'Wait for the current turn to finish before attaching files.';
+    state.status = 'Turn running';
+    state.statusTone = 'warn';
+    renderChatAtLatestIfFollowing(() => {});
+    return;
+  }
+  await uploadComposerAttachments(files);
+}
+
+async function uploadComposerAttachments(files) {
+  const pendingAttachments = files.map(createPendingComposerAttachment);
+  state.composerAttachments.push(...pendingAttachments);
+  state.error = '';
+  state.status = 'Uploading attachment';
+  state.statusTone = 'warn';
+  renderChatAtLatestIfFollowing(() => {});
+
+  try {
+    const sessionId = await ensureSession();
+    const payload = await uploadSessionAttachments(sessionId, files);
+    const uploadedItems = Array.isArray(payload?.items) ? payload.items : [];
+    pendingAttachments.forEach((attachment, index) => {
+      const uploaded = uploadedItems[index];
+      if (!uploaded?.localPath) {
+        updateComposerAttachment(attachment.id, {
+          status: 'failed',
+          error: 'Upload response did not include a readable file path.',
+        });
+        return;
+      }
+      updateComposerAttachment(attachment.id, {
+        status: 'ready',
+        uploaded: normalizeUploadedAttachment(uploaded, attachment),
+      });
+    });
+    if (hasFailedComposerAttachments()) {
+      state.status = 'Upload failed';
+      state.statusTone = 'danger';
+      state.error = 'Upload response did not include a readable file path.';
+    } else {
+      state.status = 'Attachment uploaded';
+      state.statusTone = 'success';
+      state.error = '';
+    }
+  } catch (error) {
+    const message = error?.payload?.message || error?.message || 'Upload failed';
+    for (const attachment of pendingAttachments) {
+      updateComposerAttachment(attachment.id, {
+        status: 'failed',
+        error: message,
+      });
+    }
+    state.status = 'Upload failed';
+    state.statusTone = 'danger';
+    state.error = message;
+  }
+  renderChatAtLatestIfFollowing(() => {});
+}
+
+function createPendingComposerAttachment(file) {
+  return {
+    id: `local_att_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    status: 'uploading',
+    fileName: String(file?.name || 'upload'),
+    sizeBytes: Number.isFinite(file?.size) ? Number(file.size) : 0,
+    mimeType: String(file?.type || ''),
+  };
+}
+
+function updateComposerAttachment(attachmentId, patch) {
+  const index = state.composerAttachments.findIndex((attachment) => attachment.id === attachmentId);
+  if (index < 0) {
+    return false;
+  }
+  state.composerAttachments[index] = {
+    ...state.composerAttachments[index],
+    ...patch,
+  };
+  return true;
+}
+
+function removeComposerAttachment(attachmentId) {
+  const next = state.composerAttachments.filter((attachment) => attachment.id !== attachmentId);
+  if (next.length === state.composerAttachments.length) {
+    return;
+  }
+  state.composerAttachments = next;
+  if (!hasFailedComposerAttachments() && state.error === 'Remove failed uploads before sending.') {
+    state.error = '';
+  }
+  renderChatAtLatestIfFollowing(() => {});
+}
+
+async function uploadSessionAttachments(sessionId, files) {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file, file?.name || 'upload');
+  }
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+    },
+    body: formData,
+  });
+  if (!response.ok) {
+    throw await buildApiError(response);
+  }
+  return response.json();
+}
+
+function normalizeUploadedAttachment(uploaded, fallback) {
+  return {
+    id: String(uploaded.id || fallback.id),
+    kind: uploaded.kind === 'image' ? 'image' : 'file',
+    fileName: String(uploaded.fileName || fallback.fileName || 'upload'),
+    mimeType: typeof uploaded.mimeType === 'string' ? uploaded.mimeType : fallback.mimeType || null,
+    sizeBytes: Number.isFinite(uploaded.sizeBytes) ? Number(uploaded.sizeBytes) : fallback.sizeBytes || 0,
+    storage: uploaded.storage === 'state' ? 'state' : 'project',
+    localPath: String(uploaded.localPath || ''),
+    displayPath: typeof uploaded.displayPath === 'string' ? uploaded.displayPath : undefined,
+  };
 }
 
 function htmlToElement(html) {
@@ -3057,10 +3600,8 @@ function showSessionList() {
   state.currentReportContent = '';
   state.currentReportLoading = false;
   state.reportReturnView = 'reports';
-  state.favoriteSortMode = false;
-  state.favoriteSortDraft = [];
   state.archiveConfirmSessionId = null;
-  state.desktopNewSessionOpen = false;
+  state.mobileSidebarOpen = false;
   state.desktopSettingsOpen = false;
   state.desktopOverlay = null;
   if (!isDesktopLayout()) {
@@ -3070,6 +3611,7 @@ function showSessionList() {
     state.turnId = null;
     state.pendingTurn = false;
     state.composerExpanded = false;
+    state.composerAttachments = [];
     resetTurnState();
     resetSessionHistoryWindow();
   }
@@ -3081,13 +3623,11 @@ async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
   savePromptDraftForCurrentSession();
   const normalizedProject = String(project || '').trim();
   const normalizedReturnView = returnView === 'chat' && state.sessionId ? 'chat' : 'sessions';
+  state.mobileSidebarOpen = false;
   if (isDesktopLayout()) {
     state.view = 'sessions';
     state.desktopOverlay = 'reports';
-    state.desktopNewSessionOpen = false;
     state.desktopSettingsOpen = false;
-    state.favoriteSortMode = false;
-    state.favoriteSortDraft = [];
     state.archiveConfirmSessionId = null;
     state.currentReport = null;
     state.currentReportContent = '';
@@ -3111,8 +3651,6 @@ async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
     stopStream();
   }
   state.view = 'reports';
-  state.favoriteSortMode = false;
-  state.favoriteSortDraft = [];
   state.archiveConfirmSessionId = null;
   if (normalizedReturnView !== 'chat') {
     state.sessionId = null;
@@ -3135,6 +3673,7 @@ async function openReportsPage({ project = '', returnView = 'sessions' } = {}) {
 }
 
 function closeReportsPage() {
+  state.mobileSidebarOpen = false;
   if (isDesktopLayout()) {
     state.desktopOverlay = null;
     state.currentReport = null;
@@ -3176,17 +3715,15 @@ function handleReportsBackNavigation() {
 function openAppSettingsPage() {
   savePromptDraftForCurrentSession();
   saveCurrentTimeline();
-  state.favoriteSortMode = false;
-  state.favoriteSortDraft = [];
   state.archiveConfirmSessionId = null;
   state.currentReport = null;
   state.currentReportContent = '';
   state.currentReportLoading = false;
+  state.mobileSidebarOpen = false;
   state.error = '';
   if (isDesktopLayout()) {
     state.view = 'sessions';
     state.desktopSettingsOpen = true;
-    state.desktopNewSessionOpen = false;
     state.desktopOverlay = null;
     render();
     if (isAdminPrincipal() && state.admin.settings === null) {
@@ -3211,6 +3748,7 @@ async function openAdminConsole() {
   }
   saveCurrentTimeline();
   stopStream();
+  state.mobileSidebarOpen = false;
   state.view = 'admin';
   state.sessionId = null;
   state.currentSession = null;
@@ -3230,27 +3768,24 @@ function openNewSessionPage() {
     void refreshProjectsList({ renderAfter: true });
   }
   initializeNewProjectSelection();
+  seedNewSessionTargetFromSelection();
+  state.mobileSidebarOpen = false;
   if (isDesktopLayout()) {
     applyDefaultSettings();
-    state.favoriteSortMode = false;
-    state.favoriteSortDraft = [];
-    state.view = 'sessions';
-    state.desktopNewSessionOpen = true;
+    state.view = 'new';
     state.desktopSettingsOpen = false;
     state.desktopOverlay = null;
     state.archiveConfirmSessionId = null;
     state.currentReport = null;
     state.currentReportContent = '';
     state.currentReportLoading = false;
-    state.newCwd = isMultiUserMode() ? '' : hasProjectChoices() ? '' : state.cwd || '';
+    state.composerAttachments = [];
     state.error = '';
     render();
     return;
   }
   stopStream();
   applyDefaultSettings();
-  state.favoriteSortMode = false;
-  state.favoriteSortDraft = [];
   state.view = 'new';
   state.archiveConfirmSessionId = null;
   state.sessionId = null;
@@ -3258,7 +3793,7 @@ function openNewSessionPage() {
   state.currentReport = null;
   state.currentReportContent = '';
   state.currentReportLoading = false;
-  state.newCwd = isMultiUserMode() ? '' : hasProjectChoices() ? '' : state.cwd || '';
+  state.composerAttachments = [];
   resetTurnState();
   state.error = '';
   render();
@@ -3278,16 +3813,22 @@ function onNewSessionSubmit(event) {
   stopStream();
   applyDefaultSettings();
   state.view = isDesktopLayout() ? 'sessions' : 'chat';
-  state.desktopNewSessionOpen = false;
   state.desktopSettingsOpen = false;
   state.desktopOverlay = null;
   state.archiveConfirmSessionId = null;
+  state.mobileSidebarOpen = false;
   state.sessionId = null;
   state.currentSession = null;
   state.draftSessionActive = true;
   state.newProjectId = selectedProjectId || state.newProjectId;
+  if (selectedProjectId) {
+    applySelectedProjectById(selectedProjectId);
+  } else if (state.newCwd.trim()) {
+    applySelectedLegacyProjectFromCwd(state.newCwd.trim());
+  }
   state.cwd = selectedProjectId ? '' : state.newCwd.trim();
   state.prompt = '';
+  state.composerAttachments = [];
   state.composerExpanded = false;
   state.settingsOpen = false;
   resetTurnState();
@@ -3298,9 +3839,6 @@ function onNewSessionSubmit(event) {
 }
 
 async function selectSession(sessionId) {
-  if (state.favoriteSortMode) {
-    return;
-  }
   const nextSession = state.sessions.find((session) => session.id === sessionId) || null;
   if (!nextSession) {
     openNewSessionPage();
@@ -3320,11 +3858,12 @@ async function selectSession(sessionId) {
   restoreTimelineForSession(nextSession);
   const restoredRuntimeStatus = syncRuntimeStatusFromSession(nextSession, { source: 'stale' });
   state.view = isDesktopLayout() ? 'sessions' : 'chat';
-  state.desktopNewSessionOpen = false;
+  state.mobileSidebarOpen = false;
   state.desktopSettingsOpen = false;
   state.desktopOverlay = null;
   state.composerExpanded = false;
   state.settingsOpen = false;
+  state.composerAttachments = [];
   state.error = '';
   state.status = restoredRuntimeStatus.changed && restoredRuntimeStatus.activeTurnId ? 'Turn running' : 'Loading session';
   state.statusTone = 'warn';
@@ -3380,7 +3919,28 @@ async function onComposerSubmit(event) {
   if (!text) {
     return;
   }
+  if (hasUploadingComposerAttachments()) {
+    state.error = 'Wait for uploads to finish before sending.';
+    state.status = 'Uploading attachment';
+    state.statusTone = 'warn';
+    renderChatAtLatestIfFollowing(() => {});
+    return;
+  }
+  if (hasFailedComposerAttachments()) {
+    state.error = 'Remove failed uploads before sending.';
+    state.status = 'Upload failed';
+    state.statusTone = 'danger';
+    renderChatAtLatestIfFollowing(() => {});
+    return;
+  }
   if (state.pendingTurn && state.sessionId && !isSlashCommandText(text)) {
+    if (readyComposerAttachments().length) {
+      state.error = 'Attachments cannot be queued while a turn is running.';
+      state.status = 'Turn running';
+      state.statusTone = 'warn';
+      renderChatAtLatestIfFollowing(() => {});
+      return;
+    }
     enqueueQueuedMessage(state.sessionId, text);
     state.queuedInterruptRequestedTurnId = state.turnId || null;
     clearPromptDraftForCurrentSession();
@@ -3398,7 +3958,7 @@ function isSlashCommandText(text) {
   return normalized === '/help' || normalized === '/goal' || normalized.startsWith('/goal ');
 }
 
-async function sendComposerMessage(text, { queuedMessageId = '', sessionId: preferredSessionId = '' } = {}) {
+async function sendComposerMessage(text, { queuedMessageId = '', sessionId: preferredSessionId = '', includeComposerAttachments = true } = {}) {
   state.error = '';
   state.pendingTurn = true;
   state.lastTurnEventSequence = null;
@@ -3406,6 +3966,7 @@ async function sendComposerMessage(text, { queuedMessageId = '', sessionId: pref
   state.streamWasBackgrounded = false;
   state.status = 'Starting turn';
   state.statusTone = 'warn';
+  const attachments = includeComposerAttachments ? readyComposerAttachments() : [];
   const optimisticUserEntry = {
     id: `local_user_${Date.now()}`,
     kind: 'message',
@@ -3413,6 +3974,7 @@ async function sendComposerMessage(text, { queuedMessageId = '', sessionId: pref
     label: 'You',
     meta: 'pending',
     text,
+    ...(attachments.length ? { attachments } : {}),
   };
   appendMessage(optimisticUserEntry);
   const promptToSend = text;
@@ -3433,8 +3995,17 @@ async function sendComposerMessage(text, { queuedMessageId = '', sessionId: pref
       body: {
         text: promptToSend,
         settings,
+        ...(attachments.length
+          ? {
+              attachmentIds: attachments.map((attachment) => attachment.id),
+              attachments,
+            }
+          : {}),
       },
     });
+    if (attachments.length) {
+      state.composerAttachments = [];
+    }
     if (queuedMessageId) {
       removeQueuedMessage(sessionId, queuedMessageId);
     }
@@ -3456,6 +4027,10 @@ async function sendComposerMessage(text, { queuedMessageId = '', sessionId: pref
     renderChatAtLatest(() => {});
     void streamTurnEvents(turn.turnId);
   } catch (error) {
+    const failedQueuedSessionId = submittedSessionId || preferredSessionId || state.sessionId;
+    if (queuedMessageId && failedQueuedSessionId) {
+      setQueuedMessageSending(failedQueuedSessionId, queuedMessageId, false);
+    }
     if (handleMissingSession(error, promptToSend)) {
       return;
     }
@@ -3494,7 +4069,9 @@ function handleTurnConflict(error, {
   const activeTurnId = String(error?.payload?.activeTurnId || '').trim();
   if (queuedMessageId && sessionId) {
     const stillQueued = queuedMessagesForSession(sessionId).some((message) => message.id === queuedMessageId);
-    if (!stillQueued) {
+    if (stillQueued) {
+      setQueuedMessageSending(sessionId, queuedMessageId, false);
+    } else {
       enqueueQueuedMessage(sessionId, promptText);
     }
     state.prompt = '';
@@ -3656,17 +4233,120 @@ async function archiveSession(sessionId) {
   }
 }
 
+async function shareCurrentSession() {
+  const sessionId = state.sessionId || state.currentSession?.id || '';
+  if (!sessionId || state.draftSessionActive || isReadOnlySession(state.currentSession)) {
+    return null;
+  }
+  try {
+    state.status = 'Creating share link';
+    state.statusTone = 'warn';
+    render();
+    const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/share`, {
+      method: 'POST',
+    });
+    const shareUrl = absoluteShareUrl(payload?.shareUrl || '');
+    if (!shareUrl) {
+      throw new Error('Share link was not returned.');
+    }
+    const copied = await copyShareLink(shareUrl, { renderAfter: false });
+    state.shareDialog = { url: shareUrl, copied };
+    state.status = copied ? 'Share link copied' : 'Share link ready';
+    state.statusTone = 'success';
+    state.error = '';
+    render();
+    return shareUrl;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
+async function copyShareLink(url, { renderAfter = true } = {}) {
+  const normalizedUrl = String(url || '').trim();
+  if (!normalizedUrl) {
+    return false;
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(normalizedUrl);
+      return finalizeShareCopySuccess(normalizedUrl, { renderAfter });
+    }
+  } catch (_error) {
+  }
+  if (legacyCopyShareLink(normalizedUrl)) {
+    return finalizeShareCopySuccess(normalizedUrl, { renderAfter });
+  }
+  state.status = 'Share link ready';
+  state.statusTone = 'success';
+  if (renderAfter) {
+    render();
+  }
+  return false;
+}
+
+function legacyCopyShareLink(url) {
+  const input = document.querySelector('#share-link-input');
+  if (!input || typeof document.execCommand !== 'function') {
+    return false;
+  }
+  try {
+    input.focus?.();
+    input.select?.();
+    if (typeof input.setSelectionRange === 'function') {
+      input.setSelectionRange(0, String(input.value || url).length);
+    }
+    return document.execCommand('copy') === true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function finalizeShareCopySuccess(url, { renderAfter = true } = {}) {
+  if (state.shareDialog?.url === url) {
+    state.shareDialog = { ...state.shareDialog, copied: true };
+  }
+  state.status = 'Share link copied';
+  state.statusTone = 'success';
+  state.error = '';
+  if (renderAfter) {
+    render();
+  }
+  return true;
+}
+
+function absoluteShareUrl(shareUrl) {
+  const value = String(shareUrl || '').trim();
+  if (!value) {
+    return '';
+  }
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(value)) {
+    return value;
+  }
+  const origin = String(window.location?.origin || '').replace(/\/+$/u, '');
+  if (origin && value.startsWith('/')) {
+    return `${origin}${value}`;
+  }
+  if (origin) {
+    return `${origin}/${value.replace(/^\/+/u, '')}`;
+  }
+  try {
+    return new URL(value, window.location.origin || window.location.href).toString();
+  } catch (_error) {
+    return value;
+  }
+}
+
 async function toggleSessionFavorite(sessionId) {
   const session = state.sessions.find((item) => item.id === sessionId);
   if (!session) {
     return;
   }
   const favorite = !isFavoriteSession(session);
-  const favoriteOrder = favorite ? nextFavoriteOrder() : null;
   try {
     const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/favorite`, {
       method: 'PATCH',
-      body: { favorite, favoriteOrder },
+      body: { favorite },
     });
     if (payload?.session) {
       upsertSession(payload.session);
@@ -3683,82 +4363,6 @@ async function toggleSessionFavorite(sessionId) {
       return;
     }
     handleApiError(error);
-  }
-}
-
-function enterFavoriteSortMode() {
-  if (state.sortMode !== 'favorites') {
-    return;
-  }
-  state.favoriteSortMode = true;
-  state.favoriteSortDraft = sortedFavoriteSessions().map((session) => session.id);
-  state.archiveConfirmSessionId = null;
-  render();
-}
-
-function cancelFavoriteSortMode() {
-  state.favoriteSortMode = false;
-  state.favoriteSortDraft = [];
-  state.error = '';
-  render();
-}
-
-async function saveFavoriteSortOrder() {
-  if (!state.favoriteSortMode) {
-    return;
-  }
-  const draft = favoriteSortDraftIds();
-  const missingIds = [];
-  try {
-    for (let index = 0; index < draft.length; index += 1) {
-      const sessionId = draft[index];
-      try {
-        const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/favorite`, {
-          method: 'PATCH',
-          body: { favorite: true, favoriteOrder: index + 1 },
-        });
-        if (payload?.session) {
-          upsertSession(payload.session);
-        } else {
-          applyFavoriteOrderLocally(sessionId, index + 1);
-        }
-      } catch (error) {
-        if (!isMissingSessionError(error) && !isUnavailableSessionError(error)) {
-          throw error;
-        }
-        missingIds.push(sessionId);
-        removeSession(sessionId);
-      }
-    }
-    state.favoriteSortMode = false;
-    state.favoriteSortDraft = [];
-    state.view = 'sessions';
-    state.status = missingIds.length ? 'Favorite order saved; unavailable sessions removed' : 'Favorite order saved';
-    state.statusTone = missingIds.length ? 'warn' : 'success';
-    state.error = '';
-    render();
-  } catch (error) {
-    if (handleMissingSession(error, '')) {
-      return;
-    }
-    handleApiError(error);
-  }
-}
-
-async function moveFavoriteSession(sessionId, direction) {
-  if (state.favoriteSortMode) {
-    const draft = favoriteSortDraftIds();
-    const index = draft.indexOf(sessionId);
-    const offset = direction === 'up' ? -1 : direction === 'down' ? 1 : 0;
-    const targetIndex = index + offset;
-    if (index < 0 || offset === 0 || targetIndex < 0 || targetIndex >= draft.length) {
-      return;
-    }
-    const nextDraft = [...draft];
-    [nextDraft[index], nextDraft[targetIndex]] = [nextDraft[targetIndex], nextDraft[index]];
-    state.favoriteSortDraft = nextDraft;
-    render();
-    return;
   }
 }
 
@@ -3817,7 +4421,7 @@ async function streamTurnEvents(turnId, options = {}) {
     }
     shouldReconcileQueuedCompletion = !sawTerminalEvent
       && !controller.signal.aborted
-      && queuedMessagesForCurrentSession().length > 0;
+      && pendingQueuedMessagesForCurrentSession().length > 0;
   } catch (error) {
     if (controller.signal.aborted) {
       return;
@@ -3902,7 +4506,7 @@ async function reconcileQueuedCompletion(turnId) {
   if (state.sessionId !== sessionId) {
     return;
   }
-  if (!state.pendingTurn && queuedMessagesForSession(sessionId).length > 0) {
+  if (!state.pendingTurn && pendingQueuedMessagesForSession(sessionId).length > 0) {
     void sendNextQueuedMessage(sessionId);
   }
 }
@@ -4058,7 +4662,7 @@ function applyTurnEvent(event, assistantEntry) {
       state.queuedInterruptEligibleTurnId = null;
       {
         const completedSessionId = state.sessionId;
-        const hasQueuedMessage = queuedMessagesForSession(completedSessionId).length > 0;
+        const hasQueuedMessage = pendingQueuedMessagesForSession(completedSessionId).length > 0;
         if (hasQueuedMessage) {
           state.status = 'Starting turn';
           state.statusTone = 'warn';
@@ -4091,7 +4695,7 @@ function applyTurnEvent(event, assistantEntry) {
       break;
   }
   saveCurrentTimeline();
-  if (!state.pendingTurn && state.sessionId && queuedMessagesForCurrentSession().length && event.type !== 'turn.completed') {
+  if (!state.pendingTurn && state.sessionId && pendingQueuedMessagesForCurrentSession().length && event.type !== 'turn.completed') {
     void sendNextQueuedMessage(state.sessionId);
   }
   refreshChatDynamicUi();
@@ -4152,7 +4756,7 @@ async function maybeInterruptRunningTurnForQueuedMessage() {
   if (!sessionId || !turnId || !state.pendingTurn) {
     return;
   }
-  if (!queuedMessagesForSession(sessionId).length) {
+  if (!pendingQueuedMessagesForSession(sessionId).length) {
     return;
   }
   if (state.queuedInterruptEligibleTurnId !== turnId) {
@@ -4168,7 +4772,7 @@ async function maybeInterruptRunningTurnForQueuedMessage() {
   try {
     await apiFetch(`/api/turns/${encodeURIComponent(turnId)}/interrupt`, { method: 'POST' });
     await refreshCurrentSessionMetadata({ hydrateTimeline: true });
-    if (state.sessionId === sessionId && !state.pendingTurn && queuedMessagesForSession(sessionId).length > 0) {
+    if (state.sessionId === sessionId && !state.pendingTurn && pendingQueuedMessagesForSession(sessionId).length > 0) {
       void sendNextQueuedMessage(sessionId);
     }
   } catch (error) {
@@ -4314,6 +4918,8 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false, viewport
     return null;
   }
   const sessionId = state.sessionId;
+  const wasPendingTurn = state.pendingTurn;
+  const hadQueuedMessages = pendingQueuedMessagesForSession(sessionId).length > 0;
   const snapshot = viewportSnapshot || (isDesktopWorkspaceView() ? latestTimelineViewportSnapshot() : captureTimelineViewport());
   try {
     const payload = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
@@ -4337,6 +4943,9 @@ async function refreshCurrentSessionMetadata({ hydrateTimeline = false, viewport
           scrollTimelineToBottomIfFollowingLatest();
         }
         nextTimelineRestoreSnapshot = null;
+        if (hydrateTimeline && wasPendingTurn && hadQueuedMessages && !state.pendingTurn) {
+          void sendNextQueuedMessage(sessionId);
+        }
       } else {
         renderSessionListAfterBackgroundUpdate();
       }
@@ -4393,9 +5002,6 @@ async function refreshSessionsList({
     }
     state.sessions = [...sessions];
     state.sessionsScope = normalizedScope;
-    if (state.favoriteSortMode) {
-      syncFavoriteSortDraft();
-    }
     syncCurrentSessionFromList();
     return state.sessions;
   } finally {
@@ -4446,6 +5052,42 @@ async function refreshProjectsList({ renderAfter = true } = {}) {
     if (renderAfter) {
       render();
     }
+  }
+}
+
+async function toggleProjectFavorite(projectId) {
+  const normalizedId = String(projectId || '').trim();
+  if (!normalizedId) {
+    return null;
+  }
+  const existing = state.projects.find((project) => project.id === normalizedId);
+  if (!existing) {
+    return null;
+  }
+  const previousFavorite = Boolean(existing.favorite);
+  const nextFavorite = !previousFavorite;
+  state.projects = state.projects.map((project) => (
+    project.id === normalizedId ? { ...project, favorite: nextFavorite } : project
+  ));
+  render();
+  try {
+    const payload = await apiFetch(`/api/projects/${encodeURIComponent(normalizedId)}/favorite`, {
+      method: 'PATCH',
+      body: { favorite: nextFavorite },
+    });
+    const savedFavorite = typeof payload?.favorite === 'boolean' ? payload.favorite : nextFavorite;
+    state.projects = state.projects.map((project) => (
+      project.id === normalizedId ? { ...project, favorite: savedFavorite } : project
+    ));
+    return state.projects.find((project) => project.id === normalizedId) || null;
+  } catch (error) {
+    state.projects = state.projects.map((project) => (
+      project.id === normalizedId ? { ...project, favorite: previousFavorite } : project
+    ));
+    handleApiError(error);
+    return null;
+  } finally {
+    render();
   }
 }
 
@@ -4558,7 +5200,6 @@ async function onAdminProjectSubmit(event) {
   const project = adminEditingProject();
   await saveAdminProject({
     id: String(project?.id || '').trim(),
-    internalName: String(form.get('internalName') || '').trim(),
     cwd: String(form.get('cwd') || '').trim(),
     displayName: String(form.get('displayName') || '').trim(),
     enabled: form.get('enabled') === 'on',
@@ -4610,7 +5251,6 @@ async function saveAdminProject(project) {
       method: 'POST',
       body: {
         id,
-        internalName: String(project.internalName || '').trim(),
         cwd,
         displayName: String(project.displayName || '').trim(),
         enabled: project.enabled !== false,
@@ -4904,10 +5544,6 @@ function closeReportViewer() {
 
 async function setSessionSortMode(mode) {
   const nextMode = mode === 'time' ? 'time' : 'favorites';
-  if (nextMode !== 'favorites') {
-    state.favoriteSortMode = false;
-    state.favoriteSortDraft = [];
-  }
   state.sortMode = nextMode;
   const scope = currentSessionScope();
   const cached = state.sessionsByScope[scope] || [];
@@ -5023,7 +5659,11 @@ function hydrateCurrentTimelineFromSession(session) {
   const currentText = timelineMessageSignature(state.timeline);
   const visibleHydrated = currentVisibleHydratedTimelineItems(fullHistory);
   const hydratedText = timelineMessageSignature(visibleHydrated);
-  if (!hydratedText || hydratedText === currentText || currentText.includes(hydratedText)) {
+  const currentDisplay = timelineMessageDisplaySignature(state.timeline);
+  const hydratedDisplay = timelineMessageDisplaySignature(visibleHydrated);
+  const sameMessageText = hydratedText === currentText;
+  const sameMessageDisplay = sameMessageText && hydratedDisplay === currentDisplay;
+  if (!hydratedText || sameMessageDisplay || (!sameMessageText && currentText.includes(hydratedText))) {
     return false;
   }
   state.timeline = visibleHydrated.map((item) => ({ ...item }));
@@ -5037,6 +5677,30 @@ function timelineMessageSignature(items) {
   return (Array.isArray(items) ? items : [])
     .filter((item) => item?.kind === 'message')
     .map((item) => `${item.role}:${item.text || ''}`)
+    .join('\n');
+}
+
+function timelineMessageDisplaySignature(items) {
+  return (Array.isArray(items) ? items : [])
+    .filter((item) => item?.kind === 'message')
+    .map((item) => {
+      const attachments = normalizeTimelineAttachments(item.attachments)
+        .map((attachment) => [
+          attachment.kind || '',
+          attachment.localPath || '',
+          attachment.fileName || '',
+          attachment.mimeType || '',
+          typeof attachment.sizeBytes === 'number' ? attachment.sizeBytes : '',
+        ].join(':'))
+        .join('|');
+      return [
+        item.role || '',
+        item.text || '',
+        item.meta || '',
+        item.severity || '',
+        attachments,
+      ].join('\u0000');
+    })
     .join('\n');
 }
 
@@ -5293,7 +5957,7 @@ function normalizeSessions(payload) {
       const normalized = {
         ...session,
         cwd: typeof session.cwd === 'string' ? session.cwd : '',
-        projectName: typeof session.projectName === 'string' ? session.projectName : '',
+        projectName: typeof session.projectName === 'string' ? cwdLeafName(session.projectName) : '',
         title: typeof session.title === 'string' ? session.title : '',
         preview: typeof session.preview === 'string' ? session.preview : '',
         firstUserInput: typeof session.firstUserInput === 'string' ? session.firstUserInput : '',
@@ -5306,7 +5970,7 @@ function normalizeSessions(payload) {
         normalized.projectId = session.projectId;
       }
       if (typeof session.projectDisplayName === 'string') {
-        normalized.projectDisplayName = session.projectDisplayName;
+        normalized.projectDisplayName = cwdLeafName(session.projectDisplayName);
       }
       if (typeof session.ownerUserId === 'string') {
         normalized.ownerUserId = session.ownerUserId;
@@ -5328,9 +5992,10 @@ function normalizeProjects(payload) {
   return (Array.isArray(payload?.items) ? payload.items : [])
     .map((project) => {
       const id = typeof project?.id === 'string' ? project.id.trim() : '';
+      const cwd = typeof project?.cwd === 'string' ? project.cwd.trim() : '';
       const displayName = typeof project?.displayName === 'string' && project.displayName.trim()
-        ? project.displayName.trim()
-        : id;
+        ? cwdLeafName(project.displayName.trim())
+        : cwdLeafName(cwd) || id;
       if (!id || !displayName) {
         return null;
       }
@@ -5338,6 +6003,7 @@ function normalizeProjects(payload) {
         ...project,
         id,
         displayName,
+        favorite: project?.favorite === true,
       };
     })
     .filter(Boolean);
@@ -5385,9 +6051,6 @@ function upsertSession(session) {
   }
   if (state.sessionId === next.id) {
     state.currentSession = next;
-  }
-  if (state.favoriteSortMode) {
-    syncFavoriteSortDraft();
   }
 }
 
@@ -5683,7 +6346,7 @@ function fullHydratedTimelineFromSession(session) {
       if (!role || !text) {
         continue;
       }
-      items.push({
+      const normalized = normalizeSessionTimelineItem({
         id: `history_${turn.id}_${items.length}`,
         kind: 'message',
         role,
@@ -5691,6 +6354,9 @@ function fullHydratedTimelineFromSession(session) {
         meta: 'history',
         text,
       });
+      if (normalized) {
+        items.push(normalized);
+      }
     }
     if (isFailureTurnStatus(turn?.status)) {
       const text = runtimeTurnErrorMessage(turn);
@@ -5732,17 +6398,18 @@ function normalizeSessionTimelineItem(item) {
   const role = item.role === 'user' || item.role === 'assistant' || item.role === 'system'
     ? item.role
     : null;
-  const text = typeof item.text === 'string' ? item.text.trim() : '';
-  if (!role || !text) {
+  const display = normalizeTimelineMessageDisplay(role, item.text, item.attachments);
+  if (!role || (!display.text && !display.attachments.length)) {
     return null;
   }
   return {
-    id: typeof item.id === 'string' && item.id ? item.id : `timeline_${role}_${text.slice(0, 24)}`,
+    id: typeof item.id === 'string' && item.id ? item.id : `timeline_${role}_${display.text.slice(0, 24)}`,
     kind: 'message',
     role,
     label: typeof item.label === 'string' && item.label ? item.label : role === 'user' ? 'You' : role === 'assistant' ? 'Assistant' : 'System',
     meta: typeof item.meta === 'string' ? item.meta : '',
-    text,
+    text: display.text,
+    ...(display.attachments.length ? { attachments: display.attachments } : {}),
     severity: item.severity === 'error' ? 'error' : undefined,
   };
 }
@@ -5900,87 +6567,321 @@ function sortedSessions() {
 }
 
 function filteredSessions() {
+  const sessions = projectScopedSessions();
   if (state.sortMode === 'favorites') {
-    return state.sessions.filter(isFavoriteSession);
+    return sessions.filter(isFavoriteSession);
   }
-  return [...state.sessions];
+  return sessions;
 }
 
 function sortedFavoriteSessions() {
-  const favorites = state.sessions
+  return projectScopedSessions()
     .filter(isFavoriteSession)
-    .sort((left, right) => favoriteOrderForSession(left) - favoriteOrderForSession(right)
-      || lastInputAtForSession(right) - lastInputAtForSession(left));
-  if (!state.favoriteSortMode) {
-    return favorites;
+    .sort((left, right) => lastInputAtForSession(right) - lastInputAtForSession(left));
+}
+
+function projectScopedSessions() {
+  const selectedKey = String(state.selectedProjectKey || '').trim();
+  if (!selectedKey) {
+    return [...state.sessions];
   }
-  const byId = new Map(favorites.map((session) => [session.id, session]));
-  const ordered = [];
-  const seen = new Set();
-  for (const id of state.favoriteSortDraft) {
-    const session = byId.get(id);
-    if (!session || seen.has(id)) {
+  return state.sessions.filter((session) => sessionProjectScope(session).key === selectedKey);
+}
+
+function currentProjectScopeTitle() {
+  return String(state.selectedProjectLabel || '').trim() || 'All Sessions';
+}
+
+function workspaceProjects() {
+  const items = new Map();
+  for (const project of Array.isArray(state.projects) ? state.projects : []) {
+    const id = String(project?.id || '').trim();
+    if (!id) {
       continue;
     }
-    ordered.push(session);
-    seen.add(id);
+    items.set(id, {
+      key: id,
+      id,
+      label: projectVisibleName(project, id),
+      defaultCwd: typeof project?.cwd === 'string' ? project.cwd : '',
+      sessionCount: 0,
+      latestAt: 0,
+      canCreate: project?.canCreate !== false,
+      favorite: project?.favorite === true,
+      source: 'managed',
+    });
   }
-  for (const session of favorites) {
-    if (!seen.has(session.id)) {
-      ordered.push(session);
+  for (const session of state.sessions) {
+    const scope = sessionProjectScope(session);
+    if (!scope.key) {
+      continue;
     }
-  }
-  return ordered;
-}
-
-function favoriteOrderForSession(session, fallback = Number.MAX_SAFE_INTEGER) {
-  const value = session?.favoriteOrder ?? session?.settings?.favoriteOrder ?? session?.settings?.metadata?.favoriteOrder;
-  return Number.isFinite(value) ? Number(value) : fallback;
-}
-
-function nextFavoriteOrder() {
-  const orders = state.sessions
-    .filter(isFavoriteSession)
-    .map((session, index) => favoriteOrderForSession(session, index + 1))
-    .filter(Number.isFinite);
-  return orders.length ? Math.max(...orders) + 1 : 1;
-}
-
-function favoriteSortDraftIds() {
-  syncFavoriteSortDraft();
-  return [...state.favoriteSortDraft];
-}
-
-function syncFavoriteSortDraft() {
-  if (!state.favoriteSortMode) {
-    return;
-  }
-  const favorites = state.sessions
-    .filter(isFavoriteSession)
-    .sort((left, right) => favoriteOrderForSession(left) - favoriteOrderForSession(right)
-      || lastInputAtForSession(right) - lastInputAtForSession(left));
-  const favoriteIds = new Set(favorites.map((session) => session.id));
-  const draft = state.favoriteSortDraft.filter((id) => favoriteIds.has(id));
-  for (const session of favorites) {
-    if (!draft.includes(session.id)) {
-      draft.push(session.id);
+    const existing = items.get(scope.key) || {
+      key: scope.key,
+      id: scope.id,
+      label: scope.label,
+      defaultCwd: scope.defaultCwd,
+      sessionCount: 0,
+      latestAt: 0,
+      canCreate: Boolean(scope.id),
+      favorite: false,
+      source: scope.id ? 'managed' : 'legacy',
+    };
+    existing.label = existing.label || scope.label;
+    existing.defaultCwd = existing.defaultCwd || scope.defaultCwd;
+    existing.sessionCount += 1;
+    existing.latestAt = Math.max(existing.latestAt || 0, scope.latestAt || 0);
+    if (!existing.id && scope.id) {
+      existing.id = scope.id;
     }
+    items.set(scope.key, existing);
   }
-  state.favoriteSortDraft = draft;
+  return [...items.values()].sort((left, right) => {
+    if (Boolean(right.favorite) !== Boolean(left.favorite)) {
+      return Number(Boolean(right.favorite)) - Number(Boolean(left.favorite));
+    }
+    if (right.sessionCount !== left.sessionCount) {
+      return right.sessionCount - left.sessionCount;
+    }
+    if ((right.latestAt || 0) !== (left.latestAt || 0)) {
+      return (right.latestAt || 0) - (left.latestAt || 0);
+    }
+    return String(left.label || '').localeCompare(String(right.label || ''));
+  });
 }
 
-function applyFavoriteOrderLocally(sessionId, favoriteOrder) {
-  const session = state.sessions.find((item) => item.id === sessionId);
-  if (!session) {
-    return;
+function currentSelectedProject() {
+  const selectedKey = String(state.selectedProjectKey || '').trim();
+  if (!selectedKey) {
+    return {
+      key: '',
+      id: '',
+      label: 'All Sessions',
+      defaultCwd: '',
+      sessionCount: state.sessions.length,
+      latestAt: 0,
+      canCreate: true,
+      favorite: false,
+      source: 'all',
+    };
   }
-  session.favorite = true;
-  session.favoriteOrder = favoriteOrder;
-  session.settings = {
-    ...(session.settings || {}),
-    favorite: true,
-    favoriteOrder,
+  const match = workspaceProjects().find((project) => project.key === selectedKey);
+  if (match) {
+    if (state.selectedProjectId !== match.id || state.selectedProjectLabel !== match.label) {
+      state.selectedProjectId = match.id || '';
+      state.selectedProjectLabel = match.label || '';
+    }
+    return match;
+  }
+  state.selectedProjectKey = '';
+  state.selectedProjectId = '';
+  state.selectedProjectLabel = '';
+  return currentSelectedProject();
+}
+
+function sessionProjectScope(session) {
+  const projectId = String(session?.projectId || '').trim();
+  const displayName = cwdLeafName(session?.projectDisplayName || '');
+  const cwdName = cwdLeafName(session?.cwd || '');
+  const projectName = cwdLeafName(session?.projectName || '');
+  const legacyLabel = displayName || cwdName || projectName || String(session?.title || '').trim() || 'Untitled Project';
+  if (projectId) {
+    return {
+      key: projectId,
+      id: projectId,
+      label: displayName || legacyLabel || projectId,
+      defaultCwd: typeof session?.cwd === 'string' ? session.cwd : '',
+      latestAt: lastInputAtForSession(session),
+    };
+  }
+  const cwd = String(session?.cwd || '').trim();
+  const key = cwd ? `cwd:${cwd}` : `legacy:${legacyLabel.toLowerCase()}`;
+  return {
+    key,
+    id: '',
+    label: legacyLabel,
+    defaultCwd: cwd,
+    latestAt: lastInputAtForSession(session),
   };
+}
+
+function renderWorkspaceProjectList() {
+  const currentKey = String(currentSelectedProject().key || '');
+  const entries = [
+    {
+      key: '',
+      id: '',
+      label: 'All Sessions',
+      sessionCount: state.sessions.length,
+      favorite: false,
+      source: 'all',
+    },
+    ...workspaceProjects(),
+  ];
+  return entries.map((project) => {
+    const isActive = project.key === currentKey;
+    const count = project.sessionCount ? String(project.sessionCount) : project.source === 'all' ? String(state.sessions.length) : '0';
+    const canFavorite = project.source !== 'all' && Boolean(project.id);
+    const favorite = Boolean(project.favorite);
+    const favoriteLabel = `${favorite ? 'Unfavorite' : 'Favorite'} ${project.label}`;
+    return `
+    <div class="project-rail-item${canFavorite ? ' has-favorite-control' : ''}${isActive ? ' is-active' : ''}${favorite ? ' is-favorite' : ''}">
+      <button class="project-rail-select-button" type="button" data-project-scope-key="${escapeAttribute(project.key)}" aria-pressed="${String(isActive)}">
+        <span class="project-rail-item-main">${escapeHtml(project.label)}</span>
+        <span class="project-rail-item-meta">${escapeHtml(count)}</span>
+      </button>
+      ${canFavorite ? `<button class="project-rail-favorite-button${favorite ? ' is-favorite' : ''}" type="button" data-project-favorite-id="${escapeAttribute(project.id)}" aria-pressed="${String(favorite)}" aria-label="${escapeAttribute(favoriteLabel)}" title="${escapeAttribute(favoriteLabel)}">${favorite ? '★' : '☆'}</button>` : ''}
+    </div>
+  `;
+  }).join('');
+}
+
+function renderWorkspaceRailActions({ mobile = false } = {}) {
+  const showAdmin = isAdminPrincipal();
+  const settingsActive = state.view === 'settings' || state.desktopSettingsOpen;
+  const reportsActive = state.view === 'reports' || state.desktopOverlay === 'reports';
+  const newActive = state.view === 'new';
+  if (mobile) {
+    return `
+    <button class="project-rail-action${reportsActive ? ' is-active' : ''}" type="button" id="open-reports-button">Reports</button>
+    <button class="project-rail-action${newActive ? ' is-active' : ''}" type="button" id="open-new-session-button">New</button>
+    <button class="project-rail-action${settingsActive ? ' is-active' : ''}" type="button" id="open-app-settings-button">Setting</button>
+    ${showAdmin ? '<button class="project-rail-action project-rail-admin-action" type="button" id="open-admin-console-button">Admin Console</button>' : ''}
+  `;
+  }
+  const sessionsActive = !settingsActive && state.view !== 'new';
+  return `
+    <button class="project-rail-action${sessionsActive ? ' is-active' : ''}" type="button" id="rail-show-sessions-button">Sessions</button>
+    <button class="project-rail-action${settingsActive ? ' is-active' : ''}" type="button" id="open-app-settings-button">Setting</button>
+    ${showAdmin ? '<button class="project-rail-action project-rail-admin-action" type="button" id="open-admin-console-button">Admin Console</button>' : ''}
+  `;
+}
+
+function renderMobileProjectDrawer() {
+  if (isDesktopLayout()) {
+    return '';
+  }
+  return `
+    <div class="mobile-drawer-backdrop${state.mobileSidebarOpen ? ' is-open' : ''}" id="mobile-drawer-backdrop">
+      <aside class="mobile-project-drawer${state.mobileSidebarOpen ? ' is-open' : ''}" aria-label="Projects">
+        <header class="project-rail-header mobile-project-drawer-header">
+          <div class="project-rail-brand">${escapeHtml(state.siteTitle)}</div>
+        </header>
+        <nav class="project-rail-list">
+          ${renderWorkspaceProjectList()}
+        </nav>
+        <div class="project-rail-footer">
+          ${renderWorkspaceRailActions({ mobile: true })}
+        </div>
+      </aside>
+    </div>
+  `;
+}
+
+function seedNewSessionTargetFromSelection() {
+  if (!state.selectedProjectKey && state.selectedProjectId) {
+    applySelectedProjectById(state.selectedProjectId);
+  }
+  const selectedProject = currentSelectedProject();
+  if (isMultiUserMode()) {
+    initializeNewProjectSelection();
+    if (selectedProject.id && availableProjects().some((project) => project.id === selectedProject.id)) {
+      state.newProjectId = selectedProject.id;
+    }
+    state.newCwd = '';
+    return;
+  }
+  if (selectedProject.defaultCwd) {
+    state.newCwd = selectedProject.defaultCwd;
+    return;
+  }
+  state.newCwd = hasProjectChoices() ? '' : state.cwd || '';
+}
+
+function applySelectedProjectById(projectId) {
+  const normalizedId = String(projectId || '').trim();
+  if (!normalizedId) {
+    state.selectedProjectKey = '';
+    state.selectedProjectId = '';
+    state.selectedProjectLabel = '';
+    return;
+  }
+  const match = workspaceProjects().find((project) => project.id === normalizedId || project.key === normalizedId);
+  if (match) {
+    state.selectedProjectKey = match.key;
+    state.selectedProjectId = match.id || normalizedId;
+    state.selectedProjectLabel = match.label || normalizedId;
+    return;
+  }
+  const fallback = (Array.isArray(state.projects) ? state.projects : []).find((project) => String(project?.id || '').trim() === normalizedId) || null;
+  state.selectedProjectKey = normalizedId;
+  state.selectedProjectId = normalizedId;
+  state.selectedProjectLabel = projectVisibleName(fallback, normalizedId);
+}
+
+function applySelectedLegacyProjectFromCwd(cwd) {
+  const normalizedCwd = String(cwd || '').trim();
+  if (!normalizedCwd) {
+    return;
+  }
+  state.selectedProjectKey = `cwd:${normalizedCwd}`;
+  state.selectedProjectId = '';
+  state.selectedProjectLabel = cwdLeafName(normalizedCwd) || normalizedCwd;
+}
+
+function resetWorkspaceSessionContext() {
+  state.sessionId = null;
+  state.currentSession = null;
+  state.draftSessionActive = false;
+  state.cwd = '';
+  state.prompt = '';
+  state.composerAttachments = [];
+  state.timeline = [];
+  state.sessionHistoryItems = [];
+  state.sessionHistoryStartIndex = 0;
+  state.turnId = null;
+  state.pendingTurn = false;
+  state.settingsOpen = false;
+  state.composerExpanded = false;
+  resetTurnState();
+}
+
+async function selectProjectScope(projectKey) {
+  const normalizedKey = String(projectKey || '').trim();
+  if (!normalizedKey) {
+    state.selectedProjectKey = '';
+    state.selectedProjectId = '';
+    state.selectedProjectLabel = '';
+    state.mobileSidebarOpen = false;
+    if (!isDesktopLayout()) {
+      showSessionList();
+      return null;
+    }
+    state.view = 'sessions';
+    render();
+    return null;
+  }
+  const selectedProject = workspaceProjects().find((project) => project.key === normalizedKey) || null;
+  state.selectedProjectKey = normalizedKey;
+  state.selectedProjectId = selectedProject?.id || '';
+  state.selectedProjectLabel = selectedProject?.label || '';
+  state.mobileSidebarOpen = false;
+  state.archiveConfirmSessionId = null;
+  state.desktopSettingsOpen = false;
+  state.desktopOverlay = null;
+  if (!isDesktopLayout()) {
+    showSessionList();
+    return null;
+  }
+  const [latestSession] = projectScopedSessions()
+    .sort((left, right) => lastInputAtForSession(right) - lastInputAtForSession(left));
+  if (latestSession) {
+    await selectSession(latestSession.id);
+    return latestSession;
+  }
+  resetWorkspaceSessionContext();
+  openNewSessionPage();
+  return null;
 }
 
 function uniqueSessionPaths() {
@@ -6000,7 +6901,7 @@ function uniqueSessionPaths() {
 
 function availableProjects() {
   return Array.isArray(state.projects)
-    ? state.projects.filter((project) => project?.id && project?.displayName && project.canCreate !== false)
+    ? state.projects.filter((project) => project?.id && project.canCreate !== false)
     : [];
 }
 
@@ -6083,20 +6984,29 @@ function adminUserProjectIds(user) {
     : [];
 }
 
-function adminProjectVisibleName(project) {
-  const displayName = String(project?.displayName || '').trim();
+function projectVisibleName(project, fallback = '') {
+  const displayName = cwdLeafName(String(project?.displayName || '').trim());
   if (displayName) {
     return displayName;
   }
-  const internalName = String(project?.internalName || '').trim();
-  if (internalName) {
-    return internalName;
-  }
   const cwd = String(project?.cwd || '').trim();
-  if (cwd) {
-    return cwd;
+  const cwdName = cwdLeafName(cwd);
+  if (cwdName) {
+    return cwdName;
+  }
+  const normalizedFallback = String(fallback || '').trim();
+  if (normalizedFallback) {
+    return normalizedFallback;
+  }
+  const id = String(project?.id || '').trim();
+  if (id) {
+    return id;
   }
   return 'Unknown project';
+}
+
+function adminProjectVisibleName(project) {
+  return projectVisibleName(project);
 }
 
 function adminProjectNameById(projectId, fallback = '') {
@@ -6163,7 +7073,11 @@ function normalizeAdminPage(page) {
 }
 
 function projectNameForSession(session, fallbackCwd = '') {
-  return session?.projectDisplayName || cwdLeafName(session?.cwd || fallbackCwd) || session?.projectName || projectNameFromCwd(session?.cwd || fallbackCwd) || session?.title || 'New Session';
+  return cwdLeafName(session?.projectDisplayName || '')
+    || cwdLeafName(session?.cwd || fallbackCwd)
+    || cwdLeafName(session?.projectName || '')
+    || String(session?.title || '').trim()
+    || 'New Session';
 }
 
 function isFavoriteSession(session) {
@@ -6359,11 +7273,7 @@ function slugifyReportKey(value) {
 }
 
 function projectNameFromCwd(cwd) {
-  const parts = String(cwd || '').split(/[\\/]+/u).filter(Boolean);
-  if (!parts.length) {
-    return '';
-  }
-  return parts.slice(-2).join('/');
+  return cwdLeafName(cwd);
 }
 
 function cwdLeafName(cwd) {
@@ -6518,6 +7428,20 @@ function applyTheme(theme, options = {}) {
   if (options.persist !== false) {
     localStorage.setItem(THEME_KEY, nextTheme);
   }
+}
+
+function applySiteTitle(title, options = {}) {
+  const nextTitle = normalizeSiteTitle(title);
+  state.siteTitle = nextTitle;
+  document.title = nextTitle;
+  if (options.persist !== false) {
+    localStorage.setItem(SITE_TITLE_KEY, nextTitle);
+  }
+}
+
+function normalizeSiteTitle(title) {
+  const value = String(title || '').trim();
+  return value || DEFAULT_SITE_TITLE;
 }
 
 function normalizeTheme(theme) {
@@ -6840,6 +7764,47 @@ function onEdgeSwipeEnd() {
 
 function resetEdgeSwipeNavigation() {
   edgeSwipeStart = null;
+}
+
+function setupMobileOrientationLock() {
+  requestMobilePortraitLock();
+  document.addEventListener('visibilitychange', requestMobilePortraitLock);
+  document.addEventListener('pointerdown', requestMobilePortraitLock, { passive: true });
+  window.addEventListener('focus', requestMobilePortraitLock);
+  window.addEventListener('orientationchange', requestMobilePortraitLock);
+}
+
+function requestMobilePortraitLock() {
+  if (!shouldRequestMobilePortraitLock()) {
+    return;
+  }
+  const orientation = globalThis.screen?.orientation || window.screen?.orientation;
+  if (!orientation || typeof orientation.lock !== 'function') {
+    return;
+  }
+  try {
+    const result = orientation.lock('portrait-primary');
+    if (result && typeof result.catch === 'function') {
+      result.catch(() => {});
+    }
+  } catch (_error) {
+  }
+}
+
+function shouldRequestMobilePortraitLock() {
+  if (isDesktopLayout()) {
+    return false;
+  }
+  if (document.visibilityState === 'hidden') {
+    return false;
+  }
+  const hasCoarsePointer = typeof window?.matchMedia === 'function'
+    ? window.matchMedia('(hover: none) and (pointer: coarse)').matches
+    : false;
+  const hasTouch = Number(navigator?.maxTouchPoints || 0) > 0;
+  const narrowViewport = typeof window?.innerWidth !== 'number'
+    || window.innerWidth < DESKTOP_WORKSPACE_MIN_WIDTH;
+  return hasCoarsePointer || hasTouch || narrowViewport;
 }
 
 function onVisibilityChange() {

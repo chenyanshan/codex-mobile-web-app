@@ -362,8 +362,8 @@ test('admin projects list exposes every enabled project as creatable', async () 
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
       items: [
-        { id: 'project_allowed', displayName: 'Allowed Project', canCreate: true },
-        { id: 'project_denied', displayName: 'Other Project', canCreate: true },
+        { id: 'project_allowed', displayName: 'Allowed Project', canCreate: true, favorite: false },
+        { id: 'project_denied', displayName: 'Other Project', canCreate: true, favorite: false },
       ],
     });
   } finally {
@@ -439,7 +439,7 @@ test('multi-user role-assigned projects are creatable without a separate user to
     });
     assert.equal(projects.status, 200);
     assert.deepEqual(await projects.json(), {
-      items: [{ id: 'project_allowed', displayName: 'Allowed Project', canCreate: true }],
+      items: [{ id: 'project_allowed', displayName: 'Allowed Project', canCreate: true, favorite: false }],
     });
 
     const create = await fetch(`${server.baseUrl}/api/sessions`, {
@@ -805,18 +805,17 @@ test('admin settings and project management APIs require admin principal', async
       headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
       body: JSON.stringify({
         id: 'project_new',
-        internalName: 'new-secret',
         cwd: '/Users/admin/new-secret',
-        displayName: 'New Project',
+        displayName: '',
       }),
     });
     assert.equal(create.status, 201);
     const payload = await create.json();
     assert.deepEqual(payload.project, {
       id: 'project_new',
-      internalName: 'new-secret',
+      internalName: 'project_new',
       cwd: '/Users/admin/new-secret',
-      displayName: 'New Project',
+      displayName: 'new-secret',
       enabled: true,
     });
   } finally {
@@ -912,7 +911,7 @@ test('admin can create users with direct project assignments that unlock project
     });
     assert.equal(projects.status, 200);
     assert.deepEqual(await projects.json(), {
-      items: [{ id: 'project_allowed', displayName: 'Allowed Project', canCreate: true }],
+      items: [{ id: 'project_allowed', displayName: 'Allowed Project', canCreate: true, favorite: false }],
     });
 
     const create = await fetch(`${server.baseUrl}/api/sessions`, {
@@ -922,6 +921,82 @@ test('admin can create users with direct project assignments that unlock project
     });
     assert.equal(create.status, 201);
     assert.deepEqual(runtime.calls, ['create:/Users/alice/secret-repo']);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('project favorites are stored per user and returned with projects', async () => {
+  const identityStore = await createIdentityStore();
+  const runtime = runtimeStub();
+  const server = createCodexWebServer({
+    auth: authFor({
+      alice: { userId: 'user_alice', username: 'alice', roleIds: ['role_user'], isAdmin: false, mode: 'multi' },
+      admin: { userId: 'user_admin', username: 'admin', roleIds: ['role_admin'], isAdmin: true, mode: 'multi' },
+    }),
+    identityStore,
+    runtime: runtime as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const favorite = await fetch(`${server.baseUrl}/api/projects/project_allowed/favorite`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer alice', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ favorite: true }),
+    });
+    assert.equal(favorite.status, 200);
+    assert.deepEqual(await favorite.json(), { projectId: 'project_allowed', favorite: true });
+
+    const aliceProjects = await fetch(`${server.baseUrl}/api/projects`, {
+      headers: { Authorization: 'Bearer alice' },
+    });
+    assert.equal(aliceProjects.status, 200);
+    assert.deepEqual(await aliceProjects.json(), {
+      items: [{ id: 'project_allowed', displayName: 'Allowed Project', canCreate: true, favorite: true }],
+    });
+
+    const adminProjects = await fetch(`${server.baseUrl}/api/projects`, {
+      headers: { Authorization: 'Bearer admin' },
+    });
+    assert.equal(adminProjects.status, 200);
+    assert.deepEqual(await adminProjects.json(), {
+      items: [
+        { id: 'project_allowed', displayName: 'Allowed Project', canCreate: true, favorite: false },
+        { id: 'project_denied', displayName: 'Other Project', canCreate: true, favorite: false },
+      ],
+    });
+
+    const state = await identityStore.readState();
+    assert.deepEqual(state.users.find((user) => user.id === 'user_alice')?.favoriteProjectIds, ['project_allowed']);
+    assert.deepEqual(state.users.find((user) => user.id === 'user_admin')?.favoriteProjectIds, []);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('project favorites reject unreadable projects', async () => {
+  const identityStore = await createIdentityStore();
+  const runtime = runtimeStub();
+  const server = createCodexWebServer({
+    auth: authFor({
+      alice: { userId: 'user_alice', username: 'alice', roleIds: ['role_user'], isAdmin: false, mode: 'multi' },
+    }),
+    identityStore,
+    runtime: runtime as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const favorite = await fetch(`${server.baseUrl}/api/projects/project_denied/favorite`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer alice', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ favorite: true }),
+    });
+    assert.equal(favorite.status, 404);
+
+    const state = await identityStore.readState();
+    assert.deepEqual(state.users.find((user) => user.id === 'user_alice')?.favoriteProjectIds, []);
   } finally {
     await server.stop();
   }

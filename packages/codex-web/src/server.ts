@@ -1,6 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import fs from 'node:fs/promises';
 import type { Socket } from 'node:net';
 import path from 'node:path';
 import { URL } from 'node:url';
@@ -89,6 +90,7 @@ interface CodexWebIdentityStoreLike {
     directProjectGrants?: any[];
   }): Promise<CodexWebUser>;
   deleteUser?(userId: string): Promise<void>;
+  updateUserProjectFavorite?(input: { userId: string; projectId: string; favorite: boolean }): Promise<CodexWebUser>;
   upsertSession(session: CodexWebAppSession): Promise<CodexWebAppSession>;
   deleteSession?(sessionId: string): Promise<void>;
   createShare?(args: { sessionId: string; createdByUserId: string }): ReturnType<FileIdentityStore['createShare']>;
@@ -97,6 +99,8 @@ interface CodexWebIdentityStoreLike {
 
 const SETUP_REQUIRED_MESSAGE = 'Password not configured. Run codex-web auth set-password.';
 const MAX_JSON_BODY_BYTES = 64 * 1024;
+const MAX_UPLOAD_BODY_BYTES = 32 * 1024 * 1024;
+const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 60_000;
 const LOGIN_RATE_LIMIT_PER_CLIENT = 10;
 const LOGIN_RATE_LIMIT_GLOBAL = 100;
@@ -104,6 +108,23 @@ const BUILD_ID_PLACEHOLDER = '__CODEX_WEB_BUILD_ID__';
 type StaticFileAsset = { body: string | Buffer; contentType: string };
 type StaticFileEntry = StaticFileAsset | (() => StaticFileAsset);
 type StaticFilesRecord = Record<string, StaticFileEntry>;
+
+interface ParsedUploadFile {
+  fileName: string;
+  mimeType: string | null;
+  data: Buffer;
+}
+
+interface StoredUploadAttachment {
+  id: string;
+  kind: 'image' | 'file';
+  fileName: string;
+  mimeType: string | null;
+  sizeBytes: number;
+  storage: 'project' | 'state';
+  localPath: string;
+  displayPath: string;
+}
 
 export function createCodexWebServer({
   auth,
@@ -360,6 +381,7 @@ async function handleRequest({
       identityStore,
       identityState,
       runtime,
+      config,
       registerSseCloser,
     });
     if (handled) {
@@ -525,6 +547,25 @@ async function handleRequest({
     return;
   }
 
+  const sessionAttachmentsMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/attachments$/u);
+  if (sessionAttachmentsMatch && method === 'POST') {
+    const sessionId = decodeURIComponent(sessionAttachmentsMatch[1]!);
+    const session = await runtime.readSession(sessionId);
+    if (!session) {
+      writeSessionNotFound(response);
+      return;
+    }
+    const items = await storeSessionAttachments({
+      request,
+      config,
+      principal,
+      projectCwd: normalizeOptionalString(session.cwd),
+      projectKey: `cwd-${stableIdHash(normalizeOptionalString(session.cwd) || sessionId, 16)}`,
+    });
+    writeJson(response, 201, { items });
+    return;
+  }
+
   const reportContentMatch = pathname.match(/^\/api\/reports\/([^/]+)\/content$/u);
   if (reportContentMatch && method === 'GET') {
     const reportId = decodeURIComponent(reportContentMatch[1]!);
@@ -577,10 +618,23 @@ async function handleRequest({
       writeJson(response, 400, { error: 'text is required' });
       return;
     }
+    const input = await normalizeStartTurnInput({
+      body,
+      config,
+      principal,
+      runtime,
+      sessionId,
+      projectCwd: '',
+      projectKey: '',
+    });
+    if (!input) {
+      writeSessionNotFound(response);
+      return;
+    }
     const turn = await startSessionTurn({
       runtime,
       sessionId,
-      input: body as unknown as StartTurnInput,
+      input,
       response,
     });
     if (!turn) {
@@ -808,6 +862,7 @@ async function handleMultiUserRequest({
   identityStore,
   identityState,
   runtime,
+  config,
   registerSseCloser,
 }: {
   request: IncomingMessage;
@@ -821,6 +876,7 @@ async function handleMultiUserRequest({
   identityStore: CodexWebIdentityStoreLike;
   identityState: CodexWebIdentityState;
   runtime: CodexWebRuntime;
+  config: CodexWebConfig;
   registerSseCloser: (close: () => void) => () => void;
 }): Promise<boolean> {
   if (pathname === '/api/auth/me' || pathname === '/api/auth/logout') {
@@ -828,6 +884,7 @@ async function handleMultiUserRequest({
   }
 
   if (pathname === '/api/projects' && method === 'GET') {
+    const favoriteProjectIds = favoriteProjectIdsForPrincipal(identityState, principal);
     const items = identityState.projects
       .filter((project) => (
         principal.isAdmin
@@ -835,10 +892,40 @@ async function handleMultiUserRequest({
       ))
       .map((project) => ({
         id: project.id,
-        displayName: project.displayName,
+        displayName: projectDisplayName(project, project.id),
         canCreate: principal.isAdmin ? true : canCreateProjectSession(identityState, principal, project.id),
+        favorite: favoriteProjectIds.has(project.id),
       }));
     writeJson(response, 200, { items });
+    return true;
+  }
+
+  const projectFavoriteMatch = pathname.match(/^\/api\/projects\/([^/]+)\/favorite$/u);
+  if (projectFavoriteMatch && method === 'PATCH') {
+    if (typeof identityStore.updateUserProjectFavorite !== 'function') {
+      writeJson(response, 501, { error: 'not_supported' });
+      return true;
+    }
+    const projectId = decodeURIComponent(projectFavoriteMatch[1]!);
+    const project = findProject(identityState, projectId);
+    if (
+      !project
+      || (!principal.isAdmin && (project.enabled === false || !canReadProject(identityState, principal, project.id)))
+    ) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    const body = await readJsonBody(request);
+    if (typeof body.favorite !== 'boolean') {
+      writeJson(response, 400, { error: 'favorite must be a boolean' });
+      return true;
+    }
+    await identityStore.updateUserProjectFavorite({
+      userId: principal.userId,
+      projectId: project.id,
+      favorite: body.favorite,
+    });
+    writeJson(response, 200, { projectId: project.id, favorite: body.favorite });
     return true;
   }
 
@@ -1057,16 +1144,60 @@ async function handleMultiUserRequest({
       writeJson(response, 400, { error: 'text is required' });
       return true;
     }
+    const runtimeSession = hasRequestAttachments(body)
+      ? await runtime.readSession(resolved.appSession.codexThreadId)
+      : null;
+    const projectCwd = normalizeOptionalString(resolved.project?.cwd) || normalizeOptionalString(runtimeSession?.cwd);
+    const input = await normalizeStartTurnInput({
+      body,
+      config,
+      principal,
+      runtime,
+      sessionId: resolved.appSession.codexThreadId,
+      projectCwd,
+      projectKey: safePathSegment(resolved.project?.id || resolved.appSession.projectId || `cwd-${stableIdHash(projectCwd, 16)}`),
+    });
+    if (!input) {
+      writeSessionNotFound(response);
+      return true;
+    }
     const turn = await startSessionTurn({
       runtime,
       sessionId: resolved.appSession.codexThreadId,
-      input: body as unknown as StartTurnInput,
+      input,
       response,
     });
     if (!turn) {
       return true;
     }
     writeJson(response, 202, turn);
+    return true;
+  }
+
+  const sessionAttachmentsMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/attachments$/u);
+  if (sessionAttachmentsMatch && method === 'POST') {
+    const stateForSession = await stateForSessionAccess({
+      identityStore,
+      identityState,
+      runtime,
+      principal,
+      sessionId: decodeURIComponent(sessionAttachmentsMatch[1]!),
+    });
+    const resolved = resolveWritableAppSession(stateForSession, principal, decodeURIComponent(sessionAttachmentsMatch[1]!));
+    if (!resolved) {
+      writeSessionNotFound(response);
+      return true;
+    }
+    const runtimeSession = await runtime.readSession(resolved.appSession.codexThreadId);
+    const projectCwd = normalizeOptionalString(resolved.project?.cwd) || normalizeOptionalString(runtimeSession?.cwd);
+    const items = await storeSessionAttachments({
+      request,
+      config,
+      principal,
+      projectCwd,
+      projectKey: safePathSegment(resolved.project?.id || resolved.appSession.projectId || `cwd-${stableIdHash(projectCwd, 16)}`),
+    });
+    writeJson(response, 201, { items });
     return true;
   }
 
@@ -1323,6 +1454,7 @@ function presentAdminUser(user: CodexWebUser): Record<string, unknown> {
     roleId,
     roleIds: user.roleIds,
     directProjectGrants: user.directProjectGrants,
+    favoriteProjectIds: user.favoriteProjectIds,
   };
 }
 
@@ -1426,6 +1558,14 @@ function findProject(state: CodexWebIdentityState, projectId: string): CodexWebP
   return state.projects.find((project) => project.id === projectId) ?? null;
 }
 
+function favoriteProjectIdsForPrincipal(
+  state: CodexWebIdentityState,
+  principal: CodexWebPrincipal,
+): Set<string> {
+  const user = state.users.find((item) => item.id === principal.userId && item.enabled !== false);
+  return new Set(user?.favoriteProjectIds ?? []);
+}
+
 async function stateForSessionAccess({
   identityStore,
   identityState,
@@ -1515,7 +1655,7 @@ function adminOwnerUserId(state: CodexWebIdentityState, principal: CodexWebPrinc
 
 function legacyProjectForRuntimeSession(runtimeSession: CodexWebSession): CodexWebProject {
   const cwd = normalizeOptionalString(runtimeSession.cwd) || '__codex_web_legacy_unknown_cwd__';
-  const displayName = normalizeOptionalString(runtimeSession.projectName) || path.basename(cwd) || 'Legacy Session';
+  const displayName = cwdLeafName(cwd) || normalizeOptionalString(runtimeSession.projectName) || 'Legacy Session';
   return {
     id: `project_admin_legacy_${stableIdHash(cwd, 20)}`,
     internalName: displayName,
@@ -1553,7 +1693,7 @@ function presentAppSessionAudit(
   return {
     id: appSession.id,
     projectId: appSession.projectId,
-    projectDisplayName: project?.displayName ?? appSession.projectId,
+    projectDisplayName: projectDisplayName(project, appSession.projectId),
     ownerUserId: appSession.ownerUserId,
     codexThreadId: appSession.codexThreadId,
     createdAt: appSession.createdAt,
@@ -1577,10 +1717,23 @@ function presentSessionForUser({
     ...rest,
     id: appSession.id,
     projectId: appSession.projectId,
-    projectDisplayName: project?.displayName ?? appSession.projectId,
+    projectDisplayName: projectDisplayName(project, appSession.projectId),
     ownerUserId: appSession.ownerUserId,
     ...(includeCwd ? { cwd, projectName } : {}),
   };
+}
+
+function projectDisplayName(project: CodexWebProject | null | undefined, fallback: string): string {
+  const displayName = cwdLeafName(project?.displayName);
+  if (displayName) {
+    return displayName;
+  }
+  return cwdLeafName(project?.cwd) || normalizeOptionalString(fallback) || normalizeOptionalString(project?.id) || 'Unknown project';
+}
+
+function cwdLeafName(cwd: unknown): string {
+  const parts = normalizeOptionalString(cwd).split(/[\\/]+/u).filter(Boolean);
+  return parts.length ? parts[parts.length - 1]! : '';
 }
 
 function getClientAddress(request: IncomingMessage): string {
@@ -1659,6 +1812,375 @@ async function startSessionTurn({
     }
     throw error;
   }
+}
+
+async function storeSessionAttachments({
+  request,
+  config,
+  principal,
+  projectCwd,
+  projectKey,
+}: {
+  request: IncomingMessage;
+  config: CodexWebConfig;
+  principal: CodexWebPrincipal;
+  projectCwd: string;
+  projectKey: string;
+}): Promise<StoredUploadAttachment[]> {
+  const files = await readMultipartUploadFiles(request);
+  if (!files.length) {
+    throw createHttpError(400, 'invalid_upload', 'Upload request must include at least one file.');
+  }
+  const userSegment = safePathSegment(principal.userId || principal.username || 'local-user');
+  const projectStorage = normalizeOptionalString(projectCwd)
+    ? path.join(projectCwd, 'uploads', userSegment)
+    : '';
+  if (projectStorage) {
+    try {
+      return await writeUploadFiles({
+        files,
+        rootDir: projectStorage,
+        storage: 'project',
+        createProjectGitignore: true,
+      });
+    } catch (error) {
+      if (!isProjectUploadFallbackError(error)) {
+        throw error;
+      }
+    }
+  }
+  const stateStorage = path.join(
+    config.stateDir,
+    'uploads',
+    'projects',
+    safePathSegment(projectKey || `cwd-${stableIdHash(projectCwd || 'unknown', 16)}`),
+    userSegment,
+  );
+  try {
+    return await writeUploadFiles({
+      files,
+      rootDir: stateStorage,
+      storage: 'state',
+      createProjectGitignore: false,
+    });
+  } catch (error) {
+    if (isProjectUploadFallbackError(error)) {
+      throw createHttpError(403, 'project_upload_not_writable', 'Upload directory is not writable.');
+    }
+    throw error;
+  }
+}
+
+async function normalizeStartTurnInput({
+  body,
+  config,
+  principal,
+  runtime,
+  sessionId,
+  projectCwd,
+  projectKey,
+}: {
+  body: Record<string, unknown>;
+  config: CodexWebConfig;
+  principal: CodexWebPrincipal;
+  runtime: CodexWebRuntime;
+  sessionId: string;
+  projectCwd: string;
+  projectKey: string;
+}): Promise<StartTurnInput | null> {
+  if (!hasRequestAttachments(body)) {
+    return body as unknown as StartTurnInput;
+  }
+  let resolvedProjectCwd = normalizeOptionalString(projectCwd);
+  if (!resolvedProjectCwd) {
+    const session = await runtime.readSession(sessionId);
+    if (!session) {
+      return null;
+    }
+    resolvedProjectCwd = normalizeOptionalString(session.cwd);
+  }
+  const allowedRoots = allowedUploadRoots({
+    config,
+    principal,
+    projectCwd: resolvedProjectCwd,
+    projectKey: projectKey || `cwd-${stableIdHash(resolvedProjectCwd || sessionId, 16)}`,
+  });
+  const attachments = [];
+  for (const raw of body.attachments as unknown[]) {
+    const attachment = normalizeAttachmentRequest(raw);
+    if (!attachment) {
+      throw createHttpError(400, 'invalid_attachment', 'Attachment payload is invalid.');
+    }
+    const localPath = path.resolve(attachment.localPath);
+    if (!allowedRoots.some((root) => isPathInside(localPath, root))) {
+      throw createHttpError(400, 'invalid_attachment', 'Attachment path is outside the allowed upload directories.');
+    }
+    try {
+      await fs.access(localPath);
+    } catch {
+      throw createHttpError(400, 'invalid_attachment', 'Attachment file is not accessible.');
+    }
+    attachments.push({
+      ...attachment,
+      localPath,
+    });
+  }
+  return {
+    ...(body as unknown as StartTurnInput),
+    attachments,
+  };
+}
+
+function hasRequestAttachments(body: Record<string, unknown>): boolean {
+  return Array.isArray(body.attachments) && body.attachments.length > 0;
+}
+
+function allowedUploadRoots({
+  config,
+  principal,
+  projectCwd,
+  projectKey,
+}: {
+  config: CodexWebConfig;
+  principal: CodexWebPrincipal;
+  projectCwd: string;
+  projectKey: string;
+}): string[] {
+  const userSegment = safePathSegment(principal.userId || principal.username || 'local-user');
+  const roots = [
+    path.resolve(
+      config.stateDir,
+      'uploads',
+      'projects',
+      safePathSegment(projectKey || `cwd-${stableIdHash(projectCwd || 'unknown', 16)}`),
+      userSegment,
+    ),
+  ];
+  if (projectCwd) {
+    roots.unshift(path.resolve(projectCwd, 'uploads', userSegment));
+  }
+  return roots;
+}
+
+function normalizeAttachmentRequest(value: unknown): {
+  kind: 'image' | 'file';
+  localPath: string;
+  fileName?: string | null;
+  mimeType?: string | null;
+  transcriptText?: string | null;
+  durationSeconds?: number | null;
+} | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const localPath = typeof record.localPath === 'string' ? record.localPath.trim() : '';
+  if (!localPath) {
+    return null;
+  }
+  return {
+    kind: record.kind === 'image' ? 'image' : 'file',
+    localPath,
+    fileName: typeof record.fileName === 'string' && record.fileName.trim() ? record.fileName.trim() : null,
+    mimeType: typeof record.mimeType === 'string' && record.mimeType.trim() ? record.mimeType.trim() : null,
+    transcriptText: typeof record.transcriptText === 'string' && record.transcriptText.trim() ? record.transcriptText.trim() : null,
+    durationSeconds: typeof record.durationSeconds === 'number' && Number.isFinite(record.durationSeconds)
+      ? record.durationSeconds
+      : null,
+  };
+}
+
+async function writeUploadFiles({
+  files,
+  rootDir,
+  storage,
+  createProjectGitignore,
+}: {
+  files: ParsedUploadFile[];
+  rootDir: string;
+  storage: 'project' | 'state';
+  createProjectGitignore: boolean;
+}): Promise<StoredUploadAttachment[]> {
+  await ensureUploadDirectory(rootDir, createProjectGitignore);
+  const root = path.resolve(rootDir);
+  const items: StoredUploadAttachment[] = [];
+  for (const file of files) {
+    const id = `att_${crypto.randomUUID().replace(/-/gu, '').slice(0, 20)}`;
+    const safeName = safeUploadFileName(file.fileName);
+    const localPath = path.resolve(root, `${id}-${safeName}`);
+    if (!isPathInside(localPath, root)) {
+      throw createHttpError(400, 'invalid_upload', 'Upload path is invalid.');
+    }
+    await fs.writeFile(localPath, file.data, { flag: 'wx', mode: 0o600 });
+    items.push({
+      id,
+      kind: file.mimeType?.toLowerCase().startsWith('image/') ? 'image' : 'file',
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      sizeBytes: file.data.byteLength,
+      storage,
+      localPath,
+      displayPath: localPath,
+    });
+  }
+  return items;
+}
+
+async function ensureUploadDirectory(rootDir: string, createProjectGitignore: boolean): Promise<void> {
+  const root = path.resolve(rootDir);
+  const parent = path.dirname(root);
+  await rejectSymlinkIfPresent(parent);
+  await rejectSymlinkIfPresent(root);
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  await rejectSymlinkIfPresent(root);
+  if (createProjectGitignore) {
+    const uploadsDir = path.dirname(root);
+    await rejectSymlinkIfPresent(uploadsDir);
+    await fs.writeFile(path.join(uploadsDir, '.gitignore'), '*\n!.gitignore\n', { flag: 'w', mode: 0o600 });
+  }
+}
+
+async function rejectSymlinkIfPresent(filePath: string): Promise<void> {
+  try {
+    const stats = await fs.lstat(filePath);
+    if (stats.isSymbolicLink()) {
+      throw createHttpError(403, 'project_upload_not_writable', 'Upload directory must not be a symbolic link.');
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function readMultipartUploadFiles(request: IncomingMessage): Promise<ParsedUploadFile[]> {
+  const contentType = String(request.headers['content-type'] ?? '');
+  const boundary = parseMultipartBoundary(contentType);
+  if (!boundary) {
+    throw createHttpError(400, 'invalid_upload', 'Upload request must use multipart/form-data.');
+  }
+  const body = await readRequestBody(request, MAX_UPLOAD_BODY_BYTES);
+  const raw = body.toString('latin1');
+  const segments = raw.split(`--${boundary}`);
+  const files: ParsedUploadFile[] = [];
+  for (const segment of segments) {
+    if (!segment || segment === '--\r\n' || segment === '--') {
+      continue;
+    }
+    let part = segment;
+    if (part.startsWith('\r\n')) {
+      part = part.slice(2);
+    }
+    if (part.endsWith('\r\n')) {
+      part = part.slice(0, -2);
+    }
+    if (part.endsWith('--')) {
+      part = part.slice(0, -2);
+    }
+    const headerEnd = part.indexOf('\r\n\r\n');
+    if (headerEnd < 0) {
+      continue;
+    }
+    const headerText = part.slice(0, headerEnd);
+    const contentText = part.slice(headerEnd + 4);
+    const headers = parseMultipartHeaders(headerText);
+    const disposition = headers.get('content-disposition') || '';
+    const name = multipartDispositionValue(disposition, 'name');
+    const fileName = multipartDispositionValue(disposition, 'filename');
+    if (!fileName || (name !== 'files' && name !== 'file')) {
+      continue;
+    }
+    const data = Buffer.from(contentText, 'latin1');
+    if (data.byteLength > MAX_UPLOAD_FILE_BYTES) {
+      throw createHttpError(413, 'payload_too_large', 'Uploaded file is too large.');
+    }
+    files.push({
+      fileName: normalizeUploadedFileName(fileName),
+      mimeType: normalizeOptionalString(headers.get('content-type')) || null,
+      data,
+    });
+  }
+  return files;
+}
+
+async function readRequestBody(request: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const contentLength = Number(request.headers['content-length'] ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw createHttpError(413, 'payload_too_large', 'Request body is too large.');
+  }
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > maxBytes) {
+      throw createHttpError(413, 'payload_too_large', 'Request body is too large.');
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+function parseMultipartBoundary(contentType: string): string {
+  const match = contentType.match(/(?:^|;)\s*boundary=(?:"([^"]+)"|([^;]+))/iu);
+  return normalizeOptionalString(match?.[1] || match?.[2]);
+}
+
+function parseMultipartHeaders(headerText: string): Map<string, string> {
+  const headers = new Map<string, string>();
+  for (const line of headerText.split('\r\n')) {
+    const separator = line.indexOf(':');
+    if (separator <= 0) {
+      continue;
+    }
+    headers.set(line.slice(0, separator).trim().toLowerCase(), line.slice(separator + 1).trim());
+  }
+  return headers;
+}
+
+function multipartDispositionValue(disposition: string, key: string): string {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const match = disposition.match(new RegExp(`${escapedKey}="([^"]*)"`, 'iu'));
+  return match ? Buffer.from(match[1]!, 'latin1').toString('utf8') : '';
+}
+
+function normalizeUploadedFileName(fileName: string): string {
+  const normalized = path.basename(fileName.replace(/\\/gu, '/')).trim();
+  return normalized || 'upload';
+}
+
+function safeUploadFileName(fileName: string): string {
+  const normalized = normalizeUploadedFileName(fileName)
+    .replace(/[^A-Za-z0-9._-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 96);
+  return normalized || 'upload';
+}
+
+function safePathSegment(value: string): string {
+  const normalized = normalizeOptionalString(value)
+    .replace(/[^A-Za-z0-9._-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 80);
+  return normalized || 'unknown';
+}
+
+function isPathInside(candidatePath: string, rootPath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function isProjectUploadFallbackError(error: unknown): boolean {
+  if (isHttpError(error)) {
+    return error.statusCode === 403;
+  }
+  const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
+  return code === 'EACCES'
+    || code === 'EPERM'
+    || code === 'EROFS'
+    || code === 'ENOTDIR'
+    || code === 'ENOENT';
 }
 
 function writeSessionNotFound(response: ServerResponse): void {

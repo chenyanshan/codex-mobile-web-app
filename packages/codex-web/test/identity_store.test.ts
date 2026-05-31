@@ -84,6 +84,35 @@ test('identity store preserves existing direct project grants when user access u
   ]);
 });
 
+test('identity store derives blank project display names from the cwd leaf', async () => {
+  const store = new FileIdentityStore({ identityPath: await tempIdentityPath() });
+
+  const project = await store.upsertProject({
+    id: 'project_mobile_web',
+    internalName: 'legacy-internal-name',
+    cwd: '/Users/alice/codex-mobile-web-app',
+    displayName: '',
+    enabled: true,
+  });
+
+  assert.equal(project.displayName, 'codex-mobile-web-app');
+  assert.equal((await store.readState()).projects[0]?.displayName, 'codex-mobile-web-app');
+});
+
+test('identity store collapses path-like project display names to the final segment', async () => {
+  const store = new FileIdentityStore({ identityPath: await tempIdentityPath() });
+
+  const project = await store.upsertProject({
+    id: 'project_mobile_web',
+    internalName: 'vibecoding/codex-mobile-web-app',
+    cwd: '/Users/alice/codex-mobile-web-app',
+    displayName: 'vibecoding/codex-mobile-web-app',
+    enabled: true,
+  });
+
+  assert.equal(project.displayName, 'codex-mobile-web-app');
+});
+
 test('identity store deletes a user and cleans related sessions, shares, and auth sessions', async () => {
   const store = new FileIdentityStore({ identityPath: await tempIdentityPath() });
   await store.upsertUserWithPassword({

@@ -114,6 +114,148 @@ test('API routes accept valid bearer token', async () => {
   }
 });
 
+test('POST /api/sessions/:sessionId/attachments stores uploads in the session project', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-upload-state-'));
+  const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-upload-project-'));
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      readSession: async () => ({ id: 'thread_1', cwd: projectDir }),
+    } as any,
+    config: createConfig({ stateDir }),
+  });
+  await server.start();
+  try {
+    const form = new FormData();
+    form.append('files', new Blob(['hello upload'], { type: 'text/plain' }), 'notes.txt');
+
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_1/attachments`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer cw_token' },
+      body: form,
+    });
+
+    assert.equal(response.status, 201);
+    const payload = await response.json() as any;
+    assert.equal(payload.items.length, 1);
+    assert.equal(payload.items[0].fileName, 'notes.txt');
+    assert.equal(payload.items[0].mimeType, 'text/plain');
+    assert.equal(payload.items[0].storage, 'project');
+    assert.match(payload.items[0].localPath, /uploads\/local-admin\/att_/u);
+    assert.equal(await fs.readFile(payload.items[0].localPath, 'utf8'), 'hello upload');
+    assert.equal(await fs.readFile(path.join(projectDir, 'uploads', '.gitignore'), 'utf8'), '*\n!.gitignore\n');
+  } finally {
+    await server.stop();
+    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/sessions/:sessionId/attachments falls back to state storage when project storage is not writable', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-upload-state-'));
+  const projectFile = path.join(stateDir, 'not-a-directory');
+  await fs.writeFile(projectFile, 'project path is a file');
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      readSession: async () => ({ id: 'thread_1', cwd: projectFile }),
+    } as any,
+    config: createConfig({ stateDir }),
+  });
+  await server.start();
+  try {
+    const form = new FormData();
+    form.append('files', new Blob(['fallback upload'], { type: 'application/pdf' }), 'brief.pdf');
+
+    const response = await fetch(`${server.baseUrl}/api/sessions/thread_1/attachments`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer cw_token' },
+      body: form,
+    });
+
+    assert.equal(response.status, 201);
+    const payload = await response.json() as any;
+    assert.equal(payload.items.length, 1);
+    assert.equal(payload.items[0].storage, 'state');
+    assert.equal(payload.items[0].fileName, 'brief.pdf');
+    assert.match(payload.items[0].localPath, /uploads\/projects\/cwd-[a-f0-9]+\/local-admin\/att_/u);
+    assert.equal(await fs.readFile(payload.items[0].localPath, 'utf8'), 'fallback upload');
+  } finally {
+    await server.stop();
+    await fs.rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/sessions/:sessionId/turns accepts attachments only from upload roots', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-turn-attachments-state-'));
+  const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-web-turn-attachments-project-'));
+  const uploadedPath = path.join(projectDir, 'uploads', 'local-admin', 'att_safe-notes.txt');
+  await fs.mkdir(path.dirname(uploadedPath), { recursive: true });
+  await fs.writeFile(uploadedPath, 'safe');
+  const startTurnInputs: any[] = [];
+  const server = createCodexWebServer({
+    auth: createAcceptingAuth(),
+    runtime: {
+      ...createRuntimeStub(),
+      readSession: async () => ({ id: 'thread_1', cwd: projectDir }),
+      startTurn: async (_sessionId: string, input: any) => {
+        startTurnInputs.push(input);
+        return { turnId: 'turn_1' };
+      },
+    } as any,
+    config: createConfig({ stateDir }),
+  });
+  await server.start();
+  try {
+    const accepted = await fetch(`${server.baseUrl}/api/sessions/thread_1/turns`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: 'Read the attachment',
+        attachments: [{
+          kind: 'file',
+          localPath: uploadedPath,
+          fileName: 'notes.txt',
+          mimeType: 'text/plain',
+        }],
+      }),
+    });
+    assert.equal(accepted.status, 202);
+    assert.equal(startTurnInputs[0]?.attachments[0]?.localPath, uploadedPath);
+
+    const rejected = await fetch(`${server.baseUrl}/api/sessions/thread_1/turns`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer cw_token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: 'Read the attachment',
+        attachments: [{
+          kind: 'file',
+          localPath: path.join(projectDir, 'secret.txt'),
+          fileName: 'secret.txt',
+          mimeType: 'text/plain',
+        }],
+      }),
+    });
+    assert.equal(rejected.status, 400);
+    assert.deepEqual(await rejected.json(), {
+      error: 'invalid_attachment',
+      message: 'Attachment path is outside the allowed upload directories.',
+    });
+  } finally {
+    await server.stop();
+    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('POST /api/auth/login is public', async () => {
   let called = false;
   const server = createCodexWebServer({

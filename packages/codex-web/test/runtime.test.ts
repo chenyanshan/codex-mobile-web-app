@@ -505,6 +505,68 @@ test('runtime uses full-access gpt-5.4 xhigh defaults and persists turn settings
   assert.equal(storedSettings.at(-1)?.settings.reasoningEffort, 'high');
 });
 
+test('runtime passes uploaded files as local paths and images as localImage input', async () => {
+  const startTurnCalls: any[] = [];
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async () => null,
+    listThreads: async () => ({ items: [createThread('thread_attachments')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_attachments', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => createThread('thread_attachments'),
+    writeConfigValue: async () => {},
+    startTurn: async (args) => {
+      startTurnCalls.push(args);
+      await args.onTurnStarted?.({ turnId: 'turn_attachments', threadId: 'thread_attachments' });
+      return {
+        outputText: 'done',
+        status: 'completed',
+        turnId: 'turn_attachments',
+        threadId: 'thread_attachments',
+      };
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  await runtime.startTurn('thread_attachments', {
+    text: 'Summarize these uploads.',
+    attachments: [
+      {
+        id: 'att_file',
+        kind: 'file',
+        localPath: '/workspace/uploads/local-admin/att_file-notes.pdf',
+        fileName: 'notes.pdf',
+        mimeType: 'application/pdf',
+      },
+      {
+        id: 'att_image',
+        kind: 'image',
+        localPath: '/workspace/uploads/local-admin/att_image-chart.png',
+        fileName: 'chart.png',
+        mimeType: 'image/png',
+      },
+    ],
+  } as any);
+
+  const input = startTurnCalls[0]?.input;
+  assert.equal(input[0]?.type, 'text');
+  assert.match(input[0]?.text, /Summarize these uploads\./u);
+  assert.match(input[0]?.text, /Attachments:/u);
+  assert.match(input[0]?.text, /path: \/workspace\/uploads\/local-admin\/att_file-notes\.pdf/u);
+  assert.match(input[0]?.text, /filename: notes\.pdf/u);
+  assert.match(input[0]?.text, /mime: application\/pdf/u);
+  assert.deepEqual(input[1], {
+    type: 'localImage',
+    path: '/workspace/uploads/local-admin/att_image-chart.png',
+  });
+});
+
 test('runtime persists session favorite state and exposes it on session summaries', async () => {
   let storedSettings: any = null;
   const client: CodexWebRuntimeClient = {

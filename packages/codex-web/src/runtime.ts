@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import {
   CodexAppClient,
   createStderrLogger,
+  type CodexTurnInput,
   formatConfigKeyPath,
   type ProviderApprovalRequest,
   type ProviderModelInfo,
@@ -11,6 +12,7 @@ import {
   type ProviderThreadSummary,
   type ProviderThreadTurn,
   type ProviderThreadTurnItem,
+  type ProviderTurnAttachment,
   type ProviderTurnResult,
   type ProviderTurnSessionSettings,
   type ProviderTurnWorkEvent,
@@ -105,6 +107,7 @@ export interface CodexWebRuntimeClient {
   startTurn(args: {
     threadId: string;
     inputText: string;
+    input?: CodexTurnInput[] | null;
     cwd?: string | null;
     model?: string | null;
     effort?: string | null;
@@ -156,6 +159,8 @@ export interface UpdateSessionSettingsInput {
 
 export interface StartTurnInput {
   text: string;
+  attachments?: ProviderTurnAttachment[];
+  attachmentIds?: string[];
   settings?: Partial<ProviderTurnSessionSettings>;
 }
 
@@ -492,6 +497,7 @@ export class CodexWebRuntime {
     this.logDebug('turn_start_requested', {
       sessionId,
       textLength: input.text.length,
+      attachmentCount: Array.isArray(input.attachments) ? input.attachments.length : 0,
       cwd: session.cwd ?? this.defaultCwd,
       model: settings.model,
       reasoningEffort: settings.reasoningEffort,
@@ -526,9 +532,11 @@ export class CodexWebRuntime {
       resolveStarted?.({ turnId });
       return true;
     };
+    const codexInput = buildCodexTurnInput(input.text, input.attachments);
     const runPromise = this.client.startTurn({
       threadId: sessionId,
       inputText: input.text,
+      input: codexInput,
       cwd: session.cwd ?? this.defaultCwd,
       model: settings.model,
       effort: settings.reasoningEffort,
@@ -1601,6 +1609,105 @@ function summarizeRuntimeValue(value: unknown): unknown {
   } catch {
     return String(value);
   }
+}
+
+function buildCodexTurnInput(
+  text: string,
+  attachments: ProviderTurnAttachment[] | undefined,
+): CodexTurnInput[] | null {
+  const normalizedAttachments = Array.isArray(attachments)
+    ? attachments
+      .map(normalizeTurnAttachment)
+      .filter((attachment): attachment is ProviderTurnAttachment => attachment !== null)
+    : [];
+  if (!normalizedAttachments.length) {
+    return null;
+  }
+  const input: CodexTurnInput[] = [{
+    type: 'text',
+    text: buildAttachmentPrompt(text, normalizedAttachments),
+    text_elements: [],
+  }];
+  for (const attachment of normalizedAttachments) {
+    if (attachment.kind !== 'image') {
+      continue;
+    }
+    input.push({
+      type: 'localImage',
+      path: attachment.localPath,
+    });
+  }
+  return input;
+}
+
+function normalizeTurnAttachment(value: ProviderTurnAttachment | null | undefined): ProviderTurnAttachment | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const localPath = normalizeString(value.localPath);
+  if (!localPath) {
+    return null;
+  }
+  return {
+    kind: value.kind === 'image' ? 'image' : 'file',
+    localPath,
+    fileName: normalizeString(value.fileName) || null,
+    mimeType: normalizeString(value.mimeType) || null,
+    transcriptText: normalizeString(value.transcriptText) || null,
+    durationSeconds: typeof value.durationSeconds === 'number' && Number.isFinite(value.durationSeconds)
+      ? value.durationSeconds
+      : null,
+  };
+}
+
+function buildAttachmentPrompt(text: string, attachments: readonly ProviderTurnAttachment[]): string {
+  const normalizedText = normalizeString(text);
+  const lines: string[] = [];
+  if (normalizedText) {
+    lines.push(normalizedText, '');
+  } else {
+    lines.push('User sent attachments without additional text.', '');
+  }
+  lines.push('Attachments:');
+  attachments.forEach((attachment, index) => {
+    lines.push(`${index + 1}. ${describeAttachment(attachment)}`);
+    lines.push(`   path: ${attachment.localPath}`);
+    if (attachment.fileName) {
+      lines.push(`   filename: ${attachment.fileName}`);
+    }
+    if (attachment.mimeType) {
+      lines.push(`   mime: ${attachment.mimeType}`);
+    }
+    if (typeof attachment.durationSeconds === 'number' && Number.isFinite(attachment.durationSeconds)) {
+      lines.push(`   duration_seconds: ${attachment.durationSeconds}`);
+    }
+    if (attachment.transcriptText) {
+      lines.push(`   transcript_hint: ${attachment.transcriptText}`);
+    }
+    if (attachment.kind === 'image') {
+      lines.push('   attached_as: localImage');
+    }
+  });
+  lines.push('', 'Use the local file paths above when you inspect these attachments.');
+  return lines.join('\n');
+}
+
+function describeAttachment(attachment: ProviderTurnAttachment): string {
+  switch (attachment.kind) {
+    case 'image':
+      return 'image';
+    case 'voice':
+      return 'voice message';
+    case 'video':
+      return 'video';
+    case 'file':
+    default:
+      return 'file';
+  }
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
 }
 
 function createDefaultSettings(sessionId: string): CodexWebStoredSessionSettings {

@@ -23,6 +23,7 @@ export interface CodexWebUser {
   passwordIterations?: number;
   roleIds: string[];
   directProjectGrants: CodexWebProjectGrant[];
+  favoriteProjectIds: string[];
 }
 
 export interface CodexWebRole {
@@ -97,6 +98,12 @@ export interface UpdateUserAccessInput {
   directProjectGrants?: CodexWebProjectGrant[];
 }
 
+export interface UpdateUserProjectFavoriteInput {
+  userId: string;
+  projectId: string;
+  favorite: boolean;
+}
+
 export interface BootstrapAdminPasswordHashInput {
   passwordHash: string;
   passwordSalt: string;
@@ -152,6 +159,7 @@ export class FileIdentityStore {
           canNewSession: true,
           roleIds: [],
           directProjectGrants: [],
+          favoriteProjectIds: [],
         }),
         id: existingAdmin?.id ?? 'user_admin',
         username: existingAdmin?.username ?? 'admin',
@@ -164,6 +172,7 @@ export class FileIdentityStore {
           : PASSWORD_ITERATIONS,
         roleIds: uniqueStrings([...(existingAdmin?.roleIds ?? []), adminRole.id]),
         directProjectGrants: normalizeProjectGrants(existingAdmin?.directProjectGrants ?? []),
+        favoriteProjectIds: normalizeStringArray(existingAdmin?.favoriteProjectIds ?? []),
       };
       state.users = upsertById(state.users, adminUser);
       await this.writeState(state);
@@ -186,6 +195,7 @@ export class FileIdentityStore {
         passwordIterations: PASSWORD_ITERATIONS,
         roleIds: normalizeStringArray(input.roleIds),
         directProjectGrants: normalizeProjectGrants(input.directProjectGrants),
+        favoriteProjectIds: [],
       };
       state.users = upsertById(state.users, user);
       await this.writeState(state);
@@ -234,6 +244,31 @@ export class FileIdentityStore {
       state.shares = state.shares.filter((share) => share.createdByUserId !== normalizedUserId && !removedSessionIds.has(share.sessionId));
       state.userSessions = state.userSessions.filter((session) => session.userId !== normalizedUserId);
       await this.writeState(state);
+    });
+  }
+
+  async updateUserProjectFavorite(input: UpdateUserProjectFavoriteInput): Promise<CodexWebUser> {
+    return this.withMutationLock(async () => {
+      const state = await this.readState();
+      const userId = normalizeRequiredId(input.userId, 'user id');
+      const projectId = normalizeRequiredId(input.projectId, 'project id');
+      const existing = state.users.find((user) => user.id === userId);
+      if (!existing) {
+        throw new Error(`Unknown user: ${userId}`);
+      }
+      const current = new Set(normalizeStringArray(existing.favoriteProjectIds));
+      if (input.favorite) {
+        current.add(projectId);
+      } else {
+        current.delete(projectId);
+      }
+      const user: CodexWebUser = {
+        ...existing,
+        favoriteProjectIds: [...current],
+      };
+      state.users = upsertById(state.users, user);
+      await this.writeState(state);
+      return user;
     });
   }
 
@@ -428,6 +463,7 @@ function normalizeUserOrNull(value: unknown): CodexWebUser | null {
     passwordIterations: Number.isFinite(value.passwordIterations) ? Number(value.passwordIterations) : undefined,
     roleIds: normalizeStringArray(value.roleIds),
     directProjectGrants: normalizeProjectGrants(value.directProjectGrants),
+    favoriteProjectIds: normalizeStringArray(value.favoriteProjectIds),
   };
 }
 
@@ -456,13 +492,19 @@ function normalizeProjectOrNull(value: unknown): CodexWebProject | null {
 
 function normalizeProject(project: CodexWebProject): CodexWebProject {
   const id = normalizeRequiredId(project.id, 'project id');
+  const cwd = normalizeRequiredId(project.cwd, 'project cwd');
   return {
     id,
     internalName: String(project.internalName ?? '').trim() || id,
-    cwd: normalizeRequiredId(project.cwd, 'project cwd'),
-    displayName: String(project.displayName ?? '').trim() || String(project.internalName ?? '').trim() || id,
+    cwd,
+    displayName: cwdLeafName(String(project.displayName ?? '').trim()) || cwdLeafName(cwd) || id,
     enabled: project.enabled !== false,
   };
+}
+
+function cwdLeafName(cwd: string): string {
+  const parts = String(cwd || '').split(/[\\/]+/u).filter(Boolean);
+  return parts.length ? parts[parts.length - 1]! : '';
 }
 
 function normalizeAppSessionOrNull(value: unknown): CodexWebAppSession | null {

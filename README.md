@@ -33,6 +33,15 @@ Project design docs:
 ```text
 docs/superpowers/specs/2026-05-17-codex-mobile-web-app-design.md
 docs/superpowers/specs/2026-05-19-codex-mobile-reports-design.md
+docs/superpowers/specs/2026-05-29-codex-web-workspace-redesign-design.md
+docs/superpowers/specs/2026-05-30-codex-web-attachments-design.md
+```
+
+Recent implementation plans:
+
+```text
+docs/superpowers/plans/2026-05-29-codex-web-workspace-redesign.md
+docs/superpowers/plans/2026-05-30-codex-web-attachments.md
 ```
 
 Visual reference:
@@ -159,6 +168,7 @@ Default paths:
 ~/.codex-web/logs/
 ~/.codex-web/reports/
 ~/.codex-web/report-index.json
+~/.codex-web/uploads/
 ```
 
 `~/.codex-web/auth.json` stores only the salted password hash and hashed session
@@ -232,6 +242,50 @@ If the Codex Web service itself is restarted while a turn is in progress, Codex
 may mark that turn as `interrupted` with no error payload. In that case the UI
 shows `Stopped`, not a red error, because the turn ended due to service
 lifecycle interruption rather than a provider/runtime error.
+
+## Workspace UI
+
+Codex Web uses a project-first workspace:
+
+- Desktop shows a three-pane layout with a project rail, a filtered session
+  list, and the active chat or new-session pane.
+- Mobile keeps the normal session-list and chat flow, with projects available
+  from a slide-out drawer.
+- `All Sessions` is always available, and selecting a project filters sessions
+  before applying the `Favorites` or `Recents` view.
+- Managed projects and legacy single-user sessions are both grouped into the
+  same project rail.
+- Settings include a browser title field. The configured title is stored in
+  the browser and used for the PWA header/drawer branding.
+
+## Attachments
+
+The composer supports authenticated file and image attachments for the next
+Codex turn.
+
+Uploads are stored under the session project when the directory is writable:
+
+```text
+<project-cwd>/uploads/<user-id>/
+```
+
+If project storage is not writable, uploads fall back to:
+
+```text
+~/.codex-web/uploads/projects/<project-key>/<user-id>/
+```
+
+Each upload response includes the actual `localPath`, and the backend validates
+attachment paths against the allowed upload roots before starting a turn. Image
+attachments are passed to Codex as local images; other files are listed in the
+turn prompt with their local paths so Codex can inspect them from the host.
+
+Upload limits:
+
+```text
+32 MiB request body
+25 MiB per file
+```
 
 ## macOS Install
 
@@ -357,6 +411,8 @@ The intended first product is a single-user mobile PWA:
 - password-protected access
 - persistent browser session token
 - live Codex turn stream
+- project-first desktop workspace and mobile project drawer
+- file and image attachments for turns
 - command and file-change batch cards
 - approval controls
 - model and reasoning controls
