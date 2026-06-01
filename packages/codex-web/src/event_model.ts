@@ -281,6 +281,9 @@ export function normalizeTurnCompletedEvent({
     });
     return events;
   }
+  if (!isTerminalProviderTurnResult(result)) {
+    return events;
+  }
   const text = String(result.outputText || result.previewText || '').trim();
   if (text) {
     events.push({
@@ -301,6 +304,18 @@ export function normalizeTurnCompletedEvent({
     raw: result,
   });
   return events;
+}
+
+export function isTerminalProviderTurnResult(result: Partial<ProviderTurnResult>): boolean {
+  if (extractErrorDetails(result)) {
+    return true;
+  }
+  const status = normalizeTurnMarker(result.status);
+  if (isTerminalTurnMarker(status)) {
+    return true;
+  }
+  const outputState = normalizeTurnMarker(result.outputState);
+  return isTerminalTurnMarker(outputState);
 }
 
 export function normalizeTurnFailedEvent({
@@ -360,4 +375,30 @@ function normalizeDetailText(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+function isTerminalTurnMarker(value: string): boolean {
+  return [
+    'completed',
+    'complete',
+    'succeeded',
+    'success',
+    'finished',
+    'failed',
+    'error',
+    'timedout',
+    'timeout',
+    'interrupted',
+    'cancelled',
+    'canceled',
+    'aborted',
+    'providererror',
+  ].includes(value);
+}
+
+function normalizeTurnMarker(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '');
 }

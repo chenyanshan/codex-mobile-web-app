@@ -556,6 +556,7 @@ test('admin console stays open while restore auth finishes in the background', a
 
   assert.deepEqual(pending.map((request) => request.path), [
     '/api/auth/me',
+    '/api/settings',
     '/api/models',
     '/api/projects',
     '/api/sessions',
@@ -566,7 +567,7 @@ test('admin console stays open while restore auth finishes in the background', a
   await flushMicrotasks();
 
   assert.equal(api.state.view, 'admin');
-  assert.deepEqual(pending.slice(5).map((request) => request.path), [
+  assert.deepEqual(pending.slice(6).map((request) => request.path), [
     '/api/admin/settings',
     '/api/admin/projects',
     '/api/admin/users',
@@ -574,21 +575,22 @@ test('admin console stays open while restore auth finishes in the background', a
     '/api/admin/sessions',
   ]);
 
-  pending[1]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[1]?.resolve({ ok: true, status: 200, json: async () => ({ settings: { siteTitle: 'Codex Web' }, permissions: { canSetSiteTitle: true } }) });
   pending[2]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
   pending[3]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
   pending[4]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[5]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
   await restore;
   await flushMicrotasks();
 
   assert.equal(api.state.view, 'admin');
   assert.equal(api.state.admin.loading, true);
 
-  pending[5]?.resolve({ ok: true, status: 200, json: async () => ({ settings: { multiUserEnabled: true } }) });
-  pending[6]?.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: '/repo/admin', cwd: '/repo/admin', displayName: 'Admin Repo' }] }) });
-  pending[7]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[6]?.resolve({ ok: true, status: 200, json: async () => ({ settings: { multiUserEnabled: true } }) });
+  pending[7]?.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: '/repo/admin', cwd: '/repo/admin', displayName: 'Admin Repo' }] }) });
   pending[8]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
   pending[9]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
+  pending[10]?.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) });
   await openAdmin;
 
   assert.equal(api.state.view, 'admin');
@@ -649,7 +651,7 @@ test('admin console renders four-page management layout with RBAC controls', asy
   assert.doesNotMatch(html, /<th>Internal Name<\/th>/u);
   assert.match(html, /<th>Display Name<\/th>/u);
   assert.match(html, /name="cwd"/u);
-  assert.match(html, /<td>a<\/td>/u);
+  assert.match(html, /<td data-i18n-skip>a<\/td>/u);
   assert.match(html, /data-admin-edit-project="project_a"/u);
 
   api.state.admin.editingProjectId = 'project_a';
@@ -661,7 +663,7 @@ test('admin console renders four-page management layout with RBAC controls', asy
   html = api.renderAdminConsole().innerHTML;
   assert.match(html, /id="admin-role-form"/u);
   assert.match(html, /name="projectIds" type="checkbox" value="project_a"/u);
-  assert.match(html, /<span>a<\/span>/u);
+  assert.match(html, /<span data-i18n-skip>a<\/span>/u);
   assert.match(html, /data-admin-edit-role="role_user"/u);
 
   api.state.admin.editingRoleId = 'role_user';
@@ -672,7 +674,7 @@ test('admin console renders four-page management layout with RBAC controls', asy
   api.state.admin.page = 'users';
   html = api.renderAdminConsole().innerHTML;
   assert.match(html, /id="admin-user-form"/u);
-  assert.match(html, /<select id="admin-user-role-select" name="roleId">/u);
+  assert.match(html, /<select id="admin-user-role-select" name="roleId" data-i18n-skip>/u);
   assert.doesNotMatch(html, /name="userProjectIds" type="checkbox"/u);
   assert.doesNotMatch(html, /name="canNewSession" type="checkbox"/u);
   assert.match(html, /class="admin-user-access-form"/u);
@@ -683,8 +685,8 @@ test('admin console renders four-page management layout with RBAC controls', asy
   html = api.renderAdminConsole().innerHTML;
   assert.match(html, /id="admin-session-user-filter"/u);
   assert.match(html, /id="admin-session-project-filter"/u);
-  assert.match(html, /<option value="project_a">a<\/option>/u);
-  assert.match(html, /class="admin-row-main">a<\/span>/u);
+  assert.match(html, /<option value="project_a" data-i18n-skip>a<\/option>/u);
+  assert.match(html, /class="admin-row-main" data-i18n-skip>a<\/span>/u);
   assert.match(html, /Observer Mode/u);
 });
 
@@ -948,7 +950,7 @@ test('admin session audit project filter includes projects discovered from sessi
   const html = api.renderAdminConsole().innerHTML;
 
   assert.match(html, /id="admin-session-project-filter"/u);
-  assert.match(html, /<option value="project_legacy">Legacy Repo<\/option>/u);
+  assert.match(html, /<option value="project_legacy" data-i18n-skip>Legacy Repo<\/option>/u);
 });
 
 test('observer sessions and share sessions render read-only chat without composer actions', async () => {
@@ -1152,13 +1154,6 @@ test('app settings persist theme and default thread settings', async () => {
   assert.equal(storage.get('codexWebMessageFontSize'), 'small');
   assert.equal(context.document.documentElement.dataset.messageFontSize, 'small');
 
-  assert.match(api.renderAppSettings().innerHTML, /id="site-title-input"/u);
-  assert.match(api.renderAppSettings().innerHTML, /Website title/u);
-  assert.equal(typeof api.applySiteTitle, 'function');
-  api.applySiteTitle('Yan Shan Lab');
-  assert.equal(storage.get('codexWebSiteTitle'), 'Yan Shan Lab');
-  assert.equal(context.document.title, 'Yan Shan Lab');
-
   api.applyDefaultThreadSettings({
     model: 'gpt-5.4-mini',
     reasoningEffort: 'medium',
@@ -1185,12 +1180,543 @@ test('app settings persist theme and default thread settings', async () => {
   assert.equal(api.state.sandboxMode, 'workspace-write');
 });
 
+test('global website title is editable only by single-user or admin principals', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'user_1', isAdmin: false, mode: 'multi' } };
+  api.state.globalSettings = {
+    siteTitle: 'Team Codex',
+    canSetSiteTitle: false,
+  };
+  const userHtml = api.renderAppSettings().innerHTML;
+  assert.doesNotMatch(userHtml, /id="site-title-input"/u);
+  assert.doesNotMatch(userHtml, /Browser title/u);
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true, mode: 'multi' } };
+  api.state.globalSettings.canSetSiteTitle = true;
+  const adminHtml = api.renderAppSettings().innerHTML;
+  assert.match(adminHtml, /id="site-title-input"/u);
+  assert.match(adminHtml, /value="Team Codex"/u);
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'local-admin', isAdmin: true, mode: 'single' } };
+  api.state.globalSettings.canSetSiteTitle = true;
+  const singleHtml = api.renderAppSettings().innerHTML;
+  assert.match(singleHtml, /id="site-title-input"/u);
+});
+
+test('global website title loads from the backend and saves through the settings API', async () => {
+  const fetchCalls = [];
+  const { api, context, storage } = await loadAppHarness({
+    fetch: async (path, options = {}) => {
+      fetchCalls.push({ path, options });
+      if (path === '/api/auth/me') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            session: { id: 'auth_1', principal: { userId: 'admin', isAdmin: true, mode: 'multi' } },
+          }),
+        };
+      }
+      if (path === '/api/settings' && (options.method || 'GET') === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            settings: { siteTitle: 'Team Codex' },
+            permissions: { canSetSiteTitle: true },
+          }),
+        };
+      }
+      if (path === '/api/settings' && options.method === 'PATCH') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            settings: { siteTitle: JSON.parse(options.body).siteTitle },
+            permissions: { canSetSiteTitle: true },
+          }),
+        };
+      }
+      if (path === '/api/models') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      if (path === '/api/projects' || path === '/api/sessions' || path === '/api/reports') {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.siteTitle = 'Local Old Title';
+  context.document.title = 'Local Old Title';
+
+  await api.restoreAuth();
+
+  assert.equal(api.state.siteTitle, 'Team Codex');
+  assert.equal(context.document.title, 'Team Codex');
+  assert.equal(api.state.globalSettings.canSetSiteTitle, true);
+  assert.equal(storage.get('codexWebSiteTitle'), undefined);
+
+  await api.saveSiteTitle('New Team Title');
+
+  assert.equal(api.state.siteTitle, 'New Team Title');
+  assert.equal(context.document.title, 'New Team Title');
+  assert.deepEqual(fetchCalls.map((call) => call.path), [
+    '/api/auth/me',
+    '/api/settings',
+    '/api/models',
+    '/api/projects',
+    '/api/sessions',
+    '/api/reports',
+    '/api/settings',
+  ]);
+  assert.equal(JSON.parse(fetchCalls[6].options.body).siteTitle, 'New Team Title');
+});
+
+test('app language defaults to English and keeps send as a localized text control', async () => {
+  const { api, storage, context } = await loadAppHarness();
+
+  assert.equal(api.state.language, 'en');
+  assert.equal(storage.get('codexWebLanguage'), undefined);
+  assert.equal(context.document.documentElement.lang, 'en');
+
+  api.state.view = 'chat';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+
+  const settingsHtml = api.renderAppSettings().innerHTML;
+  assert.match(settingsHtml, /data-app-language="en"[^>]*aria-pressed="true"[^>]*>English<\/button>/u);
+  assert.match(settingsHtml, /data-app-language="zh-CN"[^>]*>中文<\/button>/u);
+
+  const chatHtml = api.renderChat().innerHTML;
+  assert.match(chatHtml, /id="send-button"[^>]*aria-label="Send"[^>]*>Send<\/button>/u);
+});
+
+test('Chinese language setting localizes settings, chat, and admin management UI', async () => {
+  const { api, storage, context } = await loadAppHarness();
+
+  assert.equal(api.translateUi('Settings', 'zh-CN'), '设置');
+  api.applyLanguage('zh-CN');
+
+  assert.equal(api.state.language, 'zh-CN');
+  assert.equal(storage.get('codexWebLanguage'), 'zh-CN');
+  assert.equal(context.document.documentElement.lang, 'zh-CN');
+
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true, mode: 'multi' } };
+  api.state.admin.loaded = true;
+  api.state.admin.settings = { multiUserEnabled: true };
+  api.state.admin.projects = [{ id: 'project_a', cwd: '/repo/a', displayName: 'vibecoding/a' }];
+  api.state.admin.roles = [{ id: 'role_user', name: 'User', projectGrants: [{ projectId: 'project_a' }] }];
+  api.state.admin.users = [{
+    id: 'user_1',
+    username: 'alice',
+    enabled: true,
+    roleId: 'role_user',
+    roleIds: ['role_user'],
+  }];
+  api.state.admin.sessions = [{ id: 'session_1', ownerUserId: 'user_1', projectId: 'project_a' }];
+
+  const settingsHtml = api.renderAppSettings().innerHTML;
+  assert.match(settingsHtml, /<div class="page-title">设置<\/div>/u);
+  assert.match(settingsHtml, /语言/u);
+  assert.match(settingsHtml, /网站标题/u);
+  assert.match(settingsHtml, /默认新会话/u);
+  assert.match(settingsHtml, /退出登录/u);
+
+  api.state.view = 'chat';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  const chatHtml = api.renderChat().innerHTML;
+  assert.match(chatHtml, /placeholder="输入消息"/u);
+  assert.match(chatHtml, /id="send-button"[^>]*aria-label="发送"[^>]*>发送<\/button>/u);
+  assert.doesNotMatch(chatHtml, />Send<\/button>/u);
+
+  const adminHtml = api.renderAdminConsole().innerHTML;
+  assert.match(adminHtml, /管理控制台/u);
+  assert.match(adminHtml, /项目管理/u);
+  assert.match(adminHtml, /角色管理/u);
+  assert.match(adminHtml, /用户管理/u);
+  assert.match(adminHtml, /会话审计/u);
+  assert.match(adminHtml, /多用户模式/u);
+  assert.match(adminHtml, /保存项目/u);
+
+  api.state.admin.page = 'users';
+  const adminUsersHtml = api.renderAdminConsole().innerHTML;
+  assert.match(adminUsersHtml, /保存用户/u);
+});
+
+test('Chinese language localization leaves conversation and report markdown content untouched', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.view = 'chat';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo' };
+  api.state.timeline = [
+    { kind: 'message', role: 'user', label: 'You', meta: '', text: 'Send', attachments: [] },
+    {
+      kind: 'message',
+      role: 'assistant',
+      label: 'Assistant',
+      meta: 'final',
+      text: [
+        '| Action | Status |',
+        '| --- | --- |',
+        '| Send | Read only |',
+        '',
+        'Send',
+        'Read only',
+      ].join('\n'),
+      attachments: [],
+    },
+  ];
+
+  const chatHtml = api.renderChat().innerHTML;
+  assert.match(chatHtml, /<span class="card-title">你<\/span>/u);
+  assert.match(chatHtml, /<p class="message-text">Send<\/p>/u);
+  assert.match(chatHtml, /<div class="message-text markdown-body">[\s\S]*<p>Send Read only<\/p>[\s\S]*<\/div>/u);
+  assert.doesNotMatch(chatHtml, /Send 只读/u);
+
+  api.state.currentReport = {
+    id: 'project-a/2026-05-19/summary.md',
+    project: 'project-a',
+    title: 'summary',
+    kind: 'markdown',
+    favorite: false,
+  };
+  api.state.currentReportContent = [
+    '# Send',
+    '',
+    '| Action | Status |',
+    '| --- | --- |',
+    '| Send | Read only |',
+    '',
+    'Send',
+    'Read only',
+  ].join('\n');
+
+  const reportHtml = api.renderReportViewer().innerHTML;
+  assert.match(reportHtml, /<div class="report-document markdown-body">/u);
+  assert.match(reportHtml, /<h1>Send<\/h1>/u);
+  assert.match(reportHtml, /<p>Send Read only<\/p>/u);
+  assert.doesNotMatch(reportHtml, /发送/u);
+  assert.doesNotMatch(reportHtml, /Send 只读/u);
+});
+
+test('Chinese language localization leaves dynamic names and drafts untouched', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.authSession = { id: 'auth_1' };
+  api.state.sessions = [{
+    id: 'session_1',
+    cwd: '/repo/Send',
+    projectDisplayName: 'Send',
+    firstUserInput: 'Send',
+    lastUserInput: 'Send',
+    updatedAt: '2026-05-19T10:00:00.000Z',
+    favorite: false,
+  }];
+  api.state.currentSession = {
+    id: 'session_1',
+    cwd: '/repo/Send',
+    projectDisplayName: 'Send',
+    goal: { status: 'active', objective: 'Send' },
+  };
+  api.state.sessionId = 'session_1';
+  api.state.selectedProjectLabel = 'Send';
+  api.state.reports = [{
+    id: 'Send/summary.md',
+    project: 'Send',
+    title: 'Send',
+    kind: 'markdown',
+    favorite: false,
+    updatedAt: '2026-05-19T10:00:00.000Z',
+  }];
+  api.state.reportsLoaded = true;
+  api.state.reportProject = 'Send';
+  api.state.queuedMessages = new Map([
+    ['session_1', [{ id: 'queued_1', text: 'Send', status: 'pending' }]],
+  ]);
+
+  const sessionListHtml = api.renderSessionList().innerHTML;
+  assert.match(sessionListHtml, /<span class="project-rail-item-main" data-i18n-skip>Send<\/span>/u);
+  assert.match(sessionListHtml, /<span class="session-project" data-i18n-skip>Send<\/span>/u);
+  assert.match(sessionListHtml, /<span class="session-preview" data-i18n-skip>Send<\/span>/u);
+  assert.match(sessionListHtml, /<button class="ghost compact-button session-archive"[^>]*>归档<\/button>/u);
+  assert.doesNotMatch(sessionListHtml, /<span class="session-project">发送<\/span>/u);
+  assert.doesNotMatch(sessionListHtml, /<span class="session-preview">发送<\/span>/u);
+
+  const chatHtml = api.renderChat().innerHTML;
+  assert.match(chatHtml, /<span>Goal active<\/span>/u);
+  assert.match(chatHtml, /<span class="goal-objective">Send<\/span>/u);
+  assert.match(chatHtml, /<span class="queued-message-text" data-i18n-skip>Send<\/span>/u);
+  assert.match(chatHtml, /aria-label="删除排队消息"/u);
+  assert.doesNotMatch(chatHtml, /目标进行中/u);
+  assert.doesNotMatch(chatHtml, /<span class="goal-objective">发送<\/span>/u);
+  assert.doesNotMatch(chatHtml, /<span class="queued-message-text">发送<\/span>/u);
+
+  const reportsHtml = api.renderReportsPage().innerHTML;
+  assert.match(reportsHtml, /<span class="report-title" data-i18n-skip>Send<\/span>/u);
+  assert.match(reportsHtml, /<button class="ghost compact-button report-favorite"[^>]*>收藏<\/button>/u);
+  assert.doesNotMatch(reportsHtml, /<span class="report-title">发送<\/span>/u);
+});
+
+test('Chinese mobile project drawer toggles without rerendering the session list', async () => {
+  const { api, context } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessions = Array.from({ length: 50 }, (_item, index) => ({
+    id: `session_${index}`,
+    cwd: `/repo/project-${index}`,
+    projectDisplayName: `Project ${index}`,
+    lastUserInput: `Send ${index}`,
+    updatedAt: `2026-05-19T10:${String(index).padStart(2, '0')}:00.000Z`,
+    settings: { metadata: {} },
+  }));
+  api.render();
+
+  const renderCountBeforeOpen = context.__appRenderCount;
+  const toggleButton = context.document.querySelector('#mobile-sidebar-toggle-button');
+  assert.ok(toggleButton);
+  toggleButton.click();
+
+  assert.equal(api.state.mobileSidebarOpen, true);
+  assert.equal(context.__appRenderCount, renderCountBeforeOpen);
+  assert.equal(context.document.querySelector('#mobile-drawer-backdrop')?.classList.contains('is-open'), true);
+  assert.equal(context.document.querySelector('.mobile-project-drawer')?.classList.contains('is-open'), true);
+
+  const renderCountBeforeClose = context.__appRenderCount;
+  const backdrop = context.document.querySelector('#mobile-drawer-backdrop');
+  assert.ok(backdrop);
+  backdrop.click();
+
+  assert.equal(api.state.mobileSidebarOpen, false);
+  assert.equal(context.__appRenderCount, renderCountBeforeClose);
+  assert.equal(context.document.querySelector('#mobile-drawer-backdrop')?.classList.contains('is-open'), false);
+  assert.equal(context.document.querySelector('.mobile-project-drawer')?.classList.contains('is-open'), false);
+});
+
+test('Chinese session list skips bulk localization when returning from chat', async () => {
+  const { api, context } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_0';
+  api.state.currentSession = { id: 'session_0', cwd: '/repo/project-0', settings: { metadata: {} } };
+  api.state.sessions = Array.from({ length: 80 }, (_item, index) => ({
+    id: `session_${index}`,
+    cwd: `/repo/project-${index}`,
+    projectDisplayName: `Project ${index}`,
+    firstUserInput: `Send ${index}`,
+    lastUserInput: `Send ${index}`,
+    updatedAt: `2026-05-19T10:${String(index).padStart(2, '0')}:00.000Z`,
+    settings: { metadata: {} },
+  }));
+
+  api.showSessionList();
+  const html = context.document.querySelector('#app').innerHTML;
+
+  assert.match(html, /<main class="session-list" data-i18n-skip>/u);
+  assert.match(html, /<nav class="project-rail-list" data-i18n-skip>/u);
+  assert.match(html, /<span class="project-rail-item-main">所有会话<\/span>/u);
+  assert.match(html, /<button class="ghost compact-button session-archive"[^>]*>归档<\/button>/u);
+  assert.match(html, /<button class="ghost compact-button session-favorite"[^>]*>收藏<\/button>/u);
+  assert.match(html, /<span class="session-preview" data-i18n-skip>Send 0<\/span>/u);
+  assert.doesNotMatch(html, /<span class="session-preview" data-i18n-skip>发送 0<\/span>/u);
+});
+
+test('Chinese chat timeline skips bulk localization for many conversation items', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.view = 'chat';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo/Send', settings: { metadata: {} } };
+  api.state.timeline = Array.from({ length: 80 }, (_item, index) => ({
+    kind: 'message',
+    role: index % 2 ? 'assistant' : 'user',
+    label: index % 2 ? 'Assistant' : 'You',
+    meta: index % 2 ? 'final' : '',
+    text: `Send ${index}`,
+    attachments: [],
+  }));
+
+  const html = api.renderChat().innerHTML;
+
+  assert.match(html, /<main class="timeline" id="timeline" data-i18n-skip>/u);
+  assert.match(html, /<span class="card-title">你<\/span>/u);
+  assert.match(html, /<span class="card-title">助手<\/span>/u);
+  assert.match(html, /<span class="card-kind">最终<\/span>/u);
+  assert.match(html, /<p class="message-text">Send 0<\/p>/u);
+  assert.doesNotMatch(html, /<p class="message-text">发送 0<\/p>/u);
+});
+
+test('Chinese bulk localization skips nested protected containers completely', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+
+  const html = api.localizeFragment(`
+    <section>
+      <div class="dynamic-list" data-i18n-skip>
+        <div><span>Send</span></div>
+        <p>Read only</p>
+      </div>
+      <button>Send</button>
+    </section>
+  `);
+
+  assert.match(html, /<span>Send<\/span>/u);
+  assert.match(html, /<p>Read only<\/p>/u);
+  assert.match(html, /<button>发送<\/button>/u);
+  assert.doesNotMatch(html, /<p>只读<\/p>/u);
+});
+
+test('Chinese report lists skip bulk localization for many reports', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.view = 'reports';
+  api.state.reportsLoaded = true;
+  api.state.reportProject = 'project-a';
+  api.state.reports = Array.from({ length: 120 }, (_item, index) => ({
+    id: `project-a/2026-05/report-${index}.md`,
+    project: 'project-a',
+    title: `Send report ${index}`,
+    kind: 'markdown',
+    favorite: index % 2 === 0,
+    updatedAt: `2026-05-19T10:${String(index % 60).padStart(2, '0')}:00.000Z`,
+  }));
+
+  const html = api.renderReportsPage().innerHTML;
+
+  assert.match(html, /<main class="report-list" data-i18n-skip>/u);
+  assert.match(html, /<span class="report-title" data-i18n-skip>Send report 0<\/span>/u);
+  assert.match(html, /<button class="ghost compact-button report-favorite"[^>]*>取消收藏<\/button>/u);
+  assert.match(html, /<button class="ghost compact-button report-favorite"[^>]*>收藏<\/button>/u);
+  assert.doesNotMatch(html, /<span class="report-title" data-i18n-skip>发送 report 0<\/span>/u);
+});
+
+test('Chinese admin lists skip bulk localization for many management rows', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'admin', isAdmin: true, mode: 'multi' } };
+  api.state.view = 'admin';
+  api.state.admin.loaded = true;
+  api.state.admin.settings = { multiUserEnabled: true };
+  api.state.admin.page = 'users';
+  api.state.admin.roles = [{ id: 'role_user', name: 'User', projectGrants: [] }];
+  api.state.admin.users = Array.from({ length: 120 }, (_item, index) => ({
+    id: `user_${index}`,
+    username: `Send user ${index}`,
+    enabled: true,
+    roleId: 'role_user',
+    roleIds: ['role_user'],
+  }));
+
+  const html = api.renderAdminConsole().innerHTML;
+
+  assert.match(html, /<div class="admin-list" data-i18n-skip>/u);
+  assert.match(html, /<span class="admin-row-main" data-i18n-skip>Send user 0<\/span>/u);
+  assert.match(html, /<button class="ghost compact-button" type="submit">保存<\/button>/u);
+  assert.match(html, /data-admin-toggle-user-enabled="false">停用<\/button>/u);
+  assert.match(html, /data-admin-delete-user-id="user_0">删除<\/button>/u);
+  assert.doesNotMatch(html, /<span class="admin-row-main" data-i18n-skip>发送 user 0<\/span>/u);
+});
+
+test('Chinese new-session project picker skips bulk localization for many projects', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.authSession = { id: 'auth_1', principal: { userId: 'user_1', isAdmin: false, mode: 'multi' } };
+  api.state.view = 'new';
+  api.state.projectsLoaded = true;
+  api.state.projects = Array.from({ length: 120 }, (_item, index) => ({
+    id: `project_${index}`,
+    cwd: `/repo/project-${index}`,
+    displayName: `Send project ${index}`,
+    enabled: true,
+  }));
+
+  const html = api.renderNewSession().innerHTML;
+
+  assert.match(html, /<select id="new-project-select" name="projectId" data-i18n-skip>/u);
+  assert.match(html, /<option value="project_0" selected data-i18n-skip>Send project 0<\/option>/u);
+  assert.match(html, /<button class="primary primary-action" type="submit">开始<\/button>/u);
+  assert.doesNotMatch(html, /发送 project 0/u);
+});
+
+test('Chinese dynamic chat subcomponents localize fixed labels without translating user data', async () => {
+  const { api } = await loadAppHarness();
+
+  api.applyLanguage('zh-CN');
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo/Send', settings: { metadata: {} } };
+  api.state.queuedMessages = new Map([
+    ['session_1', [{ id: 'queued_1', text: 'Send queued', status: 'pending' }]],
+  ]);
+  api.state.composerAttachments = [{
+    id: 'local_att_1',
+    status: 'ready',
+    fileName: 'Send.txt',
+    sizeBytes: 12,
+    uploaded: { storage: 'state' },
+  }];
+  api.state.timeline = [
+    {
+      kind: 'message',
+      role: 'user',
+      label: 'You',
+      text: 'See attachment',
+      attachments: [{ kind: 'image', fileName: 'Send.png', mimeType: 'image/png' }],
+    },
+    {
+      id: 'batch_1',
+      kind: 'batch',
+      title: 'Batch',
+      status: 'running',
+      summary: { command: 'echo Send', approval: 'required' },
+    },
+  ];
+
+  const html = api.renderChat().innerHTML;
+
+  assert.match(html, /<span class="queued-message-text" data-i18n-skip>Send queued<\/span>/u);
+  assert.match(html, /aria-label="删除排队消息"[^>]*>删除<\/button>/u);
+  assert.match(html, /<span class="attachment-name" data-i18n-skip>Send\.txt<\/span>/u);
+  assert.match(html, /<span class="attachment-status">已保存<\/span>/u);
+  assert.match(html, /aria-label="移除 Send\.txt"/u);
+  assert.match(html, /<span class="message-attachment-kind">图片<\/span>/u);
+  assert.match(html, /<span class="message-attachment-name" data-i18n-skip>Send\.png<\/span>/u);
+  assert.match(html, /<span class="card-kind">运行中<\/span>/u);
+  assert.match(html, /<strong>命令<\/strong>/u);
+  assert.match(html, /<strong>审批<\/strong>/u);
+  assert.doesNotMatch(html, /发送 queued/u);
+  assert.doesNotMatch(html, /发送\.txt/u);
+});
+
 test('pull refresh indicator keeps readable themed colors', async () => {
   const styles = await readFile(stylesUrl, 'utf8');
 
   assert.match(styles, /\.pull-refresh-indicator\s*\{[^}]*background:\s*var\(--panel\);/su);
   assert.match(styles, /\.pull-refresh-indicator\s*\{[^}]*color:\s*var\(--text\);/su);
   assert.doesNotMatch(styles, /\.pull-refresh-indicator\s*\{[^}]*background:\s*rgba\(18,\s*23,\s*34/su);
+});
+
+test('session card summaries reserve two lines and clamp overflow', async () => {
+  const styles = await readFile(stylesUrl, 'utf8');
+
+  assert.match(styles, /\.session-preview\s*\{[^}]*display:\s*-webkit-box;/su);
+  assert.match(styles, /\.session-preview\s*\{[^}]*-webkit-box-orient:\s*vertical;/su);
+  assert.match(styles, /\.session-preview\s*\{[^}]*-webkit-line-clamp:\s*2;/su);
+  assert.match(styles, /\.session-preview\s*\{[^}]*white-space:\s*normal;/su);
+  assert.match(styles, /\.session-preview\s*\{[^}]*min-height:\s*calc\(var\(--session-summary-line-height\)\s*\*\s*2\);/su);
 });
 
 test('new session path entry and primary submit buttons are readable on mobile', async () => {
@@ -1206,7 +1732,7 @@ test('new session path entry and primary submit buttons are readable on mobile',
   assert.match(styles, /\.new-session-page textarea\s*\{[^}]*resize:\s*vertical;/su);
   assert.match(styles, /\.primary-action\s*\{[^}]*min-height:\s*48px;/su);
   assert.match(app, /<button class="\$\{desktop \? 'primary compact-button' : 'primary primary-action'\}" type="submit"\$\{startDisabled \? ' disabled' : ''\}>Start<\/button>/u);
-  assert.match(app, /<button class="primary primary-action" type="submit">Log in<\/button>/u);
+  assert.match(app, /<button class="primary primary-action" type="submit">\$\{escapeHtml\(t\('Log in'\)\)\}<\/button>/u);
 });
 
 test('danger buttons use theme-aware readable colors', async () => {
@@ -1437,7 +1963,7 @@ test('composer shows external expand above Attach and keeps session menu in the 
   assert.match(shortHtml, /class="chat-header-actions"[\s\S]*id="settings-toggle"[^>]*>\.\.\.<\/button>/u);
   assert.match(shortHtml, /id="attach-button"[^>]*>\+<\/button>/u);
   assert.match(shortHtml, /class="message-editor-shell [^"]*"/u);
-  assert.match(shortHtml, /<textarea id="prompt-input"[\s\S]*<button class="primary compact-send" type="submit" id="send-button">Send<\/button>/u);
+  assert.match(shortHtml, /<textarea id="prompt-input"[\s\S]*<button class="primary compact-send" type="submit" id="send-button"[^>]*aria-label="Send"[^>]*>Send<\/button>/u);
   assert.doesNotMatch(shortHtml, /id="composer-refresh-button"/u);
   assert.match(shortHtml, /class="composer-wrap "/u);
   const shortComposerHtml = shortHtml.match(/<form class="composer[\s\S]*?<\/form>/u)?.[0] || '';
@@ -1464,7 +1990,7 @@ test('composer shows external expand above Attach and keeps session menu in the 
   assert.match(expandedHtml, /class="composer-wrap is-expanded"/u);
   assert.match(expandedHtml, /class="composer is-expanded"/u);
   assert.match(expandedHtml, /<div class="composer-leading-controls">[\s\S]*id="composer-expand-button"[\s\S]*v<\/button>[\s\S]*id="attach-button"[^>]*>\+<\/button>/u);
-  assert.match(expandedHtml, /<div class="message-editor-shell is-expanded"[\s\S]*<textarea id="prompt-input"[\s\S]*<button class="primary compact-send" type="submit" id="send-button">Send<\/button>[\s\S]*<\/div>/u);
+  assert.match(expandedHtml, /<div class="message-editor-shell is-expanded"[\s\S]*<textarea id="prompt-input"[\s\S]*<button class="primary compact-send" type="submit" id="send-button"[^>]*aria-label="Send"[^>]*>Send<\/button>[\s\S]*<\/div>/u);
   assert.doesNotMatch(expandedHtml, /id="composer-refresh-button"/u);
   assert.match(expandedHtml, /<textarea id="prompt-input"[\s\S]*id="send-button"/u);
 });
@@ -2690,7 +3216,7 @@ test('chat header renders current goal state under the project title', async () 
 
   const html = api.renderChatContent();
 
-  assert.match(html, /<div class="goal-status" data-status="paused">/u);
+  assert.match(html, /<div class="goal-status" data-status="paused" data-i18n-skip>/u);
   assert.match(html, /Goal paused/u);
   assert.match(html, /ship goal status indicator/u);
 });
@@ -3285,13 +3811,15 @@ test('chat stream updates do not rerender an open report viewer', async () => {
   assert.equal(reportViewer.scrollTop, 480);
 });
 
-test('session cards show only the last cwd segment in metadata', async () => {
+test('session cards show the first user message summary instead of cwd metadata', async () => {
   const { api } = await loadAppHarness();
 
   api.state.sortMode = 'time';
   api.state.sessions = [{
     id: 'session_path',
     cwd: '/Users/alice/workspace/project-alpha',
+    firstUserInput: 'First question about project alpha setup and initial constraints',
+    lastUserInput: 'Latest follow-up that should not render in the card summary',
     updatedAt: 1716200000000,
     settings: { metadata: {} },
   }];
@@ -3299,6 +3827,9 @@ test('session cards show only the last cwd segment in metadata', async () => {
   const html = api.renderSessionCards();
 
   assert.match(html, />project-alpha<\/span>/u);
+  assert.match(html, /class="session-preview" data-i18n-skip>First question about project alpha setup and initial constraints<\/span>/u);
+  assert.doesNotMatch(html, /Latest follow-up that should not render in the card summary/u);
+  assert.doesNotMatch(html, /No cwd/u);
   assert.doesNotMatch(html, /Users\/alice\/workspace\/project-alpha/u);
 });
 
@@ -3319,9 +3850,28 @@ test('session names prefer the last cwd segment over long stored project labels'
   const listHtml = api.renderSessionCards();
   const chatHtml = api.renderChat().innerHTML;
 
-  assert.match(listHtml, /class="session-project">project-beta<\/span>/u);
+  assert.match(listHtml, /class="session-project" data-i18n-skip>project-beta<\/span>/u);
   assert.doesNotMatch(listHtml, /workspace\/project-beta/u);
-  assert.match(chatHtml, /class="project-title">project-beta<\/div>/u);
+  assert.match(chatHtml, /class="project-title" data-i18n-skip>project-beta<\/div>/u);
+});
+
+test('session cards leave the summary area empty when no first message exists', async () => {
+  const { api } = await loadAppHarness();
+
+  api.state.sortMode = 'time';
+  api.state.sessions = [{
+    id: 'session_empty',
+    cwd: '/Users/alice/workspace/project-gamma',
+    updatedAt: 1716200000000,
+    settings: { metadata: {} },
+  }];
+
+  const html = api.renderSessionCards();
+
+  assert.match(html, /class="session-project" data-i18n-skip>project-gamma<\/span>/u);
+  assert.match(html, /class="session-preview"><\/span>/u);
+  assert.doesNotMatch(html, /No prompt preview/u);
+  assert.doesNotMatch(html, /No cwd/u);
 });
 
 test('chat reports button falls back to the top-level report project when only nested metadata matches', async () => {
@@ -4818,8 +5368,8 @@ test('desktop renders a project rail, session pane, and chat pane', async () => 
   api.state.projectsLoaded = true;
   api.state.sortMode = 'time';
   api.state.sessions = [
-    { id: 'session_1', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', favorite: true, lastUserInput: 'Build feature', updatedAt: 20, settings: { metadata: {} } },
-    { id: 'session_2', projectId: 'project_b', projectDisplayName: 'Project Beta', cwd: '/repo/b', favorite: true, lastUserInput: 'Fix bug', updatedAt: 10, settings: { metadata: {} } },
+    { id: 'session_1', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', favorite: true, firstUserInput: 'Build feature', lastUserInput: 'Build feature', updatedAt: 20, settings: { metadata: {} } },
+    { id: 'session_2', projectId: 'project_b', projectDisplayName: 'Project Beta', cwd: '/repo/b', favorite: true, firstUserInput: 'Fix bug', lastUserInput: 'Fix bug', updatedAt: 10, settings: { metadata: {} } },
   ];
   api.state.sessionId = 'session_1';
   api.state.currentSession = api.state.sessions[0];
@@ -4894,9 +5444,9 @@ test('desktop project selection filters sessions and opens the newest session fo
   api.state.projectsLoaded = true;
   api.state.sortMode = 'time';
   api.state.sessions = [
-    { id: 'session_older', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', lastUserInput: 'Older alpha', updatedAt: 10, settings: { metadata: {} } },
-    { id: 'session_newer', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', lastUserInput: 'Newest alpha', updatedAt: 50, settings: { metadata: {} } },
-    { id: 'session_beta', projectId: 'project_b', projectDisplayName: 'Project Beta', cwd: '/repo/b', lastUserInput: 'Beta work', updatedAt: 100, settings: { metadata: {} } },
+    { id: 'session_older', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', firstUserInput: 'Older alpha', lastUserInput: 'Older alpha', updatedAt: 10, settings: { metadata: {} } },
+    { id: 'session_newer', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', firstUserInput: 'Newest alpha', lastUserInput: 'Newest alpha', updatedAt: 50, settings: { metadata: {} } },
+    { id: 'session_beta', projectId: 'project_b', projectDisplayName: 'Project Beta', cwd: '/repo/b', firstUserInput: 'Beta work', lastUserInput: 'Beta work', updatedAt: 100, settings: { metadata: {} } },
   ];
 
   await api.selectProjectScope('project_a');
@@ -4961,9 +5511,9 @@ test('mobile project selection filters to project sessions without opening the n
   api.state.currentSession = { id: 'session_existing', cwd: '/repo/existing', settings: { metadata: {} } };
   api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Existing chat' }];
   api.state.sessions = [
-    { id: 'session_alpha_older', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', lastUserInput: 'Older alpha', updatedAt: 10, settings: { metadata: {} } },
-    { id: 'session_alpha_newer', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', lastUserInput: 'Newest alpha', updatedAt: 50, settings: { metadata: {} } },
-    { id: 'session_beta', projectId: 'project_b', projectDisplayName: 'Project Beta', cwd: '/repo/b', lastUserInput: 'Beta work', updatedAt: 100, settings: { metadata: {} } },
+    { id: 'session_alpha_older', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', firstUserInput: 'Older alpha', lastUserInput: 'Older alpha', updatedAt: 10, settings: { metadata: {} } },
+    { id: 'session_alpha_newer', projectId: 'project_a', projectDisplayName: 'Project Alpha', cwd: '/repo/a', firstUserInput: 'Newest alpha', lastUserInput: 'Newest alpha', updatedAt: 50, settings: { metadata: {} } },
+    { id: 'session_beta', projectId: 'project_b', projectDisplayName: 'Project Beta', cwd: '/repo/b', firstUserInput: 'Beta work', lastUserInput: 'Beta work', updatedAt: 100, settings: { metadata: {} } },
   ];
 
   await api.selectProjectScope('project_a');
@@ -5426,7 +5976,9 @@ test('mobile project drawer closes from the uncovered backdrop area', async () =
   assert.match(app, /const mobileProjectDrawerBackdrop = document\.querySelector\('#mobile-drawer-backdrop'\);/u);
   assert.match(app, /mobileProjectDrawerBackdrop\.addEventListener\('click',\s*\(event\) => \{/u);
   assert.match(app, /if \(event\.target !== mobileProjectDrawerBackdrop\) \{\s*return;\s*\}/u);
-  assert.match(app, /state\.mobileSidebarOpen = false;[\s\S]*render\(\);/u);
+  assert.match(app, /setMobileSidebarOpen\(false\);/u);
+  assert.match(app, /function setMobileSidebarOpen\(open\)/u);
+  assert.match(app, /\.mobile-project-drawer'\)\?\.classList\.toggle\('is-open', state\.mobileSidebarOpen\)/u);
 });
 
 test('mobile project drawer title stays below the phone status bar', async () => {
@@ -5620,6 +6172,153 @@ test('desktop reports open as a right-pane overlay and close back to workspace',
   assert.equal(api.state.desktopOverlay, null);
   assert.equal(api.state.sessionId, 'session_a');
   assert.match(api.context.document.querySelector('#app').innerHTML, /Workspace text/u);
+});
+
+test('desktop report viewer stays in the right pane and returns to reports overlay', async () => {
+  const { api } = await loadAppHarness({
+    viewportWidth: 1280,
+    desktopPointer: true,
+    fetch: async (url) => {
+      if (String(url).startsWith('/api/reports/project-a%2F2026-05-19%2Fsummary.md/content')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+            content: '# Summary',
+          }),
+        };
+      }
+      if (String(url).startsWith('/api/reports')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [] }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+      };
+    },
+  });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_a';
+  api.state.currentSession = { id: 'session_a', cwd: '/Users/alice/work/project-a', projectName: 'Project A', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Workspace text' }];
+  api.state.reports = [{
+    id: 'project-a/2026-05-19/summary.md',
+    project: 'project-a',
+    title: 'summary',
+    kind: 'markdown',
+    favorite: false,
+    updatedAt: '2026-05-19T10:00:00.000Z',
+  }];
+  api.state.reportsLoaded = true;
+
+  await api.openReportsPage({ project: 'project-a', returnView: 'chat' });
+  await api.openReportById('project-a/2026-05-19/summary.md');
+
+  const viewerHtml = api.context.document.querySelector('#app').innerHTML;
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopOverlay, 'report');
+  assert.equal(api.state.reportReturnView, 'reports');
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.match(viewerHtml, /desktop-workspace/u);
+  assert.match(viewerHtml, /desktop-session-pane/u);
+  assert.match(viewerHtml, /desktop-overlay/u);
+  assert.match(viewerHtml, /report-viewer/u);
+  assert.match(viewerHtml, /<h1>Summary<\/h1>/u);
+
+  api.closeReportViewer();
+
+  const reportsHtml = api.context.document.querySelector('#app').innerHTML;
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopOverlay, 'reports');
+  assert.equal(api.state.reportProject, 'project-a');
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.match(reportsHtml, /desktop-workspace/u);
+  assert.match(reportsHtml, /desktop-session-pane/u);
+  assert.match(reportsHtml, /data-report-id="project-a\/2026-05-19\/summary\.md"/u);
+});
+
+test('desktop report links open in the right pane and close back to the active session', async () => {
+  const { api } = await loadAppHarness({
+    viewportWidth: 1280,
+    desktopPointer: true,
+    fetch: async (url, options = {}) => {
+      if (String(url) === '/api/reports/resolve') {
+        assert.equal(JSON.parse(options.body).path, '/Users/alice/.codex-web/reports/project-a/2026-05-19/summary.md');
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+          }),
+        };
+      }
+      if (String(url).startsWith('/api/reports/project-a%2F2026-05-19%2Fsummary.md/content')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            report: {
+              id: 'project-a/2026-05-19/summary.md',
+              project: 'project-a',
+              title: 'summary',
+              kind: 'markdown',
+            },
+            content: '# Summary',
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+      };
+    },
+  });
+
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'sessions';
+  api.state.sessionId = 'session_a';
+  api.state.currentSession = { id: 'session_a', cwd: '/Users/alice/work/project-a', projectName: 'Project A', settings: { metadata: {} } };
+  api.state.timeline = [{ id: 'm1', kind: 'message', role: 'assistant', label: 'Assistant', text: 'Workspace text' }];
+
+  await api.openReportByPath('/Users/alice/.codex-web/reports/project-a/2026-05-19/summary.md', { returnView: 'chat' });
+
+  const viewerHtml = api.context.document.querySelector('#app').innerHTML;
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopOverlay, 'report');
+  assert.equal(api.state.reportReturnView, 'chat');
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.match(viewerHtml, /desktop-workspace/u);
+  assert.match(viewerHtml, /desktop-session-pane/u);
+  assert.match(viewerHtml, /report-viewer/u);
+  assert.match(viewerHtml, /<h1>Summary<\/h1>/u);
+
+  api.closeReportViewer();
+
+  const chatHtml = api.context.document.querySelector('#app').innerHTML;
+  assert.equal(api.state.view, 'sessions');
+  assert.equal(api.state.desktopOverlay, null);
+  assert.equal(api.state.sessionId, 'session_a');
+  assert.match(chatHtml, /Workspace text/u);
+  assert.doesNotMatch(chatHtml, /report-viewer/u);
 });
 
 test('session topbar keeps New visually neutral and Settings in the rail', async () => {
@@ -6113,11 +6812,11 @@ test('session restore renders recents first and loads favorites only on demand',
   });
   await flushMicrotasks();
 
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions', '/api/reports']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/settings', '/api/models', '/api/projects', '/api/sessions', '/api/reports']);
   pending[1]?.resolve({
     ok: true,
     status: 200,
-    json: async () => ({ items: [] }),
+    json: async () => ({ settings: { siteTitle: 'Codex Web' }, permissions: { canSetSiteTitle: false } }),
   });
   pending[2]?.resolve({
     ok: true,
@@ -6127,6 +6826,11 @@ test('session restore renders recents first and loads favorites only on demand',
   pending[3]?.resolve({
     ok: true,
     status: 200,
+    json: async () => ({ items: [] }),
+  });
+  pending[4]?.resolve({
+    ok: true,
+    status: 200,
     json: async () => ({
       items: [
         { id: 'all_session', favorite: false, updatedAt: 30, settings: { metadata: {} } },
@@ -6134,7 +6838,7 @@ test('session restore renders recents first and loads favorites only on demand',
       ],
     }),
   });
-  pending[4]?.resolve({
+  pending[5]?.resolve({
     ok: true,
     status: 200,
     json: async () => ({ items: [] }),
@@ -6145,13 +6849,13 @@ test('session restore renders recents first and loads favorites only on demand',
   assert.equal(api.state.sortMode, 'time');
   assert.equal(api.state.sessionsScope, 'all');
   assert.equal(JSON.stringify(api.state.sessions.map((session) => session.id)), JSON.stringify(['all_session', 'favorite_session']));
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions', '/api/reports']);
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/settings', '/api/models', '/api/projects', '/api/sessions', '/api/reports']);
 
   const loadFavorites = api.setSessionSortMode('favorites');
   await flushMicrotasks();
 
-  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/models', '/api/projects', '/api/sessions', '/api/reports', '/api/sessions?favorite=true']);
-  pending[5]?.resolve({
+  assert.deepEqual(pending.map((request) => request.path), ['/api/auth/me', '/api/settings', '/api/models', '/api/projects', '/api/sessions', '/api/reports', '/api/sessions?favorite=true']);
+  pending[6]?.resolve({
     ok: true,
     status: 200,
     json: async () => ({
@@ -6247,8 +6951,8 @@ test('all tab rerenders in time order when session detail refresh finishes after
   api.state.sessionsScope = 'all';
   api.state.sessionsLoadedByScope.all = true;
   api.state.sessions = [
-    { id: 'session_other', cwd: '/repo/other', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
-    { id: 'session_recent', cwd: '/repo/recent', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } },
+    { id: 'session_other', cwd: '/repo/other', firstUserInput: 'Other first', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
+    { id: 'session_recent', cwd: '/repo/recent', firstUserInput: 'Old first', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } },
   ];
   api.state.sessionsByScope.all = [...api.state.sessions];
 
@@ -6256,7 +6960,7 @@ test('all tab rerenders in time order when session detail refresh finishes after
   const selectPromise = api.selectSession('session_recent');
   api.showSessionList();
 
-  assert.match(context.document.querySelector('#app').innerHTML, /Other prompt[\s\S]*Old prompt/u);
+  assert.ok(context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_other"') < context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_recent"'));
 
   assert.equal(typeof resolveSessionDetail, 'function');
   resolveSessionDetail({
@@ -6278,7 +6982,7 @@ test('all tab rerenders in time order when session detail refresh finishes after
   await flushMicrotasks();
 
   assert.equal(api.state.view, 'sessions');
-  assert.match(context.document.querySelector('#app').innerHTML, /Newest prompt[\s\S]*Other prompt/u);
+  assert.ok(context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_recent"') < context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_other"'));
 });
 
 test('all tab rerenders in time order when background session refresh finishes after returning to list', async () => {
@@ -6301,9 +7005,9 @@ test('all tab rerenders in time order when background session refresh finishes a
   api.state.sessionsScope = 'all';
   api.state.sessionsLoadedByScope.all = true;
   api.state.sessionId = 'session_recent';
-  api.state.currentSession = { id: 'session_recent', cwd: '/repo/recent', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } };
+  api.state.currentSession = { id: 'session_recent', cwd: '/repo/recent', firstUserInput: 'Old first', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } };
   api.state.sessions = [
-    { id: 'session_other', cwd: '/repo/other', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
+    { id: 'session_other', cwd: '/repo/other', firstUserInput: 'Other first', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
     api.state.currentSession,
   ];
   api.state.sessionsByScope.all = [...api.state.sessions];
@@ -6315,7 +7019,7 @@ test('all tab rerenders in time order when background session refresh finishes a
   const refreshPromise = api.refreshCurrentSessionMetadata();
   api.showSessionList();
 
-  assert.match(context.document.querySelector('#app').innerHTML, /Other prompt[\s\S]*Old prompt/u);
+  assert.ok(context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_other"') < context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_recent"'));
 
   assert.equal(typeof resolveSessionRefresh, 'function');
   resolveSessionRefresh({
@@ -6337,7 +7041,7 @@ test('all tab rerenders in time order when background session refresh finishes a
   await flushMicrotasks();
 
   assert.equal(api.state.view, 'sessions');
-  assert.match(context.document.querySelector('#app').innerHTML, /Newest prompt[\s\S]*Other prompt/u);
+  assert.ok(context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_recent"') < context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_other"'));
 });
 
 test('all tab uses newer updatedAt when refreshed session omits lastInputAt', async () => {
@@ -6360,9 +7064,9 @@ test('all tab uses newer updatedAt when refreshed session omits lastInputAt', as
   api.state.sessionsScope = 'all';
   api.state.sessionsLoadedByScope.all = true;
   api.state.sessionId = 'session_recent';
-  api.state.currentSession = { id: 'session_recent', cwd: '/repo/recent', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } };
+  api.state.currentSession = { id: 'session_recent', cwd: '/repo/recent', firstUserInput: 'Old first', lastUserInput: 'Old prompt', lastInputAt: 100, updatedAt: 100, settings: { metadata: {} } };
   api.state.sessions = [
-    { id: 'session_other', cwd: '/repo/other', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
+    { id: 'session_other', cwd: '/repo/other', firstUserInput: 'Other first', lastUserInput: 'Other prompt', lastInputAt: 200, updatedAt: 200, settings: { metadata: {} } },
     api.state.currentSession,
   ];
   api.state.sessionsByScope.all = [...api.state.sessions];
@@ -6374,7 +7078,7 @@ test('all tab uses newer updatedAt when refreshed session omits lastInputAt', as
   const refreshPromise = api.refreshCurrentSessionMetadata();
   api.showSessionList();
 
-  assert.match(context.document.querySelector('#app').innerHTML, /Other prompt[\s\S]*Old prompt/u);
+  assert.ok(context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_other"') < context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_recent"'));
 
   assert.equal(typeof resolveSessionRefresh, 'function');
   resolveSessionRefresh({
@@ -6395,7 +7099,7 @@ test('all tab uses newer updatedAt when refreshed session omits lastInputAt', as
   await flushMicrotasks();
 
   assert.equal(api.state.view, 'sessions');
-  assert.match(context.document.querySelector('#app').innerHTML, /Newest prompt[\s\S]*Other prompt/u);
+  assert.ok(context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_recent"') < context.document.querySelector('#app').innerHTML.indexOf('data-session-id="session_other"'));
 });
 
 test('favorites tab never renders manual ordering controls', async () => {
@@ -6993,6 +7697,48 @@ test('PWA history refresh surfaces the latest failed turn as a visible error', a
   assert.doesNotMatch(api.renderChat().innerHTML, /composer-error/u);
 });
 
+test('composer request failures keep the optimistic user message before the error', async () => {
+  const fetchCalls = [];
+  const { api } = await loadAppHarness({
+    fetch: async (path) => {
+      fetchCalls.push(path);
+      if (path === '/api/sessions/session_1/turns') {
+        return {
+          ok: false,
+          status: 429,
+          json: async () => ({
+            error: 'rate_limit',
+            message: '429 Too Many Requests',
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  api.state.token = 'token';
+  api.state.authSession = { id: 'auth_1' };
+  api.state.view = 'chat';
+  api.state.sessionId = 'session_1';
+  api.state.currentSession = { id: 'session_1', cwd: '/repo', settings: { metadata: {} } };
+  api.state.prompt = 'Question before rate limit';
+
+  await api.onComposerSubmit({ preventDefault() {} });
+
+  assert.deepEqual(fetchCalls, [
+    '/api/sessions/session_1/turns',
+    '/api/sessions/session_1/timeline',
+  ]);
+  assert.equal(JSON.stringify(api.state.timeline.map((item) => item.text)), JSON.stringify([
+    'Question before rate limit',
+    '429 Too Many Requests',
+  ]));
+  assert.equal(api.state.timeline[0]?.role, 'user');
+  assert.equal(api.state.timeline[0]?.meta, 'pending');
+  assert.equal(api.state.timeline[1]?.role, 'system');
+  assert.equal(api.state.timeline[1]?.severity, 'error');
+});
+
 test('opening a session surfaces a failed terminal turn as a visible error', async () => {
   const { api } = await loadAppHarness({
     fetch: async (path) => {
@@ -7555,6 +8301,20 @@ async function loadAppHarness(overrides = {}) {
   const storage = new Map(Object.entries(overrides.storage || {}));
   const elements = new Map();
   let activeElement = null;
+  const removeClasses = (element, classNames) => {
+    const current = new Set(String(element.className || '').split(/\s+/u).filter(Boolean));
+    for (const className of classNames) {
+      current.delete(className);
+    }
+    element.className = [...current].join(' ');
+  };
+  const addClasses = (element, classNames) => {
+    const current = new Set(String(element.className || '').split(/\s+/u).filter(Boolean));
+    for (const className of classNames) {
+      current.add(className);
+    }
+    element.className = [...current].join(' ');
+  };
   const trackElement = (selector, element) => {
     elements.set(selector, element);
     return element;
@@ -7562,30 +8322,68 @@ async function loadAppHarness(overrides = {}) {
   const createTrackedElement = (selector, patch = {}) => ({
     innerHTML: '',
     style: {},
+    className: '',
     classList: {
-      add() {},
-      remove() {},
+      add(...classNames) {
+        if (this.element) {
+          addClasses(this.element, classNames);
+        }
+      },
+      remove(...classNames) {
+        if (this.element) {
+          removeClasses(this.element, classNames);
+        }
+      },
+      toggle(className, force) {
+        const shouldAdd = force === undefined ? !this.contains(className) : Boolean(force);
+        if (shouldAdd) {
+          this.add(className);
+          return true;
+        }
+        this.remove(className);
+        return false;
+      },
+      contains(className) {
+        return String(this.element?.className || '').split(/\s+/u).includes(className);
+      },
+      element: null,
     },
     hidden: false,
     scrollTop: 0,
     scrollHeight: 0,
     clientHeight: 0,
-    addEventListener() {},
+    __listeners: new Map(),
+    addEventListener(type, listener) {
+      this.__listeners.set(type, listener);
+    },
     removeEventListener() {},
     setAttribute() {},
     querySelector: () => null,
     getBoundingClientRect: () => ({ height: 0 }),
+    click() {
+      this.__listeners.get('click')?.({ target: this, stopPropagation() {} });
+    },
     focus() {
       activeElement = this;
     },
     ...patch,
   });
+  const createElementFromHtml = (selector, html, patch = {}) => {
+    const className = html.match(/\sclass="([^"]*)"/u)?.[1] || '';
+    const id = html.match(/\sid="([^"]*)"/u)?.[1] || '';
+    const element = createTrackedElement(selector, { className, id, ...patch });
+    element.classList.element = element;
+    return element;
+  };
   const materializeAppHtml = (html) => {
     elements.delete('#timeline');
     elements.delete('#prompt-input');
     elements.delete('.report-viewer');
+    elements.delete('#mobile-sidebar-toggle-button');
+    elements.delete('#mobile-drawer-backdrop');
+    elements.delete('.mobile-project-drawer');
     if (String(html || '').includes('id="timeline"')) {
-      const timelineHtml = String(html).match(/<main class="timeline" id="timeline">([\s\S]*?)<\/main>/u)?.[1] || '';
+      const timelineHtml = String(html).match(/<main\b[^>]*class="timeline"[^>]*id="timeline"[^>]*>([\s\S]*?)<\/main>/u)?.[1] || '';
       trackElement('#timeline', createTrackedElement('#timeline', {
         innerHTML: timelineHtml,
         scrollTop: 0,
@@ -7607,6 +8405,18 @@ async function loadAppHarness(overrides = {}) {
         scrollHeight: 1200,
         clientHeight: 600,
       }));
+    }
+    if (String(html || '').includes('id="mobile-sidebar-toggle-button"')) {
+      const toggleHtml = String(html).match(/<button\b[^>]*id="mobile-sidebar-toggle-button"[^>]*>/u)?.[0] || '';
+      trackElement('#mobile-sidebar-toggle-button', createElementFromHtml('#mobile-sidebar-toggle-button', toggleHtml));
+    }
+    if (String(html || '').includes('id="mobile-drawer-backdrop"')) {
+      const backdropHtml = String(html).match(/<div\b[^>]*id="mobile-drawer-backdrop"[^>]*>/u)?.[0] || '';
+      trackElement('#mobile-drawer-backdrop', createElementFromHtml('#mobile-drawer-backdrop', backdropHtml));
+    }
+    if (String(html || '').includes('class="mobile-project-drawer')) {
+      const drawerHtml = String(html).match(/<aside\b[^>]*class="[^"]*\bmobile-project-drawer\b[^"]*"[^>]*>/u)?.[0] || '';
+      trackElement('.mobile-project-drawer', createElementFromHtml('.mobile-project-drawer', drawerHtml));
     }
   };
   const appElement = {
@@ -7774,6 +8584,8 @@ globalThis.__codexWebTest = {
   toggleProjectFavorite: typeof toggleProjectFavorite === 'function' ? toggleProjectFavorite : null,
   toggleSessionFavorite: typeof toggleSessionFavorite === 'function' ? toggleSessionFavorite : null,
 	  reloadRuntime: typeof reloadRuntime === 'function' ? reloadRuntime : null,
+	  refreshGlobalSettings: typeof refreshGlobalSettings === 'function' ? refreshGlobalSettings : null,
+	  saveSiteTitle: typeof saveSiteTitle === 'function' ? saveSiteTitle : null,
 	  refreshAdminSessions: typeof refreshAdminSessions === 'function' ? refreshAdminSessions : null,
 	  saveAdminProject: typeof saveAdminProject === 'function' ? saveAdminProject : null,
 	  saveAdminRole: typeof saveAdminRole === 'function' ? saveAdminRole : null,
@@ -7783,6 +8595,9 @@ globalThis.__codexWebTest = {
 	  deleteAdminUser: typeof deleteAdminUser === 'function' ? deleteAdminUser : null,
 	  applyTheme: typeof applyTheme === 'function' ? applyTheme : null,
 	  applySiteTitle: typeof applySiteTitle === 'function' ? applySiteTitle : null,
+	  applyLanguage: typeof applyLanguage === 'function' ? applyLanguage : null,
+	  translateUi: typeof translateUi === 'function' ? translateUi : null,
+	  localizeFragment: typeof localizeFragment === 'function' ? localizeFragment : null,
 	  applyDefaultThreadSettings: typeof applyDefaultThreadSettings === 'function' ? applyDefaultThreadSettings : null,
 	  applyDefaultSettings: typeof applyDefaultSettings === 'function' ? applyDefaultSettings : null,
 	  renderSettingsDrawer: typeof renderSettingsDrawer === 'function' ? renderSettingsDrawer : null,

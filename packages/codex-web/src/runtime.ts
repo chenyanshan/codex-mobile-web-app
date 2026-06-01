@@ -21,6 +21,7 @@ import {
 import { CodexWebEventBus } from './event_bus.js';
 import {
   createBatchCompletedEvent,
+  isTerminalProviderTurnResult,
   normalizeApprovalBatchEvent,
   normalizeApprovalBatchUpdatedEvent,
   normalizeApprovalEvent,
@@ -640,15 +641,19 @@ export class CodexWebRuntime {
         details: (error as Error & { details?: unknown } | undefined)?.details ?? null,
         items: [],
         message: error instanceof Error ? error.message : String(error || ''),
-      }), timelineMessagesFromThread(session.thread).length);
+      }), timelineMessagesFromThread(session.thread).length + 1);
       throw error;
     });
     runPromise.catch(() => {});
     startedPromise.then(({ turnId }) => {
       this.activeTurns.set(turnId, runPromise);
-      runPromise.finally(() => {
+      runPromise.then((result) => {
+        if (isTerminalProviderTurnResult(result)) {
+          this.activeTurns.delete(turnId);
+        }
+      }).catch(() => {
         this.activeTurns.delete(turnId);
-      }).catch(() => {});
+      });
     }).catch(() => {});
     return startedPromise;
   }
@@ -918,7 +923,7 @@ export class CodexWebRuntime {
       favorite: current.favorite === true,
       favoriteOrder: current.favoriteOrder ?? null,
       goal: null,
-      activeTurnId: this.activeTurnIdForThread(thread.threadId),
+      activeTurnId: this.activeTurnIdForThread(thread.threadId, thread),
       settings: current,
       thread,
       timeline: composeSessionTimeline(thread, this.timelineStore?.list(thread.threadId) ?? []),
@@ -958,9 +963,13 @@ export class CodexWebRuntime {
     };
   }
 
-  private activeTurnIdForThread(threadId: string): string | null {
+  private activeTurnIdForThread(threadId: string, thread: ProviderThreadSummary | null = null): string | null {
     for (const [turnId] of this.activeTurns) {
       if (this.turnToThread.get(turnId) === threadId) {
+        if (thread && isTerminalThreadTurn(thread, turnId)) {
+          this.activeTurns.delete(turnId);
+          continue;
+        }
         return turnId;
       }
     }
@@ -1495,6 +1504,12 @@ function isActiveTurnStatus(status: string | null | undefined): boolean {
     && !isSuccessTurnStatus(normalized)
     && !isFailureTurnStatus(normalized)
     && !isInterruptedTurnStatus(normalized);
+}
+
+function isTerminalThreadTurn(thread: ProviderThreadSummary, turnId: string): boolean {
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  const turn = turns.find((entry) => entry.id === turnId);
+  return Boolean(turn && !isActiveTurnStatus(turn.status));
 }
 
 function createTurnConflictError(sessionId: string, activeTurnId: string): CodexWebTurnConflictError {

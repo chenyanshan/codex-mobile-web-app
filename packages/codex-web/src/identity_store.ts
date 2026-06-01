@@ -5,6 +5,7 @@ import path from 'node:path';
 const PASSWORD_ITERATIONS = 310_000;
 const KEY_LENGTH = 32;
 const DIGEST = 'sha256';
+const DEFAULT_SITE_TITLE = 'Codex Web';
 
 export interface CodexWebProjectGrant {
   projectId: string;
@@ -71,6 +72,7 @@ export interface CodexWebUserSession {
 export interface CodexWebIdentityState {
   settings: {
     multiUserEnabled: boolean;
+    siteTitle: string;
   };
   users: CodexWebUser[];
   roles: CodexWebRole[];
@@ -135,6 +137,15 @@ export class FileIdentityStore {
     return this.withMutationLock(async () => {
       const state = await this.readState();
       state.settings.multiUserEnabled = enabled;
+      await this.writeState(state);
+      return state;
+    });
+  }
+
+  async setSiteTitle(siteTitle: string): Promise<CodexWebIdentityState> {
+    return this.withMutationLock(async () => {
+      const state = await this.readState();
+      state.settings.siteTitle = normalizeSiteTitle(siteTitle);
       await this.writeState(state);
       return state;
     });
@@ -423,7 +434,7 @@ export class FileIdentityStore {
 
 function emptyState(): CodexWebIdentityState {
   return {
-    settings: { multiUserEnabled: false },
+    settings: { multiUserEnabled: false, siteTitle: DEFAULT_SITE_TITLE },
     users: [],
     roles: [],
     projects: [],
@@ -439,6 +450,7 @@ function normalizeState(value: unknown): CodexWebIdentityState {
   return {
     settings: {
       multiUserEnabled: settings.multiUserEnabled === true,
+      siteTitle: normalizeSiteTitle(settings.siteTitle),
     },
     users: Array.isArray(record.users) ? record.users.map(normalizeUserOrNull).filter(isPresent) : [],
     roles: Array.isArray(record.roles) ? record.roles.map(normalizeRoleOrNull).filter(isPresent) : [],
@@ -603,6 +615,11 @@ function normalizePassword(password: string): string {
     throw new Error('Password must be at least 8 characters.');
   }
   return normalized;
+}
+
+function normalizeSiteTitle(siteTitle: unknown): string {
+  const normalized = typeof siteTitle === 'string' ? siteTitle.trim() : '';
+  return normalized || DEFAULT_SITE_TITLE;
 }
 
 function normalizeRequiredId(value: string, label: string): string {

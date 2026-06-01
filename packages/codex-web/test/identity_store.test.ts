@@ -36,6 +36,21 @@ test('identity store hashes user passwords and verifies credentials', async () =
   assert.equal(await store.verifyUserPassword('alice', 'wrong-password'), null);
 });
 
+test('identity store persists a normalized global site title', async () => {
+  const identityPath = await tempIdentityPath();
+  const store = new FileIdentityStore({ identityPath });
+
+  assert.equal((await store.readState()).settings.siteTitle, 'Codex Web');
+
+  const updated = await store.setSiteTitle('  Yan Shan Lab  ');
+
+  assert.deepEqual(updated.settings, {
+    multiUserEnabled: false,
+    siteTitle: 'Yan Shan Lab',
+  });
+  assert.equal((await store.readState()).settings.siteTitle, 'Yan Shan Lab');
+});
+
 test('identity store updates user access without changing password hash', async () => {
   const store = new FileIdentityStore({ identityPath: await tempIdentityPath() });
   await store.upsertUserWithPassword({

@@ -2,74 +2,49 @@
 
 English | [中文](README.zh-CN.md)
 
-Self-hosted mobile web console for controlling a local logged-in Codex runtime.
+Self-hosted web console for controlling a local logged-in Codex runtime from a
+phone, tablet, or desktop browser.
 
-The phone is only the remote UI. The Mac or Linux host keeps the Codex login,
+The browser is only a remote UI. The Mac or Linux host keeps Codex credentials,
 starts the Codex runtime, reads and writes local project files, executes shell
-commands, and stores app state. Remote access through a tunnel or reverse proxy
-is intentionally outside this repository.
+commands, and stores app state. Tunnel and reverse-proxy setup are intentionally
+outside this repository.
 
 > Ask Codex to install it:
 > `帮我安装 https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
 
-## Current State
+## What It Does
+
+- Password-protected single-host Codex web console.
+- PWA-friendly mobile UI with persistent per-device browser sessions.
+- Project-first workspace: desktop uses a project rail, session list, and chat
+  pane; mobile uses a project drawer.
+- Live Codex turn stream with assistant deltas, final answers, command batches,
+  file-change batches, approval requests, and runtime errors.
+- Multi-user/RBAC facade for project access, admin management, observer mode,
+  and read-only share links.
+- File and image attachments for turns. The backend stores files locally and
+  passes safe local paths to Codex.
+- Authenticated report index and report viewer, plus the bundled
+  `codex-mobile-report` skill.
+- macOS launchd and Linux systemd service helpers.
+- English and Simplified Chinese UI language setting, plus a backend-managed
+  site title for admins/single-user installs.
+
+## Repository Layout
+
+```text
+packages/codex-native-api   reusable Codex app-server integration
+packages/codex-web          HTTP API, auth, runtime bridge, and web UI
+scripts/install             AI-guided installer scripts
+scripts/service             launchd service helpers
+skills/codex-mobile-report  companion report skill
+docs/superpowers/specs      design docs
+docs/superpowers/plans      implementation plans
+docs/rendering              local markdown/report rendering fixtures
+```
 
 This repository was split out from `CodexBridge-main`.
-
-Imported reusable Codex integration:
-
-```text
-packages/codex-native-api
-```
-
-Mobile web service:
-
-```text
-packages/codex-web
-```
-
-Project design docs:
-
-```text
-docs/superpowers/specs/2026-05-17-codex-mobile-web-app-design.md
-docs/superpowers/specs/2026-05-19-codex-mobile-reports-design.md
-docs/superpowers/specs/2026-05-29-codex-web-workspace-redesign-design.md
-docs/superpowers/specs/2026-05-30-codex-web-attachments-design.md
-```
-
-Recent implementation plans:
-
-```text
-docs/superpowers/plans/2026-05-29-codex-web-workspace-redesign.md
-docs/superpowers/plans/2026-05-30-codex-web-attachments.md
-```
-
-Visual reference:
-
-```text
-docs/assets/codex-web-reference.jpg
-```
-
-## AI Install
-
-If you want Codex or another agent to install this project for you, use the
-root [`install.md`](install.md). That file is the AI install entrypoint for both
-GitHub blob links and local checkouts.
-
-Expected agent behavior:
-
-- The user can say this directly in a Codex chat:
-  `Help me install https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
-- The user can also say:
-  `Help me install this project`
-- If the user shares a GitHub `README.md` or `install.md` blob link, derive the
-  repo root and follow `install.md`.
-- If the user says "help me install this project" from inside a local checkout,
-  find the repo root and follow `install.md`.
-- On macOS, the automated flow should ask for a password and whether launchd
-  autostart should be installed.
-- On Windows, the automated flow should stop and report that this repository
-  does not provide a Windows installer.
 
 ## Requirements
 
@@ -78,87 +53,72 @@ Expected agent behavior:
 - local Codex CLI installed
 - local Codex login at `~/.codex/auth.json` or `CODEX_HOME/auth.json`
 
-## Install Dependencies
+## Quick Start
+
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-Check both workspaces:
+Set the web password:
+
+```bash
+npm run codex-web -- auth set-password
+```
+
+Start the web service:
+
+```bash
+npm run serve
+```
+
+By default the service listens on `0.0.0.0:43210`, so phones on the same LAN can
+reach it. Open the printed local or LAN URL and log in with the configured
+password.
+
+Run checks:
 
 ```bash
 npm run typecheck
 npm test
 ```
 
-## Automated macOS Install
+## AI Install
 
-For the AI-guided install flow, the repo provides:
+Use the root [install.md](install.md) when asking Codex or another coding agent
+to install this project from a GitHub blob link or local checkout.
+
+Example Codex request:
+
+```text
+Help me install https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md
+```
+
+Expected agent behavior:
+
+- If the user provides a GitHub `README.md` or `install.md` blob link, derive
+  the repo root and follow `install.md`.
+- If the user says "help me install this project" from inside a local checkout,
+  find the repo root and follow `install.md`.
+- On macOS, ask for the web password and whether launchd autostart should be
+  installed.
+- On Windows, stop and report that this repository does not provide a Windows
+  installer.
+
+The automated macOS flow uses:
 
 ```text
 install.md
 scripts/install/install-codex-web-macos.sh
 ```
 
-The installer script handles dependency install, password setup, service start,
-and optional launchd autostart. The detailed AI-oriented flow lives in
-[`install.md`](install.md).
+The installer handles dependency install, password setup, service start,
+optional launchd autostart, and installation of the bundled report skill.
 
-Typical Codex chat flow:
+## Configuration
 
-1. The user says `Help me install https://github.com/chenyanshan/codex-mobile-web-app/blob/main/README.md`
-2. Codex resolves the repo root and reads `install.md`
-3. Codex asks for:
-   the password
-   whether launchd autostart should be installed
-4. Codex runs the installer script on macOS
-5. Codex installs the bundled `codex-mobile-report` skill
-6. Codex tells the user which URL to open and how to add the app as a PWA
-
-After install, the normal usage flow is:
-
-1. Open the printed local URL or LAN URL
-2. Log in with the password set during install
-3. Add the site to the phone home screen
-4. Ask Codex for a phone-readable report when needed
-
-## Install The Report Skill
-
-This repo includes the report companion skill at:
-
-```text
-skills/codex-mobile-report
-```
-
-Install it into your local Codex skills directory:
-
-```bash
-mkdir -p ~/.codex/skills
-mkdir -p ~/.codex/skills/codex-mobile-report
-cp -R skills/codex-mobile-report/. ~/.codex/skills/codex-mobile-report/
-```
-
-For active development, use a symlink instead so local edits are picked up:
-
-```bash
-mkdir -p ~/.codex/skills
-ln -s "$(pwd)/skills/codex-mobile-report" ~/.codex/skills/codex-mobile-report
-```
-
-The skill writes phone-readable Markdown or self-contained HTML reports under:
-
-```text
-~/.codex-web/reports/
-```
-
-Codex Web exposes those reports through authenticated APIs and renders report
-links in the mobile app.
-
-## Codex Web Setup
-
-The web service lives in `packages/codex-web`. By default it binds to
-`0.0.0.0:43210` so phones on the same network can reach the host, while all
-runtime state stays outside the repo.
+Runtime state lives outside the repo.
 
 Default paths:
 
@@ -171,41 +131,17 @@ Default paths:
 ~/.codex-web/uploads/
 ```
 
-`~/.codex-web/auth.json` stores only the salted password hash and hashed session
+`~/.codex-web/auth.json` stores only salted password hashes and hashed session
 tokens. The browser stores only an opaque session token. Do not store
 `CODEX_WEB_PASSWORD` in `service.env`.
 
-Set the password once:
-
-```bash
-npm run codex-web -- auth set-password
-```
-
-For non-interactive automation, a one-time environment variable is supported.
-Avoid putting real passwords in committed scripts, env files, or shared shell
-history:
-
-```bash
-CODEX_WEB_PASSWORD='choose-a-strong-password' npm run codex-web -- auth set-password
-```
-
-You can also bootstrap first run directly from the server process:
+For non-interactive first setup, a one-time environment variable is supported:
 
 ```bash
 CODEX_WEB_PASSWORD='choose-a-strong-password' npm run serve
 ```
 
-After the password is configured, start the web service:
-
-```bash
-npm run serve
-```
-
-If no password has been configured and you start the service without
-`CODEX_WEB_PASSWORD`, the app serves a setup-required page until you run the
-password command above.
-
-The generated `~/.config/codex-web/service.env` defaults to:
+The generated service env defaults to:
 
 ```env
 CODEX_WEB_HOST=0.0.0.0
@@ -215,70 +151,33 @@ CODEX_REAL_BIN=codex
 CODEX_WEB_DEBUG=0
 ```
 
-Change host, port, default working directory, or Codex binary by editing
-`~/.config/codex-web/service.env`. To restrict the service to this machine only:
+Edit `~/.config/codex-web/service.env` to change host, port, default working
+directory, or Codex binary. To restrict access to the local machine only:
 
 ```env
 CODEX_WEB_HOST=127.0.0.1
 ```
 
-## Runtime Status And Errors
-
-The status above the message composer is a runtime status, not a request
-spinner. It is reconciled from live turn events and refreshed session history,
-so it remains accurate when you stay on a session, return from the background,
-or open an existing session from the list. Active turns show as green `Running`;
-successful terminal turns show as `Done`; interrupted, cancelled, or aborted
-turns show as `Stopped`.
-
-Provider/runtime failures that block a turn, such as `401`, `403`, `429`, or
-unexpected provider status responses, are surfaced as red system messages in
-the conversation timeline. Those messages are persisted with the session view
-and are restored after refresh or reopening the session. The UI intentionally
-shows only the important runtime message and avoids exposing local file paths or
-stack traces.
-
-If the Codex Web service itself is restarted while a turn is in progress, Codex
-may mark that turn as `interrupted` with no error payload. In that case the UI
-shows `Stopped`, not a red error, because the turn ended due to service
-lifecycle interruption rather than a provider/runtime error.
-
-## Workspace UI
-
-Codex Web uses a project-first workspace:
-
-- Desktop shows a three-pane layout with a project rail, a filtered session
-  list, and the active chat or new-session pane.
-- Mobile keeps the normal session-list and chat flow, with projects available
-  from a slide-out drawer.
-- `All Sessions` is always available, and selecting a project filters sessions
-  before applying the `Favorites` or `Recents` view.
-- Managed projects and legacy single-user sessions are both grouped into the
-  same project rail.
-- Settings include a browser title field. The configured title is stored in
-  the browser and used for the PWA header/drawer branding.
-
 ## Attachments
 
-The composer supports authenticated file and image attachments for the next
-Codex turn.
+The composer can upload files and images for the next Codex turn. All upload
+routes require authentication.
 
-Uploads are stored under the session project when the directory is writable:
+Writable project directory:
 
 ```text
 <project-cwd>/uploads/<user-id>/
 ```
 
-If project storage is not writable, uploads fall back to:
+Fallback storage:
 
 ```text
 ~/.codex-web/uploads/projects/<project-key>/<user-id>/
 ```
 
-Each upload response includes the actual `localPath`, and the backend validates
-attachment paths against the allowed upload roots before starting a turn. Image
-attachments are passed to Codex as local images; other files are listed in the
-turn prompt with their local paths so Codex can inspect them from the host.
+The backend returns the actual `localPath` and validates attachment paths
+against allowed upload roots before starting a turn. Images are passed to Codex
+as local images; other files are listed in the turn prompt with local paths.
 
 Upload limits:
 
@@ -287,17 +186,58 @@ Upload limits:
 25 MiB per file
 ```
 
-## macOS Install
+## Reports Skill
+
+The companion skill lives at:
+
+```text
+skills/codex-mobile-report
+```
+
+Install it into local Codex skills:
+
+```bash
+mkdir -p ~/.codex/skills
+mkdir -p ~/.codex/skills/codex-mobile-report
+cp -R skills/codex-mobile-report/. ~/.codex/skills/codex-mobile-report/
+```
+
+For active development, symlink it instead:
+
+```bash
+mkdir -p ~/.codex/skills
+ln -s "$(pwd)/skills/codex-mobile-report" ~/.codex/skills/codex-mobile-report
+```
+
+The skill writes phone-readable Markdown or self-contained HTML reports under
+`~/.codex-web/reports/`. Codex Web exposes those reports through authenticated
+APIs and renders report links in the app.
+
+## Runtime Status
+
+The status above the composer is the runtime state, not a request spinner. It is
+reconciled from live turn events and refreshed session history.
+
+- Active turns show `Running`.
+- Successful terminal turns show `Done`.
+- Interrupted, cancelled, or aborted turns show `Stopped`.
+- Provider/runtime failures such as `401`, `403`, `429`, or unexpected provider
+  statuses are rendered as red system messages in the conversation timeline.
+
+If the Codex Web service restarts while a turn is in progress, Codex may mark
+that turn as `interrupted` without an error payload. The UI shows `Stopped`
+instead of a red error because the turn ended due to service lifecycle
+interruption.
+
+## Service Install
+
+### macOS launchd
 
 Install the user LaunchAgent:
 
 ```bash
 scripts/service/install-codex-web-launchd-user.sh
 ```
-
-This writes `~/Library/LaunchAgents/com.ganxing.codex-web.plist`, creates
-`~/.config/codex-web/service.env` if needed, uses the repo root as the working
-directory, and writes logs under `~/.codex-web/logs/`.
 
 Service helpers:
 
@@ -309,22 +249,11 @@ scripts/service/logs-codex-web-launchd-user.sh
 ```
 
 Use the detached restart helper when Codex Web needs to restart itself from a
-running Codex-controlled session. It schedules the launchd restart outside the
-current runtime process, so the restart can continue after the current backend
-connection is interrupted.
+running Codex-controlled session.
 
-The LaunchAgent uses `/bin/zsh -lc` to source
-`~/.config/codex-web/service.env` and run:
+### Linux systemd
 
-```bash
-npm run serve --workspace packages/codex-web
-```
-
-## Linux Install
-
-On Linux, run Codex Web as a user `systemd` service.
-
-Create the service environment file:
+Create the service environment:
 
 ```bash
 mkdir -p ~/.config/codex-web ~/.codex-web/logs
@@ -338,7 +267,7 @@ EOF
 chmod 600 ~/.config/codex-web/service.env
 ```
 
-Create the user service:
+Create and start a user service:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -358,20 +287,10 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 EOF
-```
 
-Enable and start the service:
-
-```bash
 systemctl --user daemon-reload
 systemctl --user enable --now codex-web.service
 systemctl --user status codex-web.service
-```
-
-Allow it to start after login sessions end if your distro supports lingering:
-
-```bash
-loginctl enable-linger "$USER"
 ```
 
 Read logs:
@@ -380,43 +299,44 @@ Read logs:
 journalctl --user -u codex-web.service -f
 ```
 
-If your Linux firewall blocks LAN access, allow TCP port `43210` or change
-`CODEX_WEB_PORT` in `~/.config/codex-web/service.env`.
-
 ## Install As PWA
 
 After the server is running, open Codex Web from your phone browser and log in
-once for that device.
+once.
 
-On iPhone or iPad:
+On iPhone or iPad: open in Safari, tap `Share`, then `Add to Home Screen`.
 
-1. Open the app in Safari.
-2. Tap `Share`.
-3. Tap `Add to Home Screen`.
-4. Launch the saved icon from the Home Screen.
+On Android: open in Chrome, open the browser menu, then tap `Install app` or
+`Add to Home screen`.
 
-On Android:
+More notes: [docs/pwa-setup.md](docs/pwa-setup.md).
 
-1. Open the app in Chrome.
-2. Open the browser menu.
-3. Tap `Install app` or `Add to Home screen`.
-4. Launch the saved shortcut/app from the launcher.
+## Design Docs
 
-More detailed phone install notes live in [`docs/pwa-setup.md`](docs/pwa-setup.md).
+Current design and implementation notes:
 
-## Product Direction
+```text
+docs/superpowers/specs/2026-05-17-codex-mobile-web-app-design.md
+docs/superpowers/specs/2026-05-19-codex-mobile-reports-design.md
+docs/superpowers/specs/2026-05-23-codex-web-desktop-workspace-design.md
+docs/superpowers/specs/2026-05-27-codex-web-multi-user-rbac-design.md
+docs/superpowers/specs/2026-05-28-role-project-new-session-design.md
+docs/superpowers/specs/2026-05-29-codex-web-workspace-redesign-design.md
+docs/superpowers/specs/2026-05-30-codex-web-attachments-design.md
+docs/superpowers/specs/2026-06-01-session-card-first-message-design.md
 
-The intended first product is a single-user mobile PWA:
+docs/superpowers/plans/2026-05-17-codex-web-mvp.md
+docs/superpowers/plans/2026-05-23-codex-web-desktop-workspace.md
+docs/superpowers/plans/2026-05-27-codex-web-multi-user-rbac.md
+docs/superpowers/plans/2026-05-28-role-project-new-session.md
+docs/superpowers/plans/2026-05-29-codex-web-workspace-redesign.md
+docs/superpowers/plans/2026-05-30-codex-web-attachments.md
+docs/superpowers/plans/2026-06-01-session-card-first-message.md
+docs/superpowers/plans/2026-06-01-timeline-error-ordering.md
+```
 
-- password-protected access
-- persistent browser session token
-- live Codex turn stream
-- project-first desktop workspace and mobile project drawer
-- file and image attachments for turns
-- command and file-change batch cards
-- approval controls
-- model and reasoning controls
-- reports list and authenticated report viewer
-- macOS launchd and Linux systemd startup options
+Visual reference:
 
-Tunnel and reverse-proxy setup stay outside this repository.
+```text
+docs/assets/codex-web-reference.jpg
+```

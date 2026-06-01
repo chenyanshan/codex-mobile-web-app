@@ -6,6 +6,7 @@ const THEME_KEY = 'codexWebTheme';
 const SITE_TITLE_KEY = 'codexWebSiteTitle';
 const DEFAULT_THREAD_SETTINGS_KEY = 'codexWebDefaultThreadSettings';
 const MESSAGE_FONT_SIZE_KEY = 'codexWebMessageFontSize';
+const LANGUAGE_KEY = 'codexWebLanguage';
 const MAX_TIMELINE_CACHE_SESSIONS = 16;
 const MAX_TIMELINE_CACHE_ITEMS = 80;
 const MAX_TIMELINE_CACHE_MAP_ITEMS = 24;
@@ -24,6 +25,8 @@ const DEFAULT_SANDBOX_MODE = 'danger-full-access';
 const DEFAULT_THEME = 'dark';
 const DEFAULT_SITE_TITLE = 'Codex Web';
 const DEFAULT_MESSAGE_FONT_SIZE = 'medium';
+const DEFAULT_LANGUAGE = 'en';
+const SUPPORTED_LANGUAGES = ['en', 'zh-CN'];
 const PROMPT_TEXTAREA_MAX_HEIGHT = 116;
 const DESKTOP_PROMPT_TEXTAREA_MAX_HEIGHT = 220;
 const PROMPT_EXPAND_LINE_THRESHOLD = 4;
@@ -63,6 +66,234 @@ const NON_RUNTIME_STATUS_LABELS = new Set([
   'Attachment uploaded',
   'Upload failed',
 ]);
+const UI_TRANSLATIONS = {
+  'zh-CN': {
+    'Checking auth': '正在检查登录',
+    Loading: '正在加载',
+    'Restoring session': '正在恢复会话',
+    'Syncing sessions': '正在同步会话',
+    'Logging in': '正在登录',
+    'Login required': '需要登录',
+    Refreshing: '正在刷新',
+    'Starting session': '正在启动会话',
+    'Loading session': '正在加载会话',
+    'Starting turn': '正在开始',
+    'Waiting for first response': '正在等待首次响应',
+    'Request failed': '请求失败',
+    'Stream failed': '连接流失败',
+    'Reloading runtime': '正在重载运行时',
+    'Runtime reloaded': '运行时已重载',
+    'Approval sent': '已发送审批',
+    'Approval resolved': '审批已处理',
+    'Interrupt requested': '已请求停止',
+    'Session archived': '会话已归档',
+    'Session favorited': '已收藏会话',
+    'Favorite removed': '已取消收藏',
+    'Creating share link': '正在创建分享链接',
+    'Share link copied': '分享链接已复制',
+    'Share link ready': '分享链接已准备好',
+    'Uploading attachment': '正在上传附件',
+    'Attachment uploaded': '附件已上传',
+    'Upload failed': '上传失败',
+    Ready: '就绪',
+    'Turn running': '正在运行',
+    'Stream paused': '连接流已暂停',
+    'Turn failed': '运行失败',
+    'Turn interrupted': '运行已中断',
+    'Turn stopped': '已停止',
+    Paused: '已暂停',
+    Running: '运行中',
+    Failed: '失败',
+    Done: '完成',
+    Stopped: '已停止',
+    Idle: '空闲',
+    'Setup required': '需要初始化',
+    'Password not configured.': '尚未配置密码。',
+    'Password login for this device.': '使用密码登录此设备。',
+    Username: '用户名',
+    Password: '密码',
+    'Log in': '登录',
+    Sessions: '会话',
+    Reports: '报告',
+    New: '新建',
+    Setting: '设置',
+    Settings: '设置',
+    Language: '语言',
+    English: 'English',
+    'Chinese (Simplified)': '中文',
+    'No active session': '没有活动会话',
+    'Select a session in the middle pane or start a new one.': '请选择一个会话，或新建会话。',
+    'Start a new session': '新建会话',
+    Favorites: '收藏',
+    Recents: '最近',
+    'Loading reports...': '正在加载报告...',
+    'No reports yet.': '暂无报告。',
+    report: '报告',
+    reports: '报告',
+    favorite: '收藏',
+    Report: '报告',
+    'Report not loaded.': '报告尚未加载。',
+    'Loading report...': '正在加载报告...',
+    Close: '关闭',
+    'Website title': '网站标题',
+    'Browser title': '浏览器标题',
+    Theme: '主题',
+    Dark: '深色',
+    White: '白色',
+    Yellow: '黄色',
+    Green: '绿色',
+    'Message Size': '消息字号',
+    Small: '小',
+    Medium: '中',
+    Large: '大',
+    'New Thread': '默认新会话',
+    Model: '模型',
+    Reasoning: '推理',
+    Mode: '模式',
+    Default: '默认',
+    Plan: '计划',
+    Permissions: '权限',
+    Read: '只读',
+    Ask: '询问',
+    Full: '完全',
+    Admin: '管理',
+    'Log out': '退出登录',
+    System: '系统',
+    'Multi-user mode': '多用户模式',
+    'Loading admin settings...': '正在加载管理设置...',
+    'Admin Console': '管理控制台',
+    'Loading admin console...': '正在加载管理控制台...',
+    'Project Management': '项目管理',
+    'Role Management': '角色管理',
+    'User Management': '用户管理',
+    'Session Audit': '会话审计',
+    'Admin sections': '管理分区',
+    User: '用户',
+    Project: '项目',
+    'All users': '所有用户',
+    'All projects': '所有项目',
+    'Display Name': '显示名称',
+    'auto from CWD': '从 CWD 自动生成',
+    CWD: 'CWD',
+    Enabled: '启用',
+    'Save Project': '保存项目',
+    Cancel: '取消',
+    'Role ID': '角色 ID',
+    Name: '名称',
+    Writer: '写作者',
+    'Admin role': '管理员角色',
+    'Save Role': '保存角色',
+    'User ID': '用户 ID',
+    'At least 8 chars': '至少 8 个字符',
+    Role: '角色',
+    'Save User': '保存用户',
+    'No roles available': '暂无可用角色',
+    'No role': '无角色',
+    Projects: '项目',
+    'No projects available.': '暂无可用项目。',
+    'No projects configured.': '尚未配置项目。',
+    Action: '操作',
+    Edit: '编辑',
+    'No users configured.': '尚未配置用户。',
+    Save: '保存',
+    Enable: '启用',
+    Disable: '停用',
+    Delete: '删除',
+    'No roles configured.': '尚未配置角色。',
+    admin: '管理员',
+    'No sessions found.': '未找到会话。',
+    'Observer Mode': '观察模式',
+    'New Session': '新会话',
+    Start: '开始',
+    'Loading projects...': '正在加载项目...',
+    'No projects available': '暂无可用项目',
+    'Ask an admin to assign a project before starting a session.': '开始会话前请让管理员分配项目。',
+    'Project path': '项目路径',
+    'Use server default': '使用服务端默认值',
+    'Session menu': '会话菜单',
+    'Share link': '分享链接',
+    'Copied to clipboard.': '已复制到剪贴板。',
+    'Copy this read-only session link.': '复制此只读会话链接。',
+    Copy: '复制',
+    'Delete queued message': '删除排队消息',
+    'Queued messages': '排队消息',
+    'Shared link': '分享链接',
+    'Observer mode': '观察模式',
+    'Read only': '只读',
+    Attachments: '附件',
+    'Attach files': '添加文件',
+    'Refresh session': '刷新会话',
+    Refresh: '刷新',
+    Send: '发送',
+    Message: '输入消息',
+    Uploading: '上传中',
+    Saved: '已保存',
+    Image: '图片',
+    File: '文件',
+    upload: '上传',
+    'Expand message editor': '展开消息编辑器',
+    'Collapse message editor': '收起消息编辑器',
+    Runtime: '运行时',
+    Reload: '重载',
+    Share: '分享',
+    'Current turn is running.': '当前任务正在运行。',
+    Stop: '停止',
+    'No context yet.': '暂无上下文。',
+    Error: '错误',
+    'Approval requested': '请求审批',
+    Accept: '接受',
+    Session: '会话',
+    Deny: '拒绝',
+    Work: '工作',
+    'No tool activity yet.': '暂无工具活动。',
+    'No additional details.': '暂无更多详情。',
+    Output: '输出',
+    Diff: '差异',
+    Ran: '运行',
+    Edited: '编辑',
+    Approval: '审批',
+    Tool: '工具',
+    Batch: '批次',
+    'Default model': '默认模型',
+    Unfavorite: '取消收藏',
+    Favorite: '收藏',
+    Archive: '归档',
+    'Archive session?': '归档会话？',
+    'No prompt preview': '无提示预览',
+    'No cwd': '无 CWD',
+    'All Sessions': '所有会话',
+    'Untitled Project': '未命名项目',
+    'Unknown project': '未知项目',
+    unknown: '未知',
+    You: '你',
+    Assistant: '助手',
+    Command: '命令',
+    completed: '已完成',
+    final: '最终',
+    streaming: '流式输出',
+    history: '历史',
+    pending: '等待中',
+    preview: '预览',
+    failed: '失败',
+    started: '已开始',
+    running: '运行中',
+    low: '低',
+    medium: '中',
+    high: '高',
+    xhigh: '极高',
+    'Remove failed uploads before sending.': '发送前请移除上传失败的附件。',
+    'Wait for uploads to finish before sending.': '请等待附件上传完成后再发送。',
+    'Wait for the current turn to finish before attaching files.': '请等待当前任务结束后再添加附件。',
+    'Attachments cannot be queued while a turn is running.': '任务运行中不能排队发送附件。',
+    'No projects are available for this account.': '此账号暂无可用项目。',
+    'Selected session was unavailable. Choose another session or create a new one.': '所选会话不可用。请选择其他会话或新建会话。',
+    'Selected session was unavailable and was removed from the list.': '所选会话不可用，已从列表移除。',
+    'Share link was not returned.': '未返回分享链接。',
+    'Remove {fileName}': '移除 {fileName}',
+    'Favorite {label}': '收藏 {label}',
+    'Unfavorite {label}': '取消收藏 {label}',
+  },
+};
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
@@ -119,7 +350,13 @@ const state = {
   desktopOverlay: null,
   theme: normalizeTheme(localStorage.getItem(THEME_KEY)),
   siteTitle: normalizeSiteTitle(localStorage.getItem(SITE_TITLE_KEY)),
+  globalSettings: {
+    siteTitle: normalizeSiteTitle(localStorage.getItem(SITE_TITLE_KEY)),
+    canSetSiteTitle: false,
+    loaded: false,
+  },
   messageFontSize: normalizeMessageFontSize(localStorage.getItem(MESSAGE_FONT_SIZE_KEY)),
+  language: normalizeLanguage(localStorage.getItem(LANGUAGE_KEY)),
   defaultThreadSettings: loadDefaultThreadSettings(),
   sortMode: 'time',
   sessionsScope: 'all',
@@ -184,6 +421,7 @@ bootstrap();
 applyTheme(state.theme, { persist: false });
 applySiteTitle(state.siteTitle, { persist: false });
 applyMessageFontSize(state.messageFontSize, { persist: false });
+applyLanguage(state.language, { persist: false });
 registerServiceWorker();
 setupPwaPullToRefresh();
 setupEdgeSwipeBackNavigation();
@@ -294,13 +532,15 @@ async function restoreAuth() {
     state.status = 'Syncing sessions';
     state.statusTone = 'warn';
     render();
-    const [modelsPayload] = await Promise.all([
+    const [settingsPayload, modelsPayload] = await Promise.all([
+      refreshGlobalSettings({ renderAfter: false }).catch(() => null),
       apiFetch('/api/models').catch(() => ({ items: [] })),
       refreshProjectsList({ renderAfter: false }).catch(() => []),
       refreshSessionsList({ renderAfter: false, scope: 'all' }).catch(() => null),
       refreshReportsList({ renderAfter: false }).catch(() => null),
     ]);
     state.authSession = session;
+    applyGlobalSettingsPayload(settingsPayload, { renderAfter: false });
     state.models = Array.isArray(modelsPayload.items) ? modelsPayload.items : [];
     state.model = pickModel(state.models, state.model || DEFAULT_MODEL);
     state.status = 'Ready';
@@ -564,14 +804,14 @@ function renderSetup() {
     <div class="center-screen">
       <section class="panel stack">
         <div>
-          <h1>Setup required</h1>
-          <p class="meta">${escapeHtml(state.setupMessage || 'Password not configured.')}</p>
+          <h1>${escapeHtml(t('Setup required'))}</h1>
+          <p class="meta">${escapeHtml(translateText(state.setupMessage || 'Password not configured.'))}</p>
         </div>
         <pre class="command">codex-web auth set-password</pre>
       </section>
     </div>
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderLogin() {
@@ -582,24 +822,24 @@ function renderLogin() {
       <form class="panel stack" id="login-form">
         <div>
           <h1>Codex Web</h1>
-          <p class="meta">Password login for this device.</p>
+          <p class="meta">${escapeHtml(t('Password login for this device.'))}</p>
         </div>
         <div class="field">
-          <label for="username">Username</label>
+          <label for="username">${escapeHtml(t('Username'))}</label>
           <input id="username" name="username" type="text" autocomplete="username">
         </div>
         <div class="field">
-          <label for="password">Password</label>
+          <label for="password">${escapeHtml(t('Password'))}</label>
           <input id="password" name="password" type="password" autocomplete="current-password" required>
         </div>
-        ${state.loginError ? `<p class="meta" style="color: var(--danger);">${escapeHtml(state.loginError)}</p>` : ''}
+        ${state.loginError ? `<p class="meta" style="color: var(--danger);">${escapeHtml(translateText(state.loginError))}</p>` : ''}
         <div class="actions">
-          <button class="primary primary-action" type="submit">Log in</button>
+          <button class="primary primary-action" type="submit">${escapeHtml(t('Log in'))}</button>
         </div>
       </form>
     </div>
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderMain() {
@@ -639,11 +879,12 @@ function renderDesktopWorkspace() {
         ${renderDesktopChatPane()}
         ${state.desktopSettingsOpen ? renderDesktopSettingsPanel() : ''}
         ${state.desktopOverlay === 'reports' ? renderDesktopReportsOverlay() : ''}
+        ${state.desktopOverlay === 'report' ? renderDesktopReportOverlay() : ''}
       </div>
     </div>
     ${renderArchiveConfirmModal()}
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderDesktopProjectRail() {
@@ -653,7 +894,7 @@ function renderDesktopProjectRail() {
         <div class="project-rail-brand">${escapeHtml(state.siteTitle)}</div>
         <div class="project-rail-meta">${escapeHtml(currentProjectScopeTitle())}</div>
       </header>
-      <nav class="project-rail-list" aria-label="Projects">
+      <nav class="project-rail-list" aria-label="${escapeAttribute(t('Projects'))}" data-i18n-skip>
         ${renderWorkspaceProjectList()}
       </nav>
       <div class="project-rail-footer">
@@ -667,7 +908,7 @@ function renderDesktopSessionPane() {
   return `
     <section class="desktop-session-pane">
       ${renderSessionListHeader({ desktop: true })}
-      <main class="session-list desktop-session-list">${renderSessionCards()}</main>
+      <main class="session-list desktop-session-list" data-i18n-skip>${renderSessionCards()}</main>
     </section>
   `;
 }
@@ -748,11 +989,11 @@ function renderSessionList() {
     ${renderMobileProjectDrawer()}
     <div class="screen page-screen">
       ${renderSessionListHeader()}
-      <main class="session-list">${renderSessionCards()}</main>
+      <main class="session-list" data-i18n-skip>${renderSessionCards()}</main>
     </div>
     ${renderArchiveConfirmModal()}
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderSessionListHeader({ desktop = false } = {}) {
@@ -798,40 +1039,50 @@ function renderReportsPage() {
   shell.innerHTML = `
     <div class="screen page-screen">
       ${renderPageNav('Reports', { backId: 'back-to-list-button' })}
-      <main class="report-list">${state.reportProject ? renderReportCards() : renderReportProjects()}</main>
+      <main class="report-list" data-i18n-skip>${state.reportProject ? renderReportCards() : renderReportProjects()}</main>
     </div>
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderDesktopReportsOverlay() {
-  return `
+  return localizeFragment(`
     <section class="desktop-overlay">
       <div class="desktop-overlay-card">
         ${renderPageNav('Reports', { backId: 'desktop-reports-close-button' })}
-        <main class="report-list">${state.reportProject ? renderReportCards() : renderReportProjects()}</main>
+        <main class="report-list" data-i18n-skip>${state.reportProject ? renderReportCards() : renderReportProjects()}</main>
       </div>
     </section>
-  `;
+  `);
+}
+
+function renderDesktopReportOverlay() {
+  return localizeFragment(`
+    <section class="desktop-overlay desktop-report-overlay">
+      <div class="desktop-overlay-card desktop-report-card">
+        ${renderReportViewerContent()}
+      </div>
+    </section>
+  `);
 }
 
 function renderReportProjects() {
   const projects = reportProjects();
   if (!projects.length) {
     if (state.reportsLoading) {
-      return '<div class="empty-state">Loading reports...</div>';
+      return `<div class="empty-state">${escapeHtml(t('Loading reports...'))}</div>`;
     }
-    return '<div class="empty-state">No reports yet.</div>';
+    return `<div class="empty-state">${escapeHtml(t('No reports yet.'))}</div>`;
   }
   return projects.map((project) => `
     <article class="report-card report-project-card">
       <button class="report-card-open" type="button" data-report-project="${escapeAttribute(project.name)}">
         <span class="report-card-main">
-          <span class="report-title">${escapeHtml(project.name)}</span>
-          <span class="report-path">${escapeHtml(`${project.count} ${project.count === 1 ? 'report' : 'reports'}`)}</span>
+          <span class="report-title" data-i18n-skip>${escapeHtml(project.name)}</span>
+          <span class="report-path">${escapeHtml(`${project.count} ${t(project.count === 1 ? 'report' : 'reports')}`)}</span>
         </span>
         <span class="report-card-meta">
-          <span>${escapeHtml(project.favoriteCount ? `${project.favoriteCount} favorite` : 'reports')}</span>
+          <span>${escapeHtml(project.favoriteCount ? `${project.favoriteCount} ${t('favorite')}` : t('reports'))}</span>
           <span>${escapeHtml(formatShortDateTime(project.updatedAt))}</span>
         </span>
       </button>
@@ -843,23 +1094,23 @@ function renderReportCards() {
   const reports = filteredReports();
   if (!reports.length) {
     if (state.reportsLoading) {
-      return '<div class="empty-state">Loading reports...</div>';
+      return `<div class="empty-state">${escapeHtml(t('Loading reports...'))}</div>`;
     }
-    return '<div class="empty-state">No reports yet.</div>';
+    return `<div class="empty-state">${escapeHtml(t('No reports yet.'))}</div>`;
   }
   return reports.map((report) => `
       <article class="report-card">
         <button class="report-card-open" type="button" data-report-id="${escapeAttribute(report.id)}">
           <span class="report-card-main">
-            <span class="report-title">${escapeHtml(report.title)}</span>
-            <span class="report-path">${escapeHtml(shorten(report.id, 82))}</span>
+            <span class="report-title" data-i18n-skip>${escapeHtml(report.title)}</span>
+            <span class="report-path" data-i18n-skip>${escapeHtml(shorten(report.id, 82))}</span>
           </span>
           <span class="report-card-meta">
-            <span>${escapeHtml(report.kind || 'report')}</span>
+            <span${report.kind ? ' data-i18n-skip' : ''}>${escapeHtml(report.kind || t('report'))}</span>
             <span>${escapeHtml(formatShortDateTime(report.updatedAt))}</span>
           </span>
         </button>
-        <button class="ghost compact-button report-favorite" type="button" data-report-favorite-id="${escapeAttribute(report.id)}" aria-pressed="${String(report.favorite === true)}">${report.favorite ? 'Unfavorite' : 'Favorite'}</button>
+        <button class="ghost compact-button report-favorite" type="button" data-report-favorite-id="${escapeAttribute(report.id)}" aria-pressed="${String(report.favorite === true)}">${escapeHtml(t(report.favorite ? 'Unfavorite' : 'Favorite'))}</button>
       </article>
     `).join('');
 }
@@ -868,26 +1119,29 @@ function renderReportViewer() {
   const report = state.currentReport;
   const shell = document.createElement('div');
   shell.className = 'shell';
-  if (!report) {
-    shell.innerHTML = `
-      <div class="screen page-screen">
-        ${renderPageNav('Report', { backId: 'back-to-reports-button' })}
-        <main class="report-viewer"><div class="empty-state">Report not loaded.</div></main>
-      </div>
-    `;
-    return shell;
-  }
   shell.innerHTML = `
     <div class="screen page-screen">
-      ${renderPageNav(report.title || 'Report', { backId: 'back-to-reports-button' })}
-      <main class="report-viewer">${state.currentReportLoading ? renderReportLoading() : renderReportDocument(report, state.currentReportContent)}</main>
+      ${renderReportViewerContent(report)}
     </div>
   `;
-  return shell;
+  return localizeElement(shell);
+}
+
+function renderReportViewerContent(report = state.currentReport) {
+  if (!report) {
+    return `
+      ${renderPageNav('Report', { backId: 'back-to-reports-button' })}
+      <main class="report-viewer"><div class="empty-state">Report not loaded.</div></main>
+    `;
+  }
+  return `
+    ${renderPageNav(report.title || 'Report', { backId: 'back-to-reports-button', skipTitleI18n: Boolean(report.title) })}
+    <main class="report-viewer">${state.currentReportLoading ? renderReportLoading() : renderReportDocument(report, state.currentReportContent)}</main>
+  `;
 }
 
 function renderReportLoading() {
-  return '<div class="empty-state report-loading">Loading report...</div>';
+  return localizeFragment('<div class="empty-state report-loading">Loading report...</div>');
 }
 
 function renderReportDocument(report, content) {
@@ -913,11 +1167,11 @@ function renderAppSettings() {
       </main>
     </div>
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderDesktopSettingsPanel() {
-  return `
+  return localizeFragment(`
     <aside class="desktop-settings-panel">
       <header class="desktop-panel-header">
         <h2>Settings</h2>
@@ -927,16 +1181,17 @@ function renderDesktopSettingsPanel() {
         ${renderAppSettingsSections()}
       </main>
     </aside>
-  `;
+  `);
 }
 
 function renderAppSettingsSections() {
   return `
+        ${renderSiteTitleSettingsSection()}
         <section class="settings-section">
-          <div class="settings-section-title">Website title</div>
-          <div class="control-group">
-            <label for="site-title-input">Browser title</label>
-            <input id="site-title-input" name="siteTitle" type="text" value="${escapeAttribute(state.siteTitle)}" placeholder="${escapeAttribute(DEFAULT_SITE_TITLE)}">
+          <div class="settings-section-title">Language</div>
+          <div class="toggle language-toggle">
+            <button type="button" data-app-language="en" aria-pressed="${String(state.language === 'en')}">English</button>
+            <button type="button" data-app-language="zh-CN" aria-pressed="${String(state.language === 'zh-CN')}">中文</button>
           </div>
         </section>
         <section class="settings-section">
@@ -961,11 +1216,11 @@ function renderAppSettingsSections() {
           <div class="controls">
             <div class="control-group">
               <label for="default-model-select">Model</label>
-              <select id="default-model-select" name="defaultModel">${renderModelOptions(state.defaultThreadSettings.model)}</select>
+              <select id="default-model-select" name="defaultModel" data-i18n-skip>${renderModelOptions(state.defaultThreadSettings.model)}</select>
             </div>
             <div class="control-group">
               <label for="default-reasoning-select">Reasoning</label>
-              <select id="default-reasoning-select" name="defaultReasoningEffort">
+              <select id="default-reasoning-select" name="defaultReasoningEffort" data-i18n-skip>
                 ${renderOptions(['low', 'medium', 'high', 'xhigh'], state.defaultThreadSettings.reasoningEffort)}
               </select>
             </div>
@@ -989,6 +1244,22 @@ function renderAppSettingsSections() {
         ${renderAdminSettingsSection({ title: 'Admin', showLoadingNote: true })}
         <section class="settings-section">
           <button class="danger compact-button full-width-button" type="button" id="settings-logout-button">Log out</button>
+        </section>
+  `;
+}
+
+function renderSiteTitleSettingsSection() {
+  if (!canSetSiteTitle()) {
+    return '';
+  }
+  const siteTitle = normalizeSiteTitle(state.globalSettings.siteTitle || state.siteTitle);
+  return `
+        <section class="settings-section">
+          <div class="settings-section-title">Website title</div>
+          <div class="control-group">
+            <label for="site-title-input">Browser title</label>
+            <input id="site-title-input" name="siteTitle" type="text" value="${escapeAttribute(siteTitle)}" placeholder="${escapeAttribute(DEFAULT_SITE_TITLE)}">
+          </div>
         </section>
   `;
 }
@@ -1021,12 +1292,12 @@ function renderAdminConsole() {
       </main>
     </div>
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderAdminSections() {
   if (state.admin.loading && !state.admin.loaded) {
-    return '<div class="empty-state">Loading admin console...</div>';
+    return localizeFragment('<div class="empty-state">Loading admin console...</div>');
   }
   return `
         ${renderAdminSettingsSection()}
@@ -1050,7 +1321,7 @@ function renderAdminSidebar() {
   return `
     <nav class="admin-sidebar" aria-label="Admin sections">
       ${pages.map(([id, label]) => `
-        <button class="admin-sidebar-button" type="button" data-admin-page="${escapeAttribute(id)}" aria-pressed="${String(page === id)}">${escapeHtml(label)}</button>
+        <button class="admin-sidebar-button" type="button" data-admin-page="${escapeAttribute(id)}" aria-pressed="${String(page === id)}">${escapeHtml(t(label))}</button>
       `).join('')}
     </nav>
   `;
@@ -1073,9 +1344,9 @@ function renderAdminContent() {
 function renderAdminProjectPage() {
   return `
         <section class="settings-section">
-          <div class="settings-section-title">Project Management</div>
+          <div class="settings-section-title">${escapeHtml(t('Project Management'))}</div>
           ${renderAdminProjectForm()}
-          <div class="admin-list">${renderAdminProjects()}</div>
+          <div class="admin-list" data-i18n-skip>${renderAdminProjects()}</div>
         </section>
   `;
 }
@@ -1083,9 +1354,9 @@ function renderAdminProjectPage() {
 function renderAdminRolePage() {
   return `
         <section class="settings-section">
-          <div class="settings-section-title">Role Management</div>
+          <div class="settings-section-title">${escapeHtml(t('Role Management'))}</div>
           ${renderAdminRoleForm()}
-          <div class="admin-list">${renderAdminRoles()}</div>
+          <div class="admin-list" data-i18n-skip>${renderAdminRoles()}</div>
         </section>
   `;
 }
@@ -1093,9 +1364,9 @@ function renderAdminRolePage() {
 function renderAdminUserPage() {
   return `
         <section class="settings-section">
-          <div class="settings-section-title">User Management</div>
+          <div class="settings-section-title">${escapeHtml(t('User Management'))}</div>
           ${renderAdminUserForm()}
-          <div class="admin-list">${renderAdminUsers()}</div>
+          <div class="admin-list" data-i18n-skip>${renderAdminUsers()}</div>
         </section>
   `;
 }
@@ -1103,28 +1374,28 @@ function renderAdminUserPage() {
 function renderAdminSessionAuditPage() {
   return `
         <section class="settings-section">
-          <div class="settings-section-title">Session Audit</div>
+          <div class="settings-section-title">${escapeHtml(t('Session Audit'))}</div>
           <div class="admin-filter-row">
             <label class="field" for="admin-session-user-filter">
-              <span>User</span>
-              <select id="admin-session-user-filter" name="adminUserFilter">
-                <option value="">All users</option>
+              <span>${escapeHtml(t('User'))}</span>
+              <select id="admin-session-user-filter" name="adminUserFilter" data-i18n-skip>
+                <option value="">${escapeHtml(t('All users'))}</option>
                 ${state.admin.users.map((user) => `
-                  <option value="${escapeAttribute(user.id)}"${state.admin.filterUserId === user.id ? ' selected' : ''}>${escapeHtml(user.username || user.id)}</option>
+              <option value="${escapeAttribute(user.id)}"${state.admin.filterUserId === user.id ? ' selected' : ''} data-i18n-skip>${escapeHtml(user.username || user.id)}</option>
                 `).join('')}
               </select>
             </label>
             <label class="field" for="admin-session-project-filter">
-              <span>Project</span>
-              <select id="admin-session-project-filter" name="adminProjectFilter">
-                <option value="">All projects</option>
+              <span>${escapeHtml(t('Project'))}</span>
+              <select id="admin-session-project-filter" name="adminProjectFilter" data-i18n-skip>
+                <option value="">${escapeHtml(t('All projects'))}</option>
                 ${adminAuditProjects().map((project) => `
-                  <option value="${escapeAttribute(project.id)}"${state.admin.filterProjectId === project.id ? ' selected' : ''}>${escapeHtml(projectVisibleName(project, project.id))}</option>
+                  <option value="${escapeAttribute(project.id)}"${state.admin.filterProjectId === project.id ? ' selected' : ''} data-i18n-skip>${escapeHtml(projectVisibleName(project, project.id))}</option>
                 `).join('')}
               </select>
             </label>
           </div>
-          <div class="admin-list">${renderAdminSessions()}</div>
+          <div class="admin-list" data-i18n-skip>${renderAdminSessions()}</div>
         </section>
   `;
 }
@@ -1138,7 +1409,7 @@ function renderLegacyAdminSections() {
             <select id="admin-session-user-filter" name="adminUserFilter">
               <option value="">All users</option>
               ${state.admin.users.map((user) => `
-                <option value="${escapeAttribute(user.id)}"${state.admin.filterUserId === user.id ? ' selected' : ''}>${escapeHtml(user.username || user.id)}</option>
+                <option value="${escapeAttribute(user.id)}"${state.admin.filterUserId === user.id ? ' selected' : ''} data-i18n-skip>${escapeHtml(user.username || user.id)}</option>
               `).join('')}
             </select>
           </div>
@@ -1232,14 +1503,14 @@ function renderAdminUserForm() {
 
 function renderAdminRoleSelect({ id = 'admin-user-role-select', name = 'roleId', value = '' } = {}) {
   if (!state.admin.roles.length) {
-    return `<select id="${escapeAttribute(id)}" name="${escapeAttribute(name)}"><option value="">No roles available</option></select>`;
+    return `<select id="${escapeAttribute(id)}" name="${escapeAttribute(name)}" data-i18n-skip><option value="">${escapeHtml(t('No roles available'))}</option></select>`;
   }
   const selectedValue = String(value || '');
   return `
-    <select id="${escapeAttribute(id)}" name="${escapeAttribute(name)}">
-      <option value=""${selectedValue ? '' : ' selected'}>No role</option>
+    <select id="${escapeAttribute(id)}" name="${escapeAttribute(name)}" data-i18n-skip>
+      <option value=""${selectedValue ? '' : ' selected'}>${escapeHtml(t('No role'))}</option>
       ${state.admin.roles.map((role) => `
-        <option value="${escapeAttribute(role.id)}"${role.id === selectedValue ? ' selected' : ''}>${escapeHtml(role.name || role.id)}</option>
+        <option value="${escapeAttribute(role.id)}"${role.id === selectedValue ? ' selected' : ''} data-i18n-skip>${escapeHtml(role.name || role.id)}</option>
       `).join('')}
     </select>
   `;
@@ -1247,16 +1518,16 @@ function renderAdminRoleSelect({ id = 'admin-user-role-select', name = 'roleId',
 
 function renderAdminProjectCheckboxes(selectedProjectIds = [], { name = 'projectIds', legend = 'Projects' } = {}) {
   if (!state.admin.projects.length) {
-    return '<div class="meta">No projects available.</div>';
+    return `<div class="meta">${escapeHtml(t('No projects available.'))}</div>`;
   }
   const selected = new Set(selectedProjectIds);
   return `
     <fieldset class="admin-fieldset">
-      <legend>${escapeHtml(legend)}</legend>
+      <legend>${escapeHtml(t(legend))}</legend>
       ${state.admin.projects.map((project) => `
         <label class="admin-check-row">
           <input name="${escapeAttribute(name)}" type="checkbox" value="${escapeAttribute(project.id)}"${selected.has(project.id) ? ' checked' : ''}>
-          <span>${escapeHtml(adminProjectVisibleName(project))}</span>
+          <span data-i18n-skip>${escapeHtml(adminProjectVisibleName(project))}</span>
         </label>
       `).join('')}
     </fieldset>
@@ -1265,23 +1536,23 @@ function renderAdminProjectCheckboxes(selectedProjectIds = [], { name = 'project
 
 function renderAdminProjects() {
   if (!state.admin.projects.length) {
-    return '<div class="meta">No projects configured.</div>';
+    return `<div class="meta">${escapeHtml(t('No projects configured.'))}</div>`;
   }
   return `
     <table class="admin-table">
       <thead>
         <tr>
-          <th>CWD</th>
-          <th>Display Name</th>
-          <th>Action</th>
+          <th>${escapeHtml(t('CWD'))}</th>
+          <th>${escapeHtml(t('Display Name'))}</th>
+          <th>${escapeHtml(t('Action'))}</th>
         </tr>
       </thead>
       <tbody>
         ${state.admin.projects.map((project) => `
           <tr>
-            <td>${escapeHtml(project.cwd || project.id || '')}</td>
-            <td>${escapeHtml(adminProjectVisibleName(project))}</td>
-            <td><button class="ghost compact-button" type="button" data-admin-edit-project="${escapeAttribute(project.id || '')}">Edit</button></td>
+            <td data-i18n-skip>${escapeHtml(project.cwd || project.id || '')}</td>
+            <td data-i18n-skip>${escapeHtml(adminProjectVisibleName(project))}</td>
+            <td><button class="ghost compact-button" type="button" data-admin-edit-project="${escapeAttribute(project.id || '')}">${escapeHtml(t('Edit'))}</button></td>
           </tr>
         `).join('')}
       </tbody>
@@ -1291,26 +1562,26 @@ function renderAdminProjects() {
 
 function renderAdminUsers() {
   if (!state.admin.users.length) {
-    return '<div class="meta">No users configured.</div>';
+    return `<div class="meta">${escapeHtml(t('No users configured.'))}</div>`;
   }
   return state.admin.users.map((user) => {
     const roleId = adminUserRoleId(user);
     return `
       <article class="admin-row admin-user-row">
         <div>
-          <span class="admin-row-main">${escapeHtml(user.username || user.id)}</span>
-          <span class="admin-row-meta">${escapeHtml(adminUserMeta(user))}</span>
+          <span class="admin-row-main" data-i18n-skip>${escapeHtml(user.username || user.id)}</span>
+          <span class="admin-row-meta" data-i18n-skip>${escapeHtml(adminUserMeta(user))}</span>
         </div>
         <form class="admin-user-access-form" data-admin-user-id="${escapeAttribute(user.id || '')}">
           ${renderAdminRoleSelect({ id: `admin-user-role-${user.id || 'unknown'}`, name: 'userRoleId', value: roleId })}
           <label class="admin-check-row">
             <input name="enabled" type="checkbox"${user?.enabled === false ? '' : ' checked'}>
-            <span>Enabled</span>
+            <span>${escapeHtml(t('Enabled'))}</span>
           </label>
           <div class="admin-user-action-row">
-            <button class="ghost compact-button" type="submit">Save</button>
-            <button class="ghost compact-button" type="button" data-admin-toggle-user-id="${escapeAttribute(user.id || '')}" data-admin-toggle-user-enabled="${user?.enabled === false ? 'true' : 'false'}">${user?.enabled === false ? 'Enable' : 'Disable'}</button>
-            <button class="danger compact-button" type="button" data-admin-delete-user-id="${escapeAttribute(user.id || '')}">Delete</button>
+            <button class="ghost compact-button" type="submit">${escapeHtml(t('Save'))}</button>
+            <button class="ghost compact-button" type="button" data-admin-toggle-user-id="${escapeAttribute(user.id || '')}" data-admin-toggle-user-enabled="${user?.enabled === false ? 'true' : 'false'}">${escapeHtml(t(user?.enabled === false ? 'Enable' : 'Disable'))}</button>
+            <button class="danger compact-button" type="button" data-admin-delete-user-id="${escapeAttribute(user.id || '')}">${escapeHtml(t('Delete'))}</button>
           </div>
         </form>
       </article>
@@ -1320,28 +1591,28 @@ function renderAdminUsers() {
 
 function renderAdminRoles() {
   if (!state.admin.roles.length) {
-    return '<div class="meta">No roles configured.</div>';
+    return `<div class="meta">${escapeHtml(t('No roles configured.'))}</div>`;
   }
   return state.admin.roles.map((role) => `
     <article class="admin-row">
-      <span class="admin-row-main">${escapeHtml(role.name || role.id)}</span>
-      <span class="admin-row-meta">${role.isAdmin ? 'admin' : escapeHtml(role.id || '')}</span>
-      <button class="ghost compact-button" type="button" data-admin-edit-role="${escapeAttribute(role.id || '')}">Edit</button>
+      <span class="admin-row-main" data-i18n-skip>${escapeHtml(role.name || role.id)}</span>
+      <span class="admin-row-meta"${role.isAdmin ? '' : ' data-i18n-skip'}>${role.isAdmin ? escapeHtml(t('admin')) : escapeHtml(role.id || '')}</span>
+      <button class="ghost compact-button" type="button" data-admin-edit-role="${escapeAttribute(role.id || '')}">${escapeHtml(t('Edit'))}</button>
     </article>
   `).join('');
 }
 
 function renderAdminSessions() {
   if (!state.admin.sessions.length) {
-    return '<div class="meta">No sessions found.</div>';
+    return `<div class="meta">${escapeHtml(t('No sessions found.'))}</div>`;
   }
   return state.admin.sessions.map((session) => {
     const owner = adminUserName(session.ownerUserId || session.userId);
     return `
       <article class="admin-row admin-session-row">
         <button class="admin-session-open" type="button" data-admin-session-id="${escapeAttribute(session.id)}">
-          <span class="admin-row-main">${escapeHtml(adminProjectNameById(session.projectId, session.projectDisplayName))}</span>
-          <span class="admin-row-meta">${escapeHtml(`${owner} · ${session.id} · Observer Mode`)}</span>
+          <span class="admin-row-main" data-i18n-skip>${escapeHtml(adminProjectNameById(session.projectId, session.projectDisplayName))}</span>
+          <span class="admin-row-meta"><span data-i18n-skip>${escapeHtml(`${owner} · ${session.id}`)}</span> · ${escapeHtml(t('Observer Mode'))}</span>
         </button>
       </article>
     `;
@@ -1357,13 +1628,13 @@ function renderNewSession() {
       ${renderNewSessionContent()}
     </div>
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderNewSessionContent({ desktop = false } = {}) {
   const sessionTargetPicker = renderNewSessionTargetPicker();
   const startDisabled = isMultiUserMode() && !currentNewProjectId();
-  return `
+  return localizeFragment(`
     ${desktop
       ? `
         <header class="topbar chat-topbar desktop-chat-topbar">
@@ -1395,7 +1666,7 @@ function renderNewSessionContent({ desktop = false } = {}) {
         </div>
       </form>
     </main>
-  `;
+  `);
 }
 
 function renderNewSessionTargetPicker() {
@@ -1430,9 +1701,9 @@ function renderMultiUserNewSessionProjectPicker() {
   return `
         <div class="field">
           <label for="new-project-select">Project</label>
-          <select id="new-project-select" name="projectId">
+          <select id="new-project-select" name="projectId" data-i18n-skip>
             ${projects.map((project) => `
-              <option value="${escapeAttribute(project.id)}"${project.id === currentProjectId ? ' selected' : ''}>${escapeHtml(projectVisibleName(project, project.id))}</option>
+              <option value="${escapeAttribute(project.id)}"${project.id === currentProjectId ? ' selected' : ''} data-i18n-skip>${escapeHtml(projectVisibleName(project, project.id))}</option>
             `).join('')}
           </select>
         </div>
@@ -1457,28 +1728,28 @@ function renderChat() {
       ${renderChatContent()}
     </div>
   `;
-  return shell;
+  return localizeElement(shell);
 }
 
 function renderChatContent({ desktop = false } = {}) {
   const sessionReportsProject = reportProjectForSession(state.currentSession);
   const composerClassName = composerStateClassName();
   const readOnly = isReadOnlySession(state.currentSession);
-  return `
+  return localizeFragment(`
       <header class="topbar chat-topbar${desktop ? ' desktop-chat-topbar' : ''}">
         <div class="chat-nav">
           ${desktop ? '<div class="chat-nav-spacer" aria-hidden="true"></div>' : '<button class="ghost chat-back-button" type="button" id="back-to-list-button" aria-label="Sessions">&lt;</button>'}
           <div class="chat-title-stack">
-            <div class="project-title">${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
+            <div class="project-title" data-i18n-skip>${escapeHtml(projectNameForSession(state.currentSession, state.cwd))}</div>
             ${renderGoalStatus()}
           </div>
           ${renderChatHeaderActions({ readOnly, sessionReportsProject })}
         </div>
       </header>
-      <main class="timeline" id="timeline">${renderTimeline()}</main>
+      <main class="timeline" id="timeline" data-i18n-skip>${renderTimeline()}</main>
       ${readOnly ? renderReadOnlyComposerNotice(state.currentSession) : renderComposer(composerClassName, { desktop })}
       ${renderShareDialog()}
-  `;
+  `);
 }
 
 function renderChatHeaderActions({ readOnly, sessionReportsProject }) {
@@ -1544,11 +1815,11 @@ function renderQueuedMessages() {
     return '';
   }
   return `
-        <div class="queued-messages" aria-label="Queued messages">
+        <div class="queued-messages" aria-label="${escapeAttribute(t('Queued messages'))}" data-i18n-skip>
           ${queued.map((message) => `
             <div class="queued-message-row">
-              <span class="queued-message-text">${escapeHtml(message.text)}</span>
-              <button class="ghost queued-message-delete" type="button" data-queued-message-id="${escapeAttribute(message.id)}" aria-label="Delete queued message">Delete</button>
+              <span class="queued-message-text" data-i18n-skip>${escapeHtml(message.text)}</span>
+              <button class="ghost queued-message-delete" type="button" data-queued-message-id="${escapeAttribute(message.id)}" aria-label="${escapeAttribute(t('Delete queued message'))}">${escapeHtml(t('Delete'))}</button>
             </div>
           `).join('')}
         </div>
@@ -1597,7 +1868,7 @@ function renderGoalStatus() {
   }
   const { status, label } = goalStatusDisplay(goal.status);
   return `
-    <div class="goal-status" data-status="${escapeAttribute(status)}">
+    <div class="goal-status" data-status="${escapeAttribute(status)}" data-i18n-skip>
       <span>${escapeHtml(label)}</span>
       <span class="goal-objective">${escapeHtml(objective)}</span>
     </div>
@@ -1640,11 +1911,12 @@ function normalizeGoalStatus(status) {
 
 function renderPageNav(title, options = {}) {
   const backId = options.backId || 'back-to-list-button';
+  const skipTitleI18n = options.skipTitleI18n === true;
   return `
     <header class="topbar page-topbar">
       <div class="page-nav">
         <button class="ghost page-back-button" type="button" id="${escapeAttribute(backId)}" aria-label="Back">&lt;</button>
-        <div class="page-title">${escapeHtml(title)}</div>
+        <div class="page-title"${skipTitleI18n ? ' data-i18n-skip' : ''}>${escapeHtml(title)}</div>
         <div class="page-nav-spacer" aria-hidden="true"></div>
       </div>
     </header>
@@ -1681,9 +1953,9 @@ function renderMessageEditor({ desktop = false } = {}) {
   const actionButtons = desktop
     ? `<div class="composer-action-buttons">
         <button class="ghost compact-refresh" type="button" id="composer-refresh-button" aria-label="Refresh session">Refresh</button>
-        <button class="primary compact-send" type="submit" id="send-button"${sendDisabled}>Send</button>
+        <button class="primary compact-send" type="submit" id="send-button" aria-label="Send" title="Send"${sendDisabled}>Send</button>
       </div>`
-    : `<button class="primary compact-send" type="submit" id="send-button"${sendDisabled}>Send</button>`;
+    : `<button class="primary compact-send" type="submit" id="send-button" aria-label="Send" title="Send"${sendDisabled}>Send</button>`;
   return `
     <div class="message-editor-shell ${composerClassName}">
       <textarea id="prompt-input" name="prompt" rows="1" placeholder="Message">${escapeHtml(state.prompt)}</textarea>
@@ -1698,7 +1970,7 @@ function renderAttachmentTray() {
     return '';
   }
   return `
-          <div class="attachment-tray" aria-label="Attachments">
+          <div class="attachment-tray" aria-label="${escapeAttribute(t('Attachments'))}" data-i18n-skip>
             ${attachments.map(renderAttachmentChip).join('')}
           </div>
   `;
@@ -1713,11 +1985,11 @@ function renderAttachmentChip(attachment) {
   return `
             <div class="attachment-chip${statusClass}" data-attachment-id="${escapeAttribute(attachment.id || '')}">
               <span class="attachment-main">
-                <span class="attachment-name">${escapeHtml(fileName)}</span>
+                <span class="attachment-name" data-i18n-skip>${escapeHtml(fileName)}</span>
                 <span class="attachment-meta">${escapeHtml(sizeLabel)}</span>
               </span>
-              <span class="attachment-status">${escapeHtml(statusLabel)}</span>
-              <button class="ghost attachment-remove" type="button" data-attachment-remove-id="${escapeAttribute(attachment.id || '')}" aria-label="Remove ${escapeAttribute(fileName)}">x</button>
+              <span class="attachment-status">${escapeHtml(t(statusLabel))}</span>
+              <button class="ghost attachment-remove" type="button" data-attachment-remove-id="${escapeAttribute(attachment.id || '')}" aria-label="${escapeAttribute(t('Remove {fileName}', { fileName }))}">x</button>
             </div>
   `;
 }
@@ -1899,26 +2171,25 @@ function renderSessionCards() {
   const sessions = sortedSessions();
   if (!sessions.length) {
     if (state.sessionsLoading) {
-      return '<div class="empty-state">Loading sessions...</div>';
+      return `<div class="empty-state">${escapeHtml(t('Loading sessions...'))}</div>`;
     }
     const message = state.sortMode === 'favorites' ? 'No favorites yet.' : 'No sessions yet.';
-    return `<div class="empty-state">${message}</div>`;
+    return `<div class="empty-state">${escapeHtml(t(message))}</div>`;
   }
   return sessions.map((session) => `
     <article class="session-card${state.sessionId === session.id ? ' is-active' : ''}">
       <button class="session-card-open" type="button" data-session-id="${escapeAttribute(session.id)}">
         <span class="session-card-main">
-          <span class="session-project">${escapeHtml(projectNameForSession(session))}</span>
-          <span class="session-preview">${escapeHtml(shorten(previewInputForSession(session), 96) || 'No prompt preview')}</span>
+          <span class="session-project" data-i18n-skip>${escapeHtml(projectNameForSession(session))}</span>
+          <span class="session-preview"${firstInputForSession(session) ? ' data-i18n-skip' : ''}>${escapeHtml(firstInputForSession(session))}</span>
         </span>
         <span class="session-card-meta">
-          <span>${escapeHtml(cwdLeafName(session.cwd || '') || 'No cwd')}</span>
           <span>${escapeHtml(formatShortDateTime(lastInputAtForSession(session)))}</span>
         </span>
       </button>
       <div class="session-card-actions">
-        <button class="ghost compact-button session-favorite" type="button" data-session-favorite-id="${escapeAttribute(session.id)}" aria-pressed="${String(isFavoriteSession(session))}">${isFavoriteSession(session) ? 'Unfavorite' : 'Favorite'}</button>
-        <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">Archive</button>
+        <button class="ghost compact-button session-favorite" type="button" data-session-favorite-id="${escapeAttribute(session.id)}" aria-pressed="${String(isFavoriteSession(session))}">${escapeHtml(t(isFavoriteSession(session) ? 'Unfavorite' : 'Favorite'))}</button>
+        <button class="ghost compact-button session-archive" type="button" data-session-archive-request-id="${escapeAttribute(session.id)}">${escapeHtml(t('Archive'))}</button>
       </div>
     </article>
   `).join('');
@@ -1934,8 +2205,8 @@ function renderArchiveConfirmModal() {
       <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-confirm-title">
         <div>
           <h2 id="archive-confirm-title">Archive session?</h2>
-          <p class="meta">${escapeHtml(projectNameForSession(session))}</p>
-          <p class="meta">${escapeHtml(shorten(previewInputForSession(session), 120) || 'No prompt preview')}</p>
+          <p class="meta" data-i18n-skip>${escapeHtml(projectNameForSession(session))}</p>
+          <p class="meta"${previewInputForSession(session) ? ' data-i18n-skip' : ''}>${escapeHtml(shorten(previewInputForSession(session), 120) || 'No prompt preview')}</p>
         </div>
         <div class="actions">
           <button class="ghost compact-button" type="button" id="archive-cancel-button">Cancel</button>
@@ -1952,11 +2223,11 @@ function renderPathChoices() {
     return '';
   }
   return `
-    <div class="path-choices">
+    <div class="path-choices" data-i18n-skip>
       ${paths.map((cwd) => `
         <button type="button" class="path-choice" data-cwd-choice="${escapeAttribute(cwd)}">
-          <span>${escapeHtml(projectNameFromCwd(cwd))}</span>
-          <small>${escapeHtml(shorten(cwd, 62))}</small>
+          <span data-i18n-skip>${escapeHtml(projectNameFromCwd(cwd))}</span>
+          <small data-i18n-skip>${escapeHtml(shorten(cwd, 62))}</small>
         </button>
       `).join('')}
     </div>
@@ -2029,13 +2300,13 @@ function renderStopTurnControl() {
 
 function renderTimeline() {
   if (!state.timeline.length) {
-    return '<div class="empty-state">No context yet.</div>';
+    return `<div class="empty-state">${escapeHtml(t('No context yet.'))}</div>`;
   }
   return state.timeline.map((item) => renderTimelineItem(item)).join('');
 }
 
 function renderComposerStatus() {
-  return `<div class="composer-status" data-tone="${escapeAttribute(composerStatusTone())}"><span>${escapeHtml(composerStatusLabel())}</span></div>`;
+  return localizeFragment(`<div class="composer-status" data-tone="${escapeAttribute(composerStatusTone())}"><span>${escapeHtml(composerStatusLabel())}</span></div>`);
 }
 
 function composerStatusLabel() {
@@ -2074,10 +2345,10 @@ function renderTimelineItem(item) {
     return `
       <article class="card message-card ${escapeHtml(item.role)}${item.severity === 'error' ? ' error-message' : ''}">
         <div class="card-header">
-          <span class="card-title">${escapeHtml(item.label)}</span>
-          <span class="card-kind">${escapeHtml(item.meta || '')}</span>
+          <span class="card-title">${escapeHtml(t(item.label))}</span>
+          <span class="card-kind">${escapeHtml(t(item.meta || ''))}</span>
         </div>
-        ${item.severity === 'error' ? '<span class="error-badge">Error</span>' : ''}
+        ${item.severity === 'error' ? `<span class="error-badge">${escapeHtml(t('Error'))}</span>` : ''}
         ${body}
         ${attachments}
       </article>
@@ -2087,8 +2358,8 @@ function renderTimelineItem(item) {
     return `
       <article class="card">
         <div class="card-header">
-          <span class="card-title">${escapeHtml(item.title)}</span>
-          <span class="card-kind">${escapeHtml(item.status || item.batchKind)}</span>
+          <span class="card-title"${item.title === 'Batch' ? '' : ' data-i18n-skip'}>${escapeHtml(item.title === 'Batch' ? t('Batch') : item.title)}</span>
+          <span class="card-kind">${escapeHtml(t(item.status || item.batchKind))}</span>
         </div>
         ${renderSummary(item.summary)}
       </article>
@@ -2096,25 +2367,25 @@ function renderTimelineItem(item) {
   }
   if (item.kind === 'approval') {
     return `
-      <article class="card">
-        <div class="card-header">
-          <span class="card-title">Approval requested</span>
-          <span class="card-kind">${escapeHtml(item.approvalKind)}</span>
-        </div>
-        ${renderSummary(item.summary)}
-        <div class="approval-actions">
-          <button type="button" class="primary" data-approval-action="accept" data-approval-id="${escapeAttribute(item.approvalId)}" ${item.resolved ? 'disabled' : ''}>Accept</button>
-          <button type="button" class="ghost" data-approval-action="accept-for-session" data-approval-id="${escapeAttribute(item.approvalId)}" ${item.resolved ? 'disabled' : ''}>Session</button>
-          <button type="button" class="danger" data-approval-action="deny" data-approval-id="${escapeAttribute(item.approvalId)}" ${item.resolved ? 'disabled' : ''}>Deny</button>
-        </div>
-      </article>
+    <article class="card">
+      <div class="card-header">
+        <span class="card-title">${escapeHtml(t('Approval requested'))}</span>
+        <span class="card-kind" data-i18n-skip>${escapeHtml(item.approvalKind)}</span>
+      </div>
+      ${renderSummary(item.summary)}
+      <div class="approval-actions">
+          <button type="button" class="primary" data-approval-action="accept" data-approval-id="${escapeAttribute(item.approvalId)}" ${item.resolved ? 'disabled' : ''}>${escapeHtml(t('Accept'))}</button>
+          <button type="button" class="ghost" data-approval-action="accept-for-session" data-approval-id="${escapeAttribute(item.approvalId)}" ${item.resolved ? 'disabled' : ''}>${escapeHtml(t('Session'))}</button>
+          <button type="button" class="danger" data-approval-action="deny" data-approval-id="${escapeAttribute(item.approvalId)}" ${item.resolved ? 'disabled' : ''}>${escapeHtml(t('Deny'))}</button>
+      </div>
+    </article>
     `;
   }
   return `
     <article class="card">
       <div class="card-header">
-        <span class="card-title">${escapeHtml(item.title)}</span>
-        <span class="card-kind">${escapeHtml(item.meta || '')}</span>
+        <span class="card-title" data-i18n-skip>${escapeHtml(item.title)}</span>
+        <span class="card-kind" data-i18n-skip>${escapeHtml(item.meta || '')}</span>
       </div>
       <p class="meta">${escapeHtml(item.text || '')}</p>
     </article>
@@ -2134,7 +2405,7 @@ function renderMessageAttachments(attachments) {
 }
 
 function renderMessageAttachment(attachment) {
-  const kindLabel = attachment.kind === 'image' ? 'Image' : 'File';
+  const kindLabel = attachment.kind === 'image' ? t('Image') : t('File');
   const fileName = attachment.fileName || fileNameFromPath(attachment.localPath) || 'upload';
   const meta = [
     typeof attachment.sizeBytes === 'number' && attachment.sizeBytes > 0 ? formatAttachmentSize(attachment.sizeBytes) : '',
@@ -2143,8 +2414,8 @@ function renderMessageAttachment(attachment) {
   return `
             <span class="message-attachment ${attachment.kind === 'image' ? 'is-image' : 'is-file'}">
               <span class="message-attachment-kind">${escapeHtml(kindLabel)}</span>
-              <span class="message-attachment-name">${escapeHtml(fileName)}</span>
-              ${meta ? `<span class="message-attachment-meta">${escapeHtml(meta)}</span>` : ''}
+              <span class="message-attachment-name" data-i18n-skip>${escapeHtml(fileName)}</span>
+              ${meta ? `<span class="message-attachment-meta" data-i18n-skip>${escapeHtml(meta)}</span>` : ''}
             </span>
   `;
 }
@@ -2247,8 +2518,8 @@ function renderWorkDetail(detail) {
     <details class="work-detail" data-work-kind="${escapeAttribute(detail.kind)}">
       <summary>
         <span class="work-event-kind">${escapeHtml(workKindLabel(detail.kind))}</span>
-        <span class="work-event-title">${escapeHtml(detail.title)}</span>
-        <span class="work-event-status">${escapeHtml(detail.status || '')}</span>
+        <span class="work-event-title" data-i18n-skip>${escapeHtml(detail.title)}</span>
+        <span class="work-event-status" data-i18n-skip>${escapeHtml(detail.status || '')}</span>
       </summary>
       <div class="work-detail-body">
         ${body || '<p class="meta">No additional details.</p>'}
@@ -2274,7 +2545,7 @@ function renderWorkSummaryRows(summary) {
     return '';
   }
   return `<div class="work-summary">${entries.map(([key, value]) => `
-    <div class="work-row"><strong>${escapeHtml(startCase(key))}</strong><span>${escapeHtml(shorten(formatSummaryValue(value), 800))}</span></div>
+    <div class="work-row"><strong>${escapeHtml(startCase(key))}</strong><span data-i18n-skip>${escapeHtml(shorten(formatSummaryValue(value), 800))}</span></div>
   `).join('')}</div>`;
 }
 
@@ -2288,8 +2559,8 @@ function renderWorkFileChanges(changes) {
     const stats = formatWorkChangeStats(change);
     return `
       <div class="work-file-change">
-        <span class="work-file-path">${escapeHtml(path)}</span>
-        ${action ? `<span class="work-file-action">${escapeHtml(action)}</span>` : ''}
+        <span class="work-file-path" data-i18n-skip>${escapeHtml(path)}</span>
+        ${action ? `<span class="work-file-action" data-i18n-skip>${escapeHtml(action)}</span>` : ''}
         ${stats ? `<span class="work-file-stats">${escapeHtml(stats)}</span>` : ''}
       </div>
     `;
@@ -2385,12 +2656,12 @@ function workKindLabel(kind) {
 function renderSummary(summary) {
   const entries = Object.entries(summary || {}).filter(([, value]) => hasSummaryValue(value));
   if (!entries.length) {
-    return '<p class="meta">No additional details.</p>';
+    return `<p class="meta">${escapeHtml(t('No additional details.'))}</p>`;
   }
   return `<div class="summary-list">${entries.map(([key, value]) => `
     <div class="summary-item">
-      <strong>${escapeHtml(startCase(key))}</strong>
-      <span>${escapeHtml(formatSummaryValue(value))}</span>
+      <strong>${escapeHtml(t(startCase(key)))}</strong>
+      <span data-i18n-skip>${escapeHtml(formatSummaryValue(value))}</span>
     </div>
   `).join('')}</div>`;
 }
@@ -2414,7 +2685,8 @@ function renderModelOptions(currentValue = state.model) {
   return options.map((option) => {
     const value = option.id || '';
     const selected = value === current ? ' selected' : '';
-    return `<option value="${escapeAttribute(value)}"${selected}>${escapeHtml(option.label)}</option>`;
+    const fallbackLabel = !state.models.length && !current ? t(option.label) : option.label;
+    return `<option value="${escapeAttribute(value)}"${selected} data-i18n-skip>${escapeHtml(fallbackLabel)}</option>`;
   }).join('');
 }
 
@@ -2422,7 +2694,7 @@ function renderOptions(values, current) {
   return values.map((value) => {
     const selected = value === current ? ' selected' : '';
     const label = value === 'xhigh' ? 'xhigh' : startCase(value);
-    return `<option value="${escapeAttribute(value)}"${selected}>${escapeHtml(label)}</option>`;
+    return `<option value="${escapeAttribute(value)}"${selected} data-i18n-skip>${escapeHtml(t(label))}</option>`;
   }).join('');
 }
 
@@ -2520,8 +2792,7 @@ function bindGlobalEvents() {
   const mobileSidebarToggleButton = document.querySelector('#mobile-sidebar-toggle-button');
   if (mobileSidebarToggleButton) {
     mobileSidebarToggleButton.addEventListener('click', () => {
-      state.mobileSidebarOpen = true;
-      render();
+      setMobileSidebarOpen(true);
     });
   }
 
@@ -2531,8 +2802,7 @@ function bindGlobalEvents() {
       if (event.target !== mobileProjectDrawerBackdrop) {
         return;
       }
-      state.mobileSidebarOpen = false;
-      render();
+      setMobileSidebarOpen(false);
     });
   }
 
@@ -2851,6 +3121,13 @@ function bindGlobalEvents() {
     });
   }
 
+  for (const button of document.querySelectorAll('[data-app-language]')) {
+    button.addEventListener('click', () => {
+      applyLanguage(button.getAttribute('data-app-language') || DEFAULT_LANGUAGE);
+      render();
+    });
+  }
+
   const modelSelect = document.querySelector('#model-select');
   if (modelSelect) {
     modelSelect.addEventListener('change', (event) => {
@@ -2908,8 +3185,8 @@ function bindGlobalEvents() {
 
   const siteTitleInput = document.querySelector('#site-title-input');
   if (siteTitleInput) {
-    siteTitleInput.addEventListener('input', (event) => {
-      applySiteTitle(event.target.value);
+    siteTitleInput.addEventListener('change', (event) => {
+      void saveSiteTitle(event.target.value);
     });
   }
 
@@ -3110,7 +3387,7 @@ function syncComposerErrorDisplay() {
     current?.remove?.();
     return;
   }
-  const errorHtml = `<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>`;
+  const errorHtml = localizeFragment(`<div class="composer-error">${escapeHtml(shorten(state.error, 96))}</div>`);
   if (current) {
     current.outerHTML = errorHtml;
     return;
@@ -4184,6 +4461,12 @@ function isMultiUserMode() {
   return state.authSession?.principal?.mode === 'multi';
 }
 
+function canSetSiteTitle() {
+  return state.globalSettings.canSetSiteTitle === true
+    || state.authSession?.principal?.mode === 'single'
+    || state.authSession?.principal?.isAdmin === true;
+}
+
 function requestArchiveSession(sessionId) {
   if (!sessionId || state.pendingTurn) {
     render();
@@ -5041,6 +5324,52 @@ async function refreshReportsList({ renderAfter = true } = {}) {
   }
 }
 
+async function refreshGlobalSettings({ renderAfter = true } = {}) {
+  try {
+    const payload = await apiFetch('/api/settings');
+    applyGlobalSettingsPayload(payload, { renderAfter });
+    return payload;
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
+function applyGlobalSettingsPayload(payload, { renderAfter = true } = {}) {
+  if (!payload) {
+    return null;
+  }
+  const siteTitle = normalizeSiteTitle(payload.settings?.siteTitle);
+  state.globalSettings = {
+    siteTitle,
+    canSetSiteTitle: payload.permissions?.canSetSiteTitle === true,
+    loaded: true,
+  };
+  applySiteTitle(siteTitle, { persist: false });
+  localStorage.removeItem(SITE_TITLE_KEY);
+  if (renderAfter) {
+    render();
+  }
+  return state.globalSettings;
+}
+
+async function saveSiteTitle(siteTitle) {
+  if (!canSetSiteTitle()) {
+    return null;
+  }
+  try {
+    const payload = await apiFetch('/api/settings', {
+      method: 'PATCH',
+      body: { siteTitle },
+    });
+    state.error = '';
+    return applyGlobalSettingsPayload(payload);
+  } catch (error) {
+    handleApiError(error);
+    return null;
+  }
+}
+
 async function refreshProjectsList({ renderAfter = true } = {}) {
   try {
     const payload = await apiFetch('/api/projects');
@@ -5430,13 +5759,22 @@ async function openReportById(reportId, { returnView = state.view } = {}) {
   if (!reportId) {
     return;
   }
-  const normalizedReturnView = normalizeReportReturnView(returnView);
-  const reportReturnSnapshot = normalizedReturnView === 'chat' ? captureTimelineViewport() : null;
+  const desktop = isDesktopLayout();
+  const normalizedReturnView = desktop
+    ? normalizeDesktopReportReturnView(returnView)
+    : normalizeReportReturnView(returnView);
+  const reportReturnSnapshot = !desktop && normalizedReturnView === 'chat' ? captureTimelineViewport() : null;
   if (reportReturnSnapshot && !chatTimelineReturnSnapshot) {
     chatTimelineReturnSnapshot = reportReturnSnapshot;
   }
   state.reportReturnView = normalizedReturnView;
-  state.view = 'report';
+  if (desktop) {
+    state.view = 'sessions';
+    state.desktopOverlay = 'report';
+    state.desktopSettingsOpen = false;
+  } else {
+    state.view = 'report';
+  }
   state.currentReport = state.reports.find((report) => report.id === reportId) || {
     id: reportId,
     title: reportTitleFromId(reportId),
@@ -5470,16 +5808,32 @@ function normalizeReportReturnView(returnView) {
   return 'reports';
 }
 
+function normalizeDesktopReportReturnView(returnView) {
+  if (returnView === 'chat' && state.sessionId) {
+    return 'chat';
+  }
+  return 'reports';
+}
+
 async function openReportByPath(reportPath, { returnView = 'chat' } = {}) {
   if (!reportPath) {
     return;
   }
-  const normalizedReturnView = normalizeReportReturnView(returnView);
-  if (normalizedReturnView === 'chat' && !chatTimelineReturnSnapshot) {
+  const desktop = isDesktopLayout();
+  const normalizedReturnView = desktop
+    ? normalizeDesktopReportReturnView(returnView)
+    : normalizeReportReturnView(returnView);
+  if (!desktop && normalizedReturnView === 'chat' && !chatTimelineReturnSnapshot) {
     chatTimelineReturnSnapshot = captureTimelineViewport();
   }
   state.reportReturnView = normalizedReturnView;
-  state.view = 'report';
+  if (desktop) {
+    state.view = 'sessions';
+    state.desktopOverlay = 'report';
+    state.desktopSettingsOpen = false;
+  } else {
+    state.view = 'report';
+  }
   state.currentReport = reportFromPath(reportPath);
   state.currentReportContent = '';
   state.currentReportLoading = true;
@@ -5527,6 +5881,19 @@ async function toggleReportFavorite(reportId) {
 }
 
 function closeReportViewer() {
+  if (isDesktopLayout()) {
+    const returnToReports = state.reportReturnView === 'reports';
+    state.currentReport = null;
+    state.currentReportContent = '';
+    state.currentReportLoading = false;
+    state.view = 'sessions';
+    state.desktopOverlay = returnToReports ? 'reports' : null;
+    if (!returnToReports) {
+      state.reportProject = '';
+    }
+    render();
+    return;
+  }
   const returnView = state.reportReturnView;
   state.currentReport = null;
   state.currentReportContent = '';
@@ -6711,7 +7078,7 @@ function renderWorkspaceProjectList() {
     {
       key: '',
       id: '',
-      label: 'All Sessions',
+      label: t('All Sessions'),
       sessionCount: state.sessions.length,
       favorite: false,
       source: 'all',
@@ -6727,10 +7094,10 @@ function renderWorkspaceProjectList() {
     return `
     <div class="project-rail-item${canFavorite ? ' has-favorite-control' : ''}${isActive ? ' is-active' : ''}${favorite ? ' is-favorite' : ''}">
       <button class="project-rail-select-button" type="button" data-project-scope-key="${escapeAttribute(project.key)}" aria-pressed="${String(isActive)}">
-        <span class="project-rail-item-main">${escapeHtml(project.label)}</span>
+        <span class="project-rail-item-main"${project.source === 'all' ? '' : ' data-i18n-skip'}>${escapeHtml(project.label)}</span>
         <span class="project-rail-item-meta">${escapeHtml(count)}</span>
       </button>
-      ${canFavorite ? `<button class="project-rail-favorite-button${favorite ? ' is-favorite' : ''}" type="button" data-project-favorite-id="${escapeAttribute(project.id)}" aria-pressed="${String(favorite)}" aria-label="${escapeAttribute(favoriteLabel)}" title="${escapeAttribute(favoriteLabel)}">${favorite ? '★' : '☆'}</button>` : ''}
+      ${canFavorite ? `<button class="project-rail-favorite-button${favorite ? ' is-favorite' : ''}" type="button" data-project-favorite-id="${escapeAttribute(project.id)}" aria-pressed="${String(favorite)}" aria-label="${escapeAttribute(t(favorite ? 'Unfavorite {label}' : 'Favorite {label}', { label: project.label }))}" title="${escapeAttribute(t(favorite ? 'Unfavorite {label}' : 'Favorite {label}', { label: project.label }))}">${favorite ? '★' : '☆'}</button>` : ''}
     </div>
   `;
   }).join('');
@@ -6739,7 +7106,7 @@ function renderWorkspaceProjectList() {
 function renderWorkspaceRailActions({ mobile = false } = {}) {
   const showAdmin = isAdminPrincipal();
   const settingsActive = state.view === 'settings' || state.desktopSettingsOpen;
-  const reportsActive = state.view === 'reports' || state.desktopOverlay === 'reports';
+  const reportsActive = state.view === 'reports' || state.desktopOverlay === 'reports' || state.desktopOverlay === 'report';
   const newActive = state.view === 'new';
   if (mobile) {
     return `
@@ -6767,7 +7134,7 @@ function renderMobileProjectDrawer() {
         <header class="project-rail-header mobile-project-drawer-header">
           <div class="project-rail-brand">${escapeHtml(state.siteTitle)}</div>
         </header>
-        <nav class="project-rail-list">
+        <nav class="project-rail-list" data-i18n-skip>
           ${renderWorkspaceProjectList()}
         </nav>
         <div class="project-rail-footer">
@@ -6776,6 +7143,12 @@ function renderMobileProjectDrawer() {
       </aside>
     </div>
   `;
+}
+
+function setMobileSidebarOpen(open) {
+  state.mobileSidebarOpen = Boolean(open);
+  document.querySelector('#mobile-drawer-backdrop')?.classList.toggle('is-open', state.mobileSidebarOpen);
+  document.querySelector('.mobile-project-drawer')?.classList.toggle('is-open', state.mobileSidebarOpen);
 }
 
 function seedNewSessionTargetFromSelection() {
@@ -7446,6 +7819,193 @@ function normalizeSiteTitle(title) {
 
 function normalizeTheme(theme) {
   return ['dark', 'light', 'sunny', 'forest'].includes(theme) ? theme : DEFAULT_THEME;
+}
+
+function normalizeLanguage(language) {
+  return SUPPORTED_LANGUAGES.includes(language) ? language : DEFAULT_LANGUAGE;
+}
+
+function translateUi(key, language = state.language, params = {}) {
+  const source = String(key || '');
+  const dictionary = UI_TRANSLATIONS[normalizeLanguage(language)] || {};
+  const template = dictionary[source] || source;
+  return Object.entries(params || {}).reduce(
+    (text, [name, value]) => text.replaceAll(`{${name}}`, String(value ?? '')),
+    template,
+  );
+}
+
+function t(key, params = {}) {
+  return translateUi(key, state.language, params);
+}
+
+function translateText(text) {
+  const value = String(text || '');
+  if (!value) {
+    return '';
+  }
+  const exact = t(value);
+  if (exact !== value) {
+    return exact;
+  }
+  return value
+    .replace(/\bObserver Mode\b/gu, t('Observer Mode'))
+    .replace(/\bRead only\b/gu, t('Read only'));
+}
+
+function localizeUiHtml(html) {
+  if (state.language === DEFAULT_LANGUAGE) {
+    return String(html || '');
+  }
+  return localizeUiHtmlOutsideProtectedHtml(String(html || ''));
+}
+
+function localizeUiHtmlOutsideProtectedHtml(html) {
+  const protectedBlocks = [];
+  const protect = (block) => {
+    const token = `__CODEX_WEB_I18N_BLOCK_${protectedBlocks.length}__`;
+    protectedBlocks.push(block);
+    return token;
+  };
+  const tokenized = protectUiContentBlocks(String(html || ''), protect)
+    .replace(/<(pre|code|script|style|iframe)\b[\s\S]*?<\/\1>/giu, protect)
+    .replace(/<textarea\b([^>]*)>([\s\S]*?)<\/textarea>/giu, (_match, attrs, content) => (
+      `<textarea${attrs}>${protect(content)}</textarea>`
+    ));
+  const localized = tokenized
+    .replace(/\s(aria-label|title|placeholder)="([^"]*)"/gu, (_match, name, value) => (
+      ` ${name}="${escapeAttribute(translateText(unescapeBasicHtml(value)))}"`
+    ))
+    .replace(/>([^<>]+)</gu, (_match, text) => {
+      if (/__CODEX_WEB_I18N_BLOCK_\d+__/u.test(text)) {
+        return `>${text}<`;
+      }
+      if (!text.trim()) {
+        return `>${text}<`;
+      }
+      const leading = text.match(/^\s*/u)?.[0] || '';
+      const trailing = text.match(/\s*$/u)?.[0] || '';
+      const body = text.slice(leading.length, text.length - trailing.length);
+      return `>${leading}${escapeHtml(translateText(unescapeBasicHtml(body)))}${trailing}<`;
+    });
+  return restoreProtectedUiContentBlocks(localized, protectedBlocks);
+}
+
+function restoreProtectedUiContentBlocks(html, protectedBlocks) {
+  let result = String(html || '');
+  for (let pass = 0; pass <= protectedBlocks.length; pass += 1) {
+    const next = result.replace(/__CODEX_WEB_I18N_BLOCK_(\d+)__/gu, (token, index) => (
+      protectedBlocks[Number(index)] ?? token
+    ));
+    if (next === result) {
+      return result;
+    }
+    result = next;
+  }
+  return result;
+}
+
+function protectUiContentBlocks(html, protect) {
+  const ranges = findProtectedUiContentRanges(html);
+  let nextHtml = String(html || '');
+  for (const range of ranges.sort((left, right) => right.start - left.start)) {
+    nextHtml = `${nextHtml.slice(0, range.start)}${protect(nextHtml.slice(range.start, range.end))}${nextHtml.slice(range.end)}`;
+  }
+  return nextHtml;
+}
+
+function findProtectedUiContentRanges(html) {
+  const ranges = [];
+  const stack = [];
+  const tagPattern = /<\/?([a-z][\w:-]*)\b[^>]*>/giu;
+  const voidTags = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+  let match;
+  while ((match = tagPattern.exec(html))) {
+    const tag = match[0];
+    const tagName = String(match[1] || '').toLowerCase();
+    const closing = /^<\//u.test(tag);
+    const selfClosing = /\/\s*>$/u.test(tag) || voidTags.has(tagName);
+    if (!closing && !selfClosing) {
+      stack.push({
+        tagName,
+        start: match.index,
+        protect: hasHtmlAttribute(tag, 'data-i18n-skip') || isProtectedUiContentTag(tagName, tag),
+      });
+      continue;
+    }
+    if (!closing) {
+      continue;
+    }
+    for (let index = stack.length - 1; index >= 0; index -= 1) {
+      if (stack[index].tagName !== tagName) {
+        continue;
+      }
+      const opening = stack.splice(index, 1)[0];
+      if (opening.protect) {
+        ranges.push({ start: opening.start, end: tagPattern.lastIndex });
+      }
+      break;
+    }
+  }
+  return ranges
+    .sort((left, right) => (left.start - right.start) || (right.end - left.end))
+    .filter((range, index, sortedRanges) => (
+      !sortedRanges.some((other, otherIndex) => (
+        otherIndex < index && other.start <= range.start && range.end <= other.end
+      ))
+    ));
+}
+
+function isProtectedUiContentTag(tagName, tag) {
+  if (tagName === 'p') {
+    return hasHtmlClass(tag, 'message-text');
+  }
+  return tagName === 'div'
+    && hasHtmlClass(tag, 'markdown-body')
+    && (hasHtmlClass(tag, 'message-text') || hasHtmlClass(tag, 'report-document'));
+}
+
+function hasHtmlClass(tag, className) {
+  const match = String(tag || '').match(/\sclass=(["'])(.*?)\1/iu);
+  if (!match) {
+    return false;
+  }
+  return match[2].split(/\s+/u).includes(className);
+}
+
+function hasHtmlAttribute(tag, attributeName) {
+  const escapedName = String(attributeName || '').replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  return new RegExp(`\\s${escapedName}(?:\\s|=|>|/)`, 'iu').test(String(tag || ''));
+}
+
+function localizeElement(element) {
+  if (element?.innerHTML !== undefined) {
+    element.innerHTML = localizeUiHtml(element.innerHTML);
+  }
+  return element;
+}
+
+function localizeFragment(html) {
+  return localizeUiHtml(html);
+}
+
+function unescapeBasicHtml(value) {
+  return String(value || '')
+    .replace(/&quot;/gu, '"')
+    .replace(/&#39;/gu, "'")
+    .replace(/&lt;/gu, '<')
+    .replace(/&gt;/gu, '>')
+    .replace(/&amp;/gu, '&');
+}
+
+function applyLanguage(language, options = {}) {
+  const nextLanguage = normalizeLanguage(language);
+  state.language = nextLanguage;
+  document.documentElement.lang = nextLanguage;
+  document.documentElement.dataset.language = nextLanguage;
+  if (options.persist !== false) {
+    localStorage.setItem(LANGUAGE_KEY, nextLanguage);
+  }
 }
 
 function normalizeMessageFontSize(size) {

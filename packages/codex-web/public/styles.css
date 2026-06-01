@@ -15,6 +15,7 @@
   --composer-offset: 320px;
   --message-font-size: 15px;
   --message-heading-font-size: 14px;
+  --session-summary-line-height: 1.35em;
   color-scheme: dark;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -1124,12 +1125,21 @@ button:disabled {
   font-size: 12px;
 }
 
-.session-preview,
 .session-card-meta span,
 .path-choice small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-preview {
+  min-height: calc(var(--session-summary-line-height) * 2);
+  line-height: var(--session-summary-line-height);
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .session-card-meta {

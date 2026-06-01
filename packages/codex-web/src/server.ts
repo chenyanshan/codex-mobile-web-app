@@ -70,6 +70,7 @@ interface AuthenticatedRequestContext {
 interface CodexWebIdentityStoreLike {
   readState(): Promise<CodexWebIdentityState>;
   setMultiUserEnabled?(enabled: boolean): Promise<CodexWebIdentityState>;
+  setSiteTitle?(siteTitle: string): Promise<CodexWebIdentityState>;
   ensureBootstrapAdminFromPasswordHash?: FileIdentityStore['ensureBootstrapAdminFromPasswordHash'];
   upsertProject?(project: CodexWebProject): Promise<CodexWebProject>;
   upsertRole?(role: CodexWebRole): Promise<CodexWebRole>;
@@ -397,6 +398,26 @@ async function handleRequest({
   if (pathname === '/api/auth/logout' && method === 'POST') {
     await auth.logout(authContext.token);
     writeJson(response, 200, { ok: true });
+    return;
+  }
+
+  if (pathname === '/api/settings' && method === 'GET') {
+    writeJson(response, 200, publicSettingsPayload(identityState, principal));
+    return;
+  }
+
+  if (pathname === '/api/settings' && method === 'PATCH') {
+    if (!canSetSiteTitle(principal)) {
+      writeJson(response, 403, { error: 'forbidden' });
+      return;
+    }
+    if (typeof identityStore?.setSiteTitle !== 'function') {
+      writeJson(response, 501, { error: 'not_supported' });
+      return;
+    }
+    const body = await readJsonBody(request);
+    const updatedState = await identityStore.setSiteTitle(String(body.siteTitle ?? ''));
+    writeJson(response, 200, publicSettingsPayload(updatedState, principal));
     return;
   }
 
@@ -1456,6 +1477,24 @@ function presentAdminUser(user: CodexWebUser): Record<string, unknown> {
     directProjectGrants: user.directProjectGrants,
     favoriteProjectIds: user.favoriteProjectIds,
   };
+}
+
+function publicSettingsPayload(
+  identityState: CodexWebIdentityState | null,
+  principal: CodexWebPrincipal,
+): Record<string, unknown> {
+  return {
+    settings: {
+      siteTitle: identityState?.settings.siteTitle || 'Codex Web',
+    },
+    permissions: {
+      canSetSiteTitle: canSetSiteTitle(principal),
+    },
+  };
+}
+
+function canSetSiteTitle(principal: CodexWebPrincipal): boolean {
+  return principal.mode === 'single' || principal.isAdmin === true;
 }
 
 function normalizeRoleProjectGrants(value: unknown): Array<{

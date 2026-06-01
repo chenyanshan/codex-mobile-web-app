@@ -823,6 +823,66 @@ test('admin settings and project management APIs require admin principal', async
   }
 });
 
+test('global site title settings are readable by users and writable only by admin or single-user principals', async () => {
+  const identityStore = await createIdentityStore();
+  const runtime = runtimeStub();
+  const server = createCodexWebServer({
+    auth: authFor({
+      alice: { userId: 'user_alice', username: 'alice', roleIds: [], isAdmin: false, mode: 'multi' },
+      admin: { userId: 'user_admin', username: 'admin', roleIds: ['role_admin'], isAdmin: true, mode: 'multi' },
+      single: { userId: 'local-admin', username: 'local-admin', roleIds: ['admin'], isAdmin: true, mode: 'single' },
+    }),
+    identityStore,
+    runtime: runtime as any,
+    config: createConfig(),
+  });
+  await server.start();
+  try {
+    const readable = await fetch(`${server.baseUrl}/api/settings`, {
+      headers: { Authorization: 'Bearer alice' },
+    });
+    assert.equal(readable.status, 200);
+    assert.deepEqual(await readable.json(), {
+      settings: { siteTitle: 'Codex Web' },
+      permissions: { canSetSiteTitle: false },
+    });
+
+    const forbidden = await fetch(`${server.baseUrl}/api/settings`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer alice', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ siteTitle: 'Alice Title' }),
+    });
+    assert.equal(forbidden.status, 403);
+
+    const adminUpdate = await fetch(`${server.baseUrl}/api/settings`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ siteTitle: 'Admin Title' }),
+    });
+    assert.equal(adminUpdate.status, 200);
+    assert.deepEqual(await adminUpdate.json(), {
+      settings: { siteTitle: 'Admin Title' },
+      permissions: { canSetSiteTitle: true },
+    });
+
+    const singleUpdate = await fetch(`${server.baseUrl}/api/settings`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer single', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ siteTitle: 'Single Title' }),
+    });
+    assert.equal(singleUpdate.status, 200);
+    assert.deepEqual(await singleUpdate.json(), {
+      settings: { siteTitle: 'Single Title' },
+      permissions: { canSetSiteTitle: true },
+    });
+
+    const state = await identityStore.readState();
+    assert.equal(state.settings.siteTitle, 'Single Title');
+  } finally {
+    await server.stop();
+  }
+});
+
 test('admin can create roles and users with project assignments', async () => {
   const identityStore = await createIdentityStore();
   const runtime = runtimeStub();

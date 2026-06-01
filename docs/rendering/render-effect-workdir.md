@@ -1,6 +1,6 @@
 # Render Effect Report
 
-位置：`/Users/chenyanshan/Documents/vibecoding/codex-mobile-web-app/render-effect-workdir.md`
+位置：`/Users/chenyanshan/Documents/vibecoding/codex-mobile-web-app/docs/rendering/render-effect-workdir.md`
 
 ## 目的
 

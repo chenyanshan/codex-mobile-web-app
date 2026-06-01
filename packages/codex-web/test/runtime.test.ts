@@ -1728,6 +1728,65 @@ test('runtime readSession exposes backend-managed turn failure timeline entries'
   assert.equal(errorEntry?.severity, 'error');
 });
 
+test('runtime anchors failed turn errors after the newly persisted user message', async () => {
+  const timelinePath = `/tmp/codex-web-runtime-timeline-${process.pid}-${Date.now()}-failed-anchor.json`;
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_failed_anchor')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_failed_anchor', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_failed_anchor'),
+      turns: [
+        {
+          id: 'turn_old',
+          status: 'completed',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Earlier question' },
+            { type: 'message', role: 'assistant', phase: null, text: 'Earlier answer' },
+          ],
+        },
+        {
+          id: 'turn_403',
+          status: 'completed',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Trigger auth failure' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_403', threadId: 'thread_failed_anchor' });
+      throw new Error('unexpected status 403 Forbidden');
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+    timelineStore: new FileSessionTimelineStore({ timelinePath }),
+  });
+
+  const started = await runtime.startTurn('thread_failed_anchor', { text: 'Trigger auth failure' });
+  assert.equal(started.turnId, 'turn_403');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const session = await runtime.readSession('thread_failed_anchor');
+  assert.deepEqual(session?.timeline.map((item) => item.text), [
+    'Earlier question',
+    'Earlier answer',
+    'Trigger auth failure',
+    'unexpected status 403 Forbidden',
+  ]);
+});
+
 test('runtime upserts backend-managed session timeline entries by id', async () => {
   const timelinePath = `/tmp/codex-web-runtime-timeline-${process.pid}-${Date.now()}-upsert.json`;
   const client: CodexWebRuntimeClient = {
@@ -2077,6 +2136,57 @@ test('runtime uses completed turn id when start callback is missing', async () =
     'assistant.final',
     'turn.completed',
   ]);
+});
+
+test('runtime keeps partial provider turn results active instead of completing them', async () => {
+  const client: CodexWebRuntimeClient = {
+    listModels: async () => [],
+    readUsage: async (): Promise<ProviderUsageReport | null> => null,
+    listThreads: async () => ({ items: [createThread('thread_partial')], nextCursor: null }),
+    startThread: async () => ({ threadId: 'thread_partial', cwd: '/workspace', title: 'Thread' }),
+    readThread: async () => ({
+      ...createThread('thread_partial'),
+      turns: [
+        {
+          id: 'turn_partial',
+          status: 'in_progress',
+          error: null,
+          items: [
+            { type: 'message', role: 'user', phase: null, text: 'Keep working' },
+          ],
+        },
+      ],
+    }),
+    writeConfigValue: async () => {},
+    startTurn: async ({ onTurnStarted }): Promise<ProviderTurnResult> => {
+      await onTurnStarted?.({ turnId: 'turn_partial', threadId: 'thread_partial' });
+      return {
+        outputText: '',
+        outputState: 'partial',
+        previewText: 'Still thinking',
+        status: null,
+        turnId: 'turn_partial',
+        threadId: 'thread_partial',
+      };
+    },
+    interruptTurn: async () => {},
+    respondToApproval: async () => {},
+  };
+
+  const runtime = new CodexWebRuntime({
+    codexBin: 'codex',
+    defaultCwd: '/workspace',
+    client,
+    eventBus: new CodexWebEventBus(),
+  });
+
+  const started = await runtime.startTurn('thread_partial', { text: 'hi' });
+  assert.equal(started.turnId, 'turn_partial');
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const events = runtime.getTurnEvents('turn_partial').map((entry) => entry.event.type);
+  assert.deepEqual(events, ['turn.started']);
+  assert.equal((await runtime.readSession('thread_partial'))?.activeTurnId, 'turn_partial');
 });
 
 test('runtime emits command and file work events from native work callbacks', async () => {
