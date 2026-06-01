@@ -577,6 +577,30 @@ button:disabled {
   align-content: start;
 }
 
+.shared-session-shell,
+.shared-session-page {
+  width: 100%;
+  min-height: 100dvh;
+  background: var(--bg);
+}
+
+.shared-session-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.shared-session-timeline {
+  padding: calc(env(safe-area-inset-top, 0px) + 14px) 10px calc(env(safe-area-inset-bottom, 0px) + 18px);
+  scroll-padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 18px);
+}
+
+.shared-session-empty {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
 .session-list,
 .new-session-page,
 .app-settings-page {

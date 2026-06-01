@@ -1118,6 +1118,55 @@ test('share routes load public session history without auth and render read-only
   assert.doesNotMatch(html, /id="prompt-input"/u);
 });
 
+test('share routes render only the shared conversation without workspace navigation', async () => {
+  const { api } = await loadAppHarness({
+    pathname: '/share/cws_public_token',
+    viewportWidth: 1280,
+    desktopPointer: true,
+    fetch: async (path) => {
+      if (path === '/api/share/cws_public_token/session') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'share',
+            session: {
+              id: 'session_shared',
+              projectDisplayName: 'Private Project',
+              timeline: [
+                { id: 'm1', kind: 'message', role: 'user', label: 'User', meta: 'history', text: 'Shared question' },
+                { id: 'm2', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Shared answer' },
+              ],
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  await api.loadSharedSessionFromLocation();
+
+  api.render();
+  const html = api.context.document.querySelector('#app').innerHTML;
+  assert.match(html, /Shared question/u);
+  assert.match(html, /Shared answer/u);
+  assert.match(html, /class="shared-session-page"/u);
+  assert.doesNotMatch(html, /desktop-workspace/u);
+  assert.doesNotMatch(html, /desktop-project-rail/u);
+  assert.doesNotMatch(html, /desktop-session-pane/u);
+  assert.doesNotMatch(html, /mobile-project-drawer/u);
+  assert.doesNotMatch(html, /back-to-list-button/u);
+  assert.doesNotMatch(html, /session-report-button/u);
+  assert.doesNotMatch(html, /settings-toggle/u);
+  assert.doesNotMatch(html, /read-only-banner/u);
+  assert.doesNotMatch(html, /id="prompt-input"/u);
+  assert.doesNotMatch(html, /id="send-button"/u);
+  assert.doesNotMatch(html, /Reports/u);
+  assert.doesNotMatch(html, /Sessions/u);
+});
+
 test('admin console uses dense mobile-safe management rows', async () => {
   const styles = await readFile(stylesUrl, 'utf8');
 

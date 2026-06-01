@@ -843,6 +843,9 @@ function renderLogin() {
 }
 
 function renderMain() {
+  if (isShareView()) {
+    return renderSharedSessionPage();
+  }
   if (isDesktopWorkspaceView()) {
     return renderDesktopWorkspace();
   }
@@ -865,6 +868,31 @@ function renderMain() {
     return renderChat();
   }
   return renderSessionList();
+}
+
+function isShareView() {
+  return state.authSession?.principal?.mode === 'share'
+    || state.currentSession?.mode === 'share'
+    || isShareRoute();
+}
+
+function renderSharedSessionPage() {
+  const shell = document.createElement('div');
+  shell.className = 'shell shared-session-shell';
+  const loading = state.status === 'Loading session' && !state.currentSession;
+  const errorText = state.error || state.loginError || '';
+  shell.innerHTML = `
+    <div class="shared-session-page">
+      ${state.currentSession ? `
+        <main class="timeline shared-session-timeline" id="timeline" data-i18n-skip>${renderTimeline()}</main>
+      ` : `
+        <main class="shared-session-empty">
+          <div class="empty-state">${escapeHtml(loading ? t('Loading session') : translateText(errorText || 'Shared session not found'))}</div>
+        </main>
+      `}
+    </div>
+  `;
+  return localizeElement(shell);
 }
 
 function renderDesktopWorkspace() {
