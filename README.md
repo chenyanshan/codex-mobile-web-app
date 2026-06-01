@@ -23,6 +23,8 @@ outside this repository.
   file-change batches, approval requests, and runtime errors.
 - Multi-user/RBAC facade for project access, admin management, observer mode,
   and read-only share links.
+- Share links open a dedicated read-only conversation page with the full session
+  context and no workspace navigation.
 - File and image attachments for turns. The backend stores files locally and
   passes safe local paths to Codex.
 - Authenticated report index and report viewer, plus the bundled

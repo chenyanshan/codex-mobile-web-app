@@ -1167,6 +1167,52 @@ test('share routes render only the shared conversation without workspace navigat
   assert.doesNotMatch(html, /Sessions/u);
 });
 
+test('share routes render the full shared session context', async () => {
+  const { api } = await loadAppHarness({
+    pathname: '/share/cws_public_token',
+    fetch: async (path) => {
+      if (path === '/api/share/cws_public_token/session') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'share',
+            session: {
+              id: 'session_shared_full_context',
+              projectDisplayName: 'Project Alpha',
+              timeline: [
+                { id: 'm1', kind: 'message', role: 'user', label: 'User', meta: 'history', text: 'First shared question' },
+                { id: 'm2', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'First shared answer' },
+                { id: 'm3', kind: 'message', role: 'user', label: 'User', meta: 'history', text: 'Second shared question' },
+                { id: 'm4', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Second shared answer' },
+                { id: 'm5', kind: 'message', role: 'user', label: 'User', meta: 'history', text: 'Third shared question' },
+                { id: 'm6', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Third shared answer' },
+                { id: 'm7', kind: 'message', role: 'user', label: 'User', meta: 'history', text: 'Latest shared question' },
+                { id: 'm8', kind: 'message', role: 'assistant', label: 'Assistant', meta: 'history', text: 'Latest shared answer' },
+              ],
+              thread: { turns: [] },
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  await api.loadSharedSessionFromLocation();
+
+  api.render();
+  const html = api.context.document.querySelector('#app').innerHTML;
+  assert.match(html, /First shared question/u);
+  assert.match(html, /First shared answer/u);
+  assert.match(html, /Second shared question/u);
+  assert.match(html, /Second shared answer/u);
+  assert.match(html, /Third shared question/u);
+  assert.match(html, /Third shared answer/u);
+  assert.match(html, /Latest shared question/u);
+  assert.match(html, /Latest shared answer/u);
+});
+
 test('admin console uses dense mobile-safe management rows', async () => {
   const styles = await readFile(stylesUrl, 'utf8');
 

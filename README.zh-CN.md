@@ -21,6 +21,8 @@ tunnel、反向代理不属于本仓库范围。
 - Codex turn 实时流：assistant delta、最终回答、命令批次、文件改动批次、
   approval 请求和 runtime 报错。
 - 多用户/RBAC facade：项目授权、admin 管理、observer mode、只读分享链接。
+- 分享链接会打开独立的只读对话页，展示完整 session 上下文，不显示 workspace
+  导航。
 - turn 文件和图片附件。后端在本机保存文件，并把安全 local path 交给 Codex。
 - 已鉴权 reports 列表和报告查看器，以及仓库自带的 `codex-mobile-report`
   skill。

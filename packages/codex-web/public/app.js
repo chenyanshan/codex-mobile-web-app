@@ -508,7 +508,7 @@ async function loadSharedSessionFromLocationOnce() {
     state.cwd = '';
     state.timelineCache = new Map();
     applySessionSettings(session);
-    restoreTimelineForSession(session);
+    restoreTimelineForSession(session, { fullHistory: true });
     syncRuntimeStatusFromSession(session);
     state.status = 'Ready';
     state.statusTone = 'success';
@@ -6508,9 +6508,16 @@ function saveCurrentTimeline() {
   persistTimelineCache();
 }
 
-function restoreTimelineForSession(session) {
+function restoreTimelineForSession(session, options = {}) {
   resetSessionHistoryWindow();
   const fullHistory = fullHydratedTimelineFromSession(session);
+  if (options.fullHistory) {
+    state.timeline = fullHistory.map((item) => ({ ...item }));
+    setSessionHistoryWindow(fullHistory, 0);
+    state.batches = new Map();
+    state.approvals = new Map();
+    return;
+  }
   const cached = state.timelineCache.get(session.id);
   if (cached) {
     state.batches = new Map(cached.batches);
